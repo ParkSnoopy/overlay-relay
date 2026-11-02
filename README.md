@@ -21,7 +21,7 @@ The full developer reference, including the wire format, message schemas, timers
 Build the image:
 
 ```text
-docker build -t overlay-relay:0.1.0 .
+docker build -t overlay-relay:latest .
 ```
 
 Generate each identity on its client and securely retain the private key.  
@@ -44,7 +44,7 @@ docker run -d --name overlay-relay \
   -e OVERLAY_ALLOWED_HOST=my-client-host \
   -v ./peers-dir:/etc/overlay-relay:ro \
   -v overlay-relay-data:/var/lib/overlay-relay \
-  overlay-relay:0.1.0
+  overlay-relay:latest
 ```
 
 Put `peers.json` inside `./peers-dir`. Mount the directory, not the file. The hub reloads the table when it changes.
@@ -52,8 +52,10 @@ Put `peers.json` inside `./peers-dir`. Mount the directory, not the file. The hu
 ### 2. Use the client module
 
 ```text
-go get github.com/ParkSnoopy/overlay-relay/client@v0.1.0
+go get github.com/ParkSnoopy/overlay-relay/client@latest
 ```
+
+Check that the published client supports wire version 2 before use.  
 
 ```go
 agent := overlayagent.New(overlayagent.Config{

@@ -10,8 +10,10 @@ The module has no daemon and no platform code. Your application supplies the net
 ## Install
 
 ```text
-go get github.com/ParkSnoopy/overlay-relay/client@v0.1.0
+go get github.com/ParkSnoopy/overlay-relay/client@latest
 ```
+
+Check that the published client supports wire version 2 before use.  
 
 Module versions follow the server release. Tags are `client/vX.Y.Z`.
 

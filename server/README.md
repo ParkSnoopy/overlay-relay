@@ -65,12 +65,12 @@ Replace the file atomically (write a temporary file, then rename it over the tar
 The repository root has a `Dockerfile` that builds this crate as a static musl binary on `rust:1-slim` and runs it on `debian:13-slim` as a non-root user:
 
 ```text
-docker build -t overlay-relay:0.1.0 ..
+docker build -t overlay-relay:latest ..
 docker run -d \
   -e OVERLAY_ALLOWED_HOST=client-host \
   -v ./peers-dir:/etc/overlay-relay:ro \
   -v overlay-relay-data:/var/lib/overlay-relay \
-  overlay-relay:0.1.0
+  overlay-relay:latest
 ```
 
 - The image sets `OVERLAY_PEERS_PATH=/etc/overlay-relay/peers.json`, `OVERLAY_DATA_DIR=/var/lib/overlay-relay`, `OVERLAY_LISTEN_ADDRESS=0.0.0.0:6697`.
