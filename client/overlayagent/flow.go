@@ -35,7 +35,7 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 	if !peer {
 		return nil, errors.New(overlay.ErrUnavailable)
 	}
-	hello := &overlay.Hello{Version: overlay.Version, Kind: overlay.KindOpen, Token: a.token, Proto: proto, Dst: ip.String(), Port: dst.Port()}
+	hello := &overlay.Hello{Version: overlay.Version, Kind: overlay.KindOpen, Proto: proto, Dst: ip.String(), Port: dst.Port()}
 	a.offer(ctx, hello, true)
 	conn, err := a.cfg.Dial(ctx)
 	if err != nil {
@@ -92,7 +92,7 @@ func (a *Agent) serveIncoming(ctx context.Context, in *overlay.Incoming, src net
 	// never reach the listener ahead of the registration.
 	exp := a.expectDirect(in)
 	defer exp.cancel()
-	hello := &overlay.Hello{Version: overlay.Version, Kind: overlay.KindAccept, Token: a.token, ID: in.ID}
+	hello := &overlay.Hello{Version: overlay.Version, Kind: overlay.KindAccept, ID: in.ID}
 	a.offer(ctx, hello, exp != nil)
 	if hello.Endpoint == "" {
 		exp.cancel()

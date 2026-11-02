@@ -13,16 +13,12 @@
 package overlay
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/netip"
-	"strings"
 )
 
 const (
@@ -35,7 +31,7 @@ const (
 	// ListenAddress binds the hub inside its private container network.
 	ListenAddress = "0.0.0.0:" + Port
 	// Version is the only wire version.
-	Version = 1
+	Version = 2
 	// MaxFrame bounds one control frame (JSON payload) in bytes.
 	MaxFrame = 16 << 10
 	// MaxDatagram bounds one UDP payload carried inside a UDP stream.
@@ -68,13 +64,13 @@ const (
 
 // Hello is the first frame on every stream a client opens to the hub.
 type Hello struct {
-	Version int    `json:"version"`
-	Kind    string `json:"kind"`
-	Token   string `json:"token"`
-	Proto   string `json:"proto,omitempty"` // open
-	Dst     string `json:"dst,omitempty"`   // open: destination overlay IP
-	Port    uint16 `json:"port,omitempty"`  // open: destination port
-	ID      string `json:"id,omitempty"`    // accept: Incoming.ID
+	Version   int    `json:"version"`
+	Kind      string `json:"kind"`
+	PublicKey string `json:"public_key"`
+	Proto     string `json:"proto,omitempty"` // open
+	Dst       string `json:"dst,omitempty"`   // open: destination overlay IP
+	Port      uint16 `json:"port,omitempty"`  // open: destination port
+	ID        string `json:"id,omitempty"`    // accept: Incoming.ID
 
 	// Fingerprint is the SHA-256 of the sender's flow certificate, as 64 hex
 	// digits. Sending it offers an end-to-end encrypted flow (open, accept).
@@ -82,6 +78,16 @@ type Hello struct {
 	// Endpoint is the sender's public UDP address, ip:port. Sending it with a
 	// fingerprint offers a direct connection (open, accept).
 	Endpoint string `json:"endpoint,omitempty"`
+}
+
+// Challenge is a fresh nonce issued by the hub for one connection.
+type Challenge struct {
+	Nonce string `json:"nonce"`
+}
+
+// Proof carries a DER-encoded ECDSA signature of the challenge.
+type Proof struct {
+	Signature string `json:"signature"`
 }
 
 // Reply is the hub's answer to Hello and, on a control stream, to Ping.
@@ -138,32 +144,6 @@ type Ping struct {
 // missing, hidden or not allowed, so a requester cannot probe for hidden accounts.
 const ErrUnavailable = "peer unavailable"
 
-// Token derives the account's bearer token from its native VPN credential
-// secret (see the Secret* helpers). The secret itself never leaves the client.
-func Token(secret []byte) string {
-	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte("snoo-box/overlay/v1"))
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-// Verifier is what the server stores for a token: the SHA-256 of the token's bytes.
-func Verifier(token string) (string, error) {
-	raw, err := hex.DecodeString(token)
-	if err != nil || len(raw) != sha256.Size {
-		return "", errors.New("invalid overlay token")
-	}
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:]), nil
-}
-
-// SecretXray is the canonical secret of a VLESS account: its lowercase UUID.
-func SecretXray(uuid string) []byte { return []byte("xray:" + strings.ToLower(uuid)) }
-
-// SecretUserPass is the canonical secret of a Hysteria or TrustTunnel account.
-func SecretUserPass(engine, user, password string) []byte {
-	return []byte(engine + ":" + user + ":" + password)
-}
-
 // State is the client-visible overlay status of one connected session.
 // Available is false with a Reason when the engine or platform cannot carry
 // the overlay; Broadcasting reports the connect-time choice.
@@ -179,8 +159,8 @@ type State struct {
 
 // Account describes one account in the hub's peers file.
 type Account struct {
-	Verifier string `json:"verifier"`
-	Name     string `json:"name"`
+	PublicKey string `json:"public_key"`
+	Name      string `json:"name"`
 }
 
 // Peers is the hub's read-only account table, written by the server manager.
@@ -196,11 +176,11 @@ func (p Peers) Validate() error {
 	}
 	seen := map[string]bool{}
 	for _, account := range p.Accounts {
-		raw, err := hex.DecodeString(account.Verifier)
-		if err != nil || len(raw) != sha256.Size || seen[account.Verifier] || len(account.Name) > 128 {
+		id, err := IdentityID(account.PublicKey)
+		if err != nil || seen[id] || len(account.Name) > 128 {
 			return errors.New("invalid overlay account")
 		}
-		seen[account.Verifier] = true
+		seen[id] = true
 	}
 	return nil
 }

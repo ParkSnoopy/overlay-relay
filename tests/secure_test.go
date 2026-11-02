@@ -121,7 +121,7 @@ type secureEnv struct {
 
 func newSecureAgent(hub string, account account, side secureSide, stun string, tap *hubTap, states chan<- overlay.State, sink *fileSink) *overlayagent.Agent {
 	config := overlayagent.Config{
-		Secret:            account.secret,
+		Identity:          account.key,
 		DisableEncryption: side.plain,
 		Dial: func(ctx context.Context) (net.Conn, error) {
 			var dialer net.Dialer
@@ -157,8 +157,8 @@ func newSecureAgent(hub string, account account, side secureSide, stun string, t
 func startSecureEnv(t *testing.T, alice, bob secureSide) *secureEnv {
 	t.Helper()
 	hubBinary := buildHub(t)
-	aliceAccount := account{name: "alice", secret: overlay.SecretUserPass("hysteria", "alice", "alice-password")}
-	bobAccount := account{name: "bob", secret: overlay.SecretUserPass("hysteria", "bob", "bob-password")}
+	aliceAccount := newAccount(t, "alice")
+	bobAccount := newAccount(t, "bob")
 	hub := startHub(t, hubBinary, overlay.Peers{Version: overlay.Version, Accounts: []overlay.Account{accountEntry(t, aliceAccount), accountEntry(t, bobAccount)}})
 	stun := startSTUN(t)
 

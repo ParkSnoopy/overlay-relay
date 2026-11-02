@@ -7,26 +7,47 @@ import (
 	"testing"
 )
 
-func TestTokenAndVerifierAreStable(t *testing.T) {
-	token := Token(SecretXray("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"))
-	if token != Token(SecretXray("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")) {
-		t.Fatal("xray secret must be case-insensitive")
+func TestIdentityRoundTrip(t *testing.T) {
+	key, err := GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if token == Token(SecretUserPass("hysteria", "a", "b")) {
-		t.Fatal("different accounts must derive different tokens")
+	encoded, err := EncodeIdentity(key)
+	if err != nil {
+		t.Fatal(err)
 	}
-	verifier, err := Verifier(token)
-	if err != nil || len(verifier) != 64 || verifier == token {
-		t.Fatalf("verifier = %q, %v", verifier, err)
+	loaded, err := ParseIdentity(encoded)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err = Verifier("zz"); err == nil {
-		t.Fatal("malformed token accepted")
+	before, err := PublicIdentity(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := PublicIdentity(loaded)
+	if err != nil || before != after {
+		t.Fatal("identity changed on reload")
+	}
+	if _, err := IdentityID("zz"); err == nil {
+		t.Fatal("invalid public key accepted")
+	}
+	if _, err := PublicIdentity(nil); err == nil {
+		t.Fatal("identity without private key accepted")
+	}
+	other, err := GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mismatch := *key
+	mismatch.PublicKey = other.PublicKey
+	if _, err := PublicIdentity(&mismatch); err == nil {
+		t.Fatal("identity with mismatched private key accepted")
 	}
 }
 
 func TestFramesRoundTripAndBounds(t *testing.T) {
 	var buffer bytes.Buffer
-	if err := WriteFrame(&buffer, Hello{Version: Version, Kind: KindOpen, Token: "t", Proto: ProtoTCP, Dst: "10.77.0.2", Port: 22}); err != nil {
+	if err := WriteFrame(&buffer, Hello{Version: Version, Kind: KindOpen, PublicKey: "t", Proto: ProtoTCP, Dst: "10.77.0.2", Port: 22}); err != nil {
 		t.Fatal(err)
 	}
 	var hello Hello
@@ -61,11 +82,18 @@ func TestAssignable(t *testing.T) {
 }
 
 func TestPeersValidate(t *testing.T) {
-	verifier, _ := Verifier(Token([]byte("x")))
-	if err := (Peers{Version: Version, Accounts: []Account{{Verifier: verifier}}}).Validate(); err != nil {
+	key, err := GenerateIdentity()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := (Peers{Version: Version, Accounts: []Account{{Verifier: verifier}, {Verifier: verifier}}}).Validate(); err == nil {
+	public, err := PublicIdentity(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (Peers{Version: Version, Accounts: []Account{{PublicKey: public}}}).Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Peers{Version: Version, Accounts: []Account{{PublicKey: public}, {PublicKey: public}}}).Validate(); err == nil {
 		t.Fatal("duplicate account accepted")
 	}
 }

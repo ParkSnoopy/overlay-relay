@@ -9,7 +9,7 @@ Each account gets a stable private IPv4 address in `10.77.0.0/16`. Accounts that
 | Part | Language | Location | Purpose |
 |---|---|---|---|
 | Hub (`overlay-hub`) | Rust | [`server/`](server/README.md) | Admits connections, authenticates accounts, relays flows. |
-| Client module | Go | [`client/`](client/README.md) | Wire types, token derivation, and a reference agent. |
+| Client module | Go | [`client/`](client/README.md) | Wire types, identity keys, and a reference agent. |
 | Container image | Docker | [`Dockerfile`](Dockerfile) | Builds the hub as a non-root image. |
 
 The full developer reference, including the wire format, message schemas, timers, limits, and a checklist for writing a client in another language, is in [`docs/LLM_WIKI.md`](docs/LLM_WIKI.md).
@@ -24,17 +24,23 @@ Build the image:
 docker build -t overlay-relay:0.1.0 .
 ```
 
-Create a peers table. Each account's secret is the same value its client uses. The example tool derives the verifiers:
+Generate each identity on its client and securely retain the private key.  
+Transfer only its public key to the hub operator.  
+Create a peers table from the enrolled public keys:
 
 ```text
-cd examples && go run ./peers alice=hysteria:alice:alice-pass bob=xray:bob-secret > ./peers.json
+cd examples
+go run ./peers keygen alice.pem
+go run ./peers 'alice=<alice-public-key>' > ./peers.json
 ```
 
+Use an authenticated VPN between every client and the hub.  
+The protocol does not authenticate the hub or protect its transport against an active intermediary.  
+Connect the hub container to the VPN network before clients attempt to reach it.  
 Start the hub. `OVERLAY_ALLOWED_HOST` lists the host names whose addresses may connect:
 
 ```text
 docker run -d --name overlay-relay \
-  -p 6697:6697 \
   -e OVERLAY_ALLOWED_HOST=my-client-host \
   -v ./peers-dir:/etc/overlay-relay:ro \
   -v overlay-relay-data:/var/lib/overlay-relay \
@@ -51,10 +57,10 @@ go get github.com/ParkSnoopy/overlay-relay/client@v0.1.0
 
 ```go
 agent := overlayagent.New(overlayagent.Config{
-    Secret: []byte("hysteria:alice:alice-pass"),
+    Identity: identity, // load the enrolled P-384 private key
     Dial: func(ctx context.Context) (net.Conn, error) {
         var d net.Dialer
-        return d.DialContext(ctx, "tcp", "hub.example.net:6697")
+        return d.DialContext(ctx, "tcp", "hub.example.net:6697") // through the authenticated VPN
     },
     DialLocal: func(ctx context.Context, proto string, port uint16, src netip.Addr) (net.Conn, error) {
         var d net.Dialer
@@ -71,7 +77,7 @@ See [`client/README.md`](client/README.md) for the full API.
 
 ## Examples and tests
 
-- [`examples/peers`](examples/peers): builds a peers table from `name=secret` arguments.
+- [`examples/peers`](examples/peers): generates identity keys and builds a peers table from public keys.
 - [`examples/client`](examples/client): runs one agent, prints its state, and optionally sends one line to a peer.
 - [`tests/`](tests): builds the hub, starts it as a process, and checks registration, peers, a TCP round trip, and refusal of an unknown address against the Go agent.
 
@@ -95,7 +101,9 @@ Go modules are joined by the root [`go.work`](go.work). Run Go commands from a m
 
 ## Versioning
 
-The release version is the `version` field in [`server/Cargo.toml`](server/Cargo.toml). Go module tags follow it as `client/vX.Y.Z`. The wire version is separate: messages carry `"version": 1`.
+The release version is the `version` field in [`server/Cargo.toml`](server/Cargo.toml). Go module tags follow it as `client/vX.Y.Z`. The wire version is separate: messages carry `"version": 2`.
+
+Version 2 is incompatible with token-based clients and peers tables. Re-enroll every client with its public key. Existing token-derived address assignments do not identify the new keys, so assigned addresses can change.
 
 ## License
 

@@ -3,11 +3,11 @@
 Base: `server/` (crate `overlay-relay`, binary `overlay-hub`).
 Client counterpart: [client](client.md).
 The snoo-box server manager owns the container lifecycle and writes the peers table.
-The [wire contract](../client/overlay/overlay.go) owns frames, datagram records, the address space and token derivation.
+The [wire contract](../client/overlay/overlay.go) owns frames, datagram records, the address space and identity messages.
 
 The hub is an authenticated rendezvous and byte relay between VPN accounts of one managed server that chose to broadcast.
 `overlay-hub` runs it inside its container. The readiness probe is `server-helper overlay-probe <host:port>` in snoo-box, built on `client/overlayagent.Probe`.
-The hub never learns credentials: it stores only verifiers, `overlay.Verifier(token)`, and a client proves an account by sending the token it derived from its native credential.
+The hub enrolls public P-384 keys. A client proves possession of its private key by signing a fresh hub challenge. Each hub connection must use an authenticated VPN because the handshake does not authenticate the hub or prevent active interception.
 
 ## Inputs
 
@@ -34,7 +34,7 @@ Allocations are written atomically with mode `0600` to `ips.json` keyed by verif
 ## Protocol
 
 The client sends a `Hello` within 10 seconds, and every frame it reads is bounded by `overlay.MaxFrame` (16 KiB on the wire).
-The hub computes the verifier of the token, looks it up with a constant-time comparison and answers an unknown token with `unauthorized` before closing.
+The hub validates the public key, issues a fresh challenge, verifies its signature and looks up the public-key digest. It answers an unknown identity with `unauthorized` before closing.
 
 - `control` registers the account as broadcasting and replies with its address and name.
   A new control stream for the same account replaces and closes the old one.
@@ -44,7 +44,7 @@ The hub computes the verifier of the token, looks it up with a constant-time com
   The hub then pushes an `Incoming` event with a random 128-bit identifier to the destination and waits up to 10 seconds for its `accept` stream.
   Both streams then receive `ok` and are spliced: TCP with half-close, and UDP as raw datagram records, which preserves framing.
   An unknown address, a hidden account, the requester itself, a missing accept and a requester that is not broadcasting all receive the identical `unavailable` reply.
-- `accept` must carry the destination's token and a pending identifier, and each identifier is accepted once.
+- `accept` must authenticate the destination's identity and carry a pending identifier, and each identifier is accepted once.
   Anything else receives `unauthorized`.
 
 `open` and `accept` may carry an offer: `fingerprint` (64 hex digits, the SHA-256 of the agent's flow certificate) and `endpoint` (a public `ip:port`).
@@ -64,7 +64,7 @@ Hidden accounts never appear in a `Peers` event, an error or a log line, and an 
 An account has at most 256 concurrent relayed flows, and a destination has at most four pending incoming requests.
 An idle UDP flow closes after two minutes, and TCP has no idle limit.
 A control stream whose outgoing queue is full is dropped rather than blocking the hub.
-Logs contain only counts and errors at DEBUG, never tokens, verifiers, payloads or names.
+Logs contain only counts and errors at DEBUG, never private keys, identifiers, payloads or names.
 
 ## Verification
 

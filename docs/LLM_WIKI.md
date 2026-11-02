@@ -20,10 +20,10 @@ Where this document and the code disagree, the code in `server/` (hub) and `clie
 | Term | Meaning |
 |---|---|
 | Hub | The server process. Accepts TCP connections, authenticates them, and relays. |
-| Account | One identity, identified by its verifier. Has a display name and an overlay address. |
-| Secret | Client-side credential bytes. Never sent to the hub. |
-| Token | 32-byte bearer value derived from the secret. Sent to the hub as 64 lowercase hex digits. |
-| Verifier | SHA-256 of the token's 32 raw bytes. Stored in the peers table as 64 lowercase hex digits. |
+| Account | One public-key identity. Has a display name and an overlay address. |
+| Private key | Persistent client-side P-384 identity key. Never sent to the hub. |
+| Public key | Uncompressed P-384 point enrolled in the peers table. |
+| Verifier | SHA-256 of the 97-byte public key, used internally as an account identifier. |
 | Peers table | Read-only JSON file on the hub that lists the accounts. |
 | Control stream | Long-lived TCP connection that registers a broadcasting account and receives events. |
 | Open stream | TCP connection that requests a flow to a peer. |
@@ -40,7 +40,7 @@ server/            Rust hub crate "overlay-relay", binary "overlay-hub"
   src/protocol.rs  wire constants and message types
   tests/hub.rs     integration tests over real loopback sockets
 client/            Go module github.com/ParkSnoopy/overlay-relay/client
-  overlay/         wire types, frame codec, token/verifier helpers, Peers validation
+  overlay/         wire types, frame codec, identity helpers, Peers validation
   overlayagent/    reference agent: registration, peers, outbound and inbound flows, probe
 tests/             Go tests that run the Rust hub and the Go agent together
 examples/          Go programs: peers table generator, client program
@@ -48,48 +48,21 @@ docs/              this wiki, server and client notes, release gate
 Dockerfile         builds the server image
 ```
 
-## 4. Identity: secrets, tokens, verifiers
+## 4. Identity: P-384 key pairs
 
-The client holds a **secret** (bytes). The derivation is fixed:
+Generate one P-384 key pair on each client. Persist the private key securely and reuse it across connections. Enroll only the public key with the hub. The Go helpers provide PKCS#8 PEM encoding and parsing. The hub identifies the account by SHA-256 of the 97 raw uncompressed public-key bytes.
 
-```
-token    = lowercase_hex( HMAC-SHA256(key = secret, message = "snoo-box/overlay/v1") )   // 64 hex digits
-verifier = lowercase_hex( SHA-256( hex_decode(token) ) )                                  // 64 hex digits
-```
-
-- The message `snoo-box/overlay/v1` is a fixed protocol label. It is part of the wire contract and must be used byte-for-byte as written. Do not change it.
-- The hub stores only the verifier. It cannot recover the token or the secret from it.
-- The secret must never be sent on the wire. Only the token is sent.
-
-Test vector (verified against the reference implementation):
-
-| Input | Value |
-|---|---|
-| secret (ASCII) | `hysteria:alice:alice-pass` |
-| token | `b4e68d9cca310616f5359d5ff5c9e82fb7e4e880a6fb83a0b0a7a1b01b6e1c70` |
-| verifier | `c061fc54bb1a7534356bbe32c554c1a3985851a3d1749107b677793ffcb5ba9f` |
-
-The library helpers (`overlay.Token`, `overlay.Verifier`, `overlay.SecretUserPass`, `overlay.SecretXray`) implement these conventions. Any secret format works as long as the client and the operator who writes the peers table use the same bytes.
+Every hub stream must traverse an authenticated VPN. The challenge authenticates the client to the hub, not the hub to the client. It does not protect a connection from an active intermediary. The caller and deployment must enforce the VPN boundary.
 
 ### Peers table (hub input)
 
-A JSON file read by the hub:
-
-```json
-{
-  "version": 1,
-  "accounts": [
-    { "verifier": "c061fc54bb1a7534356bbe32c554c1a3985851a3d1749107b677793ffcb5ba9f", "name": "alice" },
-    { "verifier": "d7a251289707b2f388411c5aa04961a52d12ab890b786e3a3cbdc2c04c5fca02", "name": "bob" }
-  ]
-}
-```
+A JSON file with `version` and an `accounts` array. Each account has `public_key` and `name`. The example tool generates this file from enrolled public keys.
 
 Validation rules (enforced by the hub; a violation makes the whole table invalid):
 
-- `version` must equal `1`.
+- `version` must equal `2`.
 - At most `4096` accounts.
-- Each `verifier` is exactly 64 hex digits and unique.
+- Each `public_key` is a unique hex-encoded uncompressed valid P-384 point, 97 bytes.
 - Each `name` is at most `128` bytes.
 - The file is at most `4 MiB` (4194304 bytes).
 
@@ -108,7 +81,7 @@ The file is read-only to the hub. A writer should replace it atomically (write a
 
 ## 6. Transport and framing
 
-- Transport: TCP to the hub (default `0.0.0.0:6697` on the hub side; clients connect to the hub's host and port).
+- Transport: TCP through an authenticated VPN to the hub (default `0.0.0.0:6697` on the hub side). The overlay does not enforce the VPN.
 - Every stream starts with a **Hello** frame sent by the client.
 - **Frame**: 2-byte unsigned big-endian length `N`, then `N` bytes of UTF-8 JSON.
   - `N` must be `1 <= N <= 16384` (16 KiB). `N = 0` or `N > 16384` is a protocol error.
@@ -124,9 +97,9 @@ All field names are lowercase JSON keys.
 
 | Field | Type | Used by | Meaning |
 |---|---|---|---|
-| `version` | integer | all | Must be `1`. Otherwise the hub closes the stream silently. |
+| `version` | integer | all | Must be `2`. Otherwise the hub closes the stream silently. |
 | `kind` | string | all | `"control"`, `"open"` or `"accept"`. Anything else gets reply `invalid request`. |
-| `token` | string | all | 64 lowercase hex digits (section 4). |
+| `public_key` | string | all | Hex-encoded uncompressed P-384 public key (section 4). |
 | `proto` | string | open | `"tcp"` or `"udp"`. |
 | `dst` | string | open | Destination overlay IPv4 text, for example `"10.77.0.2"`. |
 | `port` | integer | open | Destination port, `1..65535`. `0` or absent is refused. |
@@ -137,6 +110,8 @@ All field names are lowercase JSON keys.
 A malformed or inconsistent offer (bad fingerprint, bad endpoint, endpoint without fingerprint) gets `Reply{ok:false, error:"invalid request"}`. A refused `accept` leaves the pending request claimable.
 
 Optional fields that do not apply to a kind may be omitted. The hub ignores unrelated fields.
+
+After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The client signs the UTF-8 bytes `overlay-relay/auth/v2:` followed by the raw nonce using ECDSA P-384 with SHA-384. It sends `{"signature":"<hex>"}` with the ASN.1 DER signature. The hub verifies the proof and enrollment before issuing the reply. A malformed public key can receive an unauthorized reply without a challenge.
 
 ### 7.2 Reply (hub to client)
 
@@ -180,7 +155,7 @@ Any other content on a control stream ends the control stream (see section 8.1).
 
 ### 8.1 Control stream
 
-1. Client dials the hub, sends `Hello{version:1, kind:"control", token}`.
+1. Client dials through the authenticated VPN, sends `Hello{version:2, kind:"control", public_key}`, and completes the challenge exchange.
 2. Hub replies:
    - Success: `Reply{ok:true, ip, name}`. The account is now registered. The client's address is `ip`.
    - Failure: `Reply{ok:false, error:"unauthorized"}` and the stream closes.
@@ -195,7 +170,7 @@ Writes from the hub to a control stream have a `10` second write deadline. A sta
 
 Preconditions the hub enforces: the requester has an active control stream; the destination has an active control stream; the destination is not the requester; each side has fewer than `256` active flows; the destination has fewer than `4` pending requests.
 
-1. Client dials the hub, sends `Hello{version:1, kind:"open", token, proto, dst, port}`.
+1. Client dials through the authenticated VPN, sends `Hello{version:2, kind:"open", public_key, proto, dst, port}`, and completes the challenge exchange.
 2. The hub validates `proto`, `dst`, `port`. Any invalid value gets `Reply{ok:false, error:"peer unavailable"}`.
 3. The hub looks up the destination. If the destination is missing, hidden, not connected, the requester itself, or a precondition fails, the reply is `peer unavailable`. This is intentionally identical for every case, so a requester cannot discover hidden accounts.
 4. The hub sends an `incoming` event to the destination's control stream with a fresh random `id` (16 random bytes, 32 hex digits) and waits up to `10` seconds for the destination to answer.
@@ -205,8 +180,8 @@ Preconditions the hub enforces: the requester has an active control stream; the 
 ### 8.3 Accept stream (destination side)
 
 1. The destination receives an `incoming` event `{id, proto, src, port}` on its control stream. `src` is the requester's overlay address. `port` is the destination port requested.
-2. The destination dials the hub and sends `Hello{version:1, kind:"accept", token, id}`. The `id` must be the one from the event.
-3. The hub pairs the stream with the pending request only if the token belongs to the destination account that was asked. Otherwise: `Reply{ok:false, error:"unauthorized"}`.
+2. The destination dials through the authenticated VPN, sends `Hello{version:2, kind:"accept", public_key, id}`, and completes the challenge exchange. The `id` must be the one from the event.
+3. The hub pairs the stream with the pending request only if the authenticated identity belongs to the destination account that was asked. Otherwise: `Reply{ok:false, error:"unauthorized"}`.
 4. The accept stream waits (up to the `10` second accept timeout measured from the incoming event). When the open side is accepted, the accept stream receives `Reply{ok:true}` and switches to relay mode.
 5. If the pending request expired or was refused, the accept stream is closed without a successful reply.
 6. The destination then connects to its local service on `port` (for TCP, a stream; for UDP, a datagram socket). `src` is informational; the application chooses the local target. The reference `LocalDialer` dials the device's own address, so the local service sees this device as its peer, and services bound only to loopback are not reachable through it.
@@ -265,11 +240,11 @@ Exact error strings in `Reply.error`:
 
 | Value | When |
 |---|---|
-| `unauthorized` | Token is malformed or unknown on a control or accept stream. Accept answers this also when the id is unknown, expired, already used, or addressed to another account. |
+| `unauthorized` | Public key or proof is malformed, invalid, or unknown. Accept answers this also when the id is unknown, expired, already used, or addressed to another account. |
 | `peer unavailable` | Open request is invalid, destination is missing or hidden, a precondition fails, or the destination did not accept in time. |
-| `invalid request` | Known token, but `kind` is not `control`, `open` or `accept`. |
+| `invalid request` | Authenticated identity, but `kind` is not `control`, `open` or `accept`. |
 
-A client must not show or log tokens, secrets or verifiers.
+A client must not show or log private keys or account identifiers.
 
 ## 10. Server-side admission (what the client must satisfy)
 
@@ -279,7 +254,7 @@ Before reading any frame, the hub checks the **source address** of every new TCP
 - Unresolvable names are skipped. If no name matches, the connection is closed without any reply.
 - An empty allowed list admits nobody.
 
-Consequence for a new client: the client must reach the hub from a source address that one of the allowed names resolves to. How the packet gets there (VPN tunnel, container network, host networking) is the deployer's choice.
+The client must reach the hub from an allowed source address over an authenticated VPN. Source-address admission alone does not authenticate the transport.
 
 After admission, the first frame must arrive within `10` seconds. Otherwise the connection is closed silently.
 
@@ -367,7 +342,7 @@ Then: dial the hub, send the open Hello, read the reply. On `ok:true` the stream
 
 ### 13.4 Inbound flow (destination)
 
-- On an `incoming` event, validate: `proto` is `tcp` or `udp`; `port` nonzero; `id` nonempty; `src` assignable. Ignore invalid requests silently (do not log tokens or payloads).
+- On an `incoming` event, validate: `proto` is `tcp` or `udp`; `port` nonzero; `id` nonempty; `src` assignable. Ignore invalid requests silently (do not log private keys or payloads).
 - Enforce the concurrency bound (128). Drop requests over the bound.
 - Dial the hub with the accept Hello. Wait for `ok:true`. Then dial the local service at `port` and relay until either side ends. For UDP, relay datagram records to the local datagram socket.
 
@@ -381,8 +356,8 @@ Then: dial the hub, send the open Hello, read the reply. On `ok:true` the stream
 `overlayagent.Probe(ctx, address)` proves that a hub admits this source and parses frames without any real account:
 
 1. Dial the hub.
-2. Send `Hello{version:1, kind:"control", token:"000...0"}` (64 zeros).
-3. Expect `Reply{ok:false, error:"unauthorized"}`.
+2. Generate a fresh identity, send its version 2 control Hello and answer the challenge.
+3. Expect `Reply{ok:false, error:"unauthorized"}`. Route the probe through the authenticated VPN.
 
 Use it as a health check. Any other reply means a misconfigured hub or an unexpected source.
 
@@ -390,8 +365,8 @@ Use it as a health check. Any other reply means a misconfigured hub or an unexpe
 
 Implement, in order, and test each step against the Rust hub (section 15):
 
-1. **Secret to token**: HMAC-SHA256 with the label from section 4. Check against the test vector.
-2. **Verifier**: SHA-256 of the token's raw 32 bytes. Check against the test vector.
+1. **Identity**: Generate and securely persist a P-384 key pair. Enroll the public key.
+2. **Authentication**: Sign the fresh challenge as specified in section 7.1 on each hub stream.
 3. **Framing**: 2-byte big-endian length plus JSON. Reject `0` and `> 16384`.
 4. **Control stream**: Hello, read Reply, store `ip` and `name`. Then loop: read events, send a ping every 30 s, drop the connection after 75 s without frames.
 5. **Peers**: replace the list on each `peers` event. Filter your own address out if it appears.
@@ -403,7 +378,7 @@ Implement, in order, and test each step against the Rust hub (section 15):
 
 Keep these rules in any port:
 
-- Never send the secret. Never log tokens, secrets, or verifiers.
+- Never send or log the private key. Never log account identifiers.
 - Do not rely on any field beyond those listed in section 7.
 - Treat unknown events as ignorable, but treat a malformed frame as a dead stream.
 - Keep frame writes under a deadline so a stalled hub cannot pin a task.
@@ -433,10 +408,10 @@ OVERLAY_LISTEN_ADDRESS=127.0.0.1:6697 \
 ./server/target/release/overlay-hub
 ```
 
-Generate a peers table from secrets:
+Generate a peers table from enrolled public keys:
 
 ```text
-cd examples && go run ./peers alice=hysteria:alice:alice-pass bob=xray:bob-secret > ./peers.json
+cd examples && go run ./peers 'alice=<alice-public-key>' > ./peers.json
 ```
 
 ## 16. Hub configuration
@@ -450,7 +425,7 @@ cd examples && go run ./peers alice=hysteria:alice:alice-pass bob=xray:bob-secre
 
 Without `OVERLAY_PEERS_PATH` and `OVERLAY_DATA_DIR`, the binary uses built-in defaults (constants in `server/src/main.rs`). Set both explicitly in any new deployment. The container image sets them (section 17).
 
-The hub logs with `tracing`. It never logs tokens, verifiers, payloads or peer names.
+The hub logs with `tracing`. It never logs private keys, identifiers, payloads or peer names.
 
 ## 17. Container
 
@@ -460,28 +435,28 @@ The hub logs with `tracing`. It never logs tokens, verifiers, payloads or peer n
 - Defaults set in the image: `OVERLAY_PEERS_PATH=/etc/overlay-relay/peers.json`, `OVERLAY_DATA_DIR=/var/lib/overlay-relay`, `OVERLAY_LISTEN_ADDRESS=0.0.0.0:6697`.
 - Mount the peers table as a **directory** (for example `/etc/overlay-relay`), not as a single file. The hub watches for replacement by rename, which a single-file bind mount does not see.
 - The data directory must be writable by uid `65532`.
-- Expose `6697/tcp`.
+- Make `6697/tcp` reachable through the authenticated VPN, not directly from an untrusted network.
 
 ## 18. Security properties
 
-- Authentication is a bearer token with a stored SHA-256 verifier. Compare-by-verifier is constant-time across stored entries.
-- Admission by source address is a first gate; the token is the second.
+- Authentication verifies a fresh P-384 signature and matches the public-key digest to an enrolled account.
+- Admission by source address is a first gate; the signed challenge is the second. An authenticated VPN is required independently.
 - The hub returns the same `peer unavailable` for missing, hidden, self, and refused destinations. A requester cannot enumerate accounts.
 - The hub does not interpret relayed payloads.
 - Flows are end-to-end encrypted by default (section 8.6). A relaying hub and a network observer see only ciphertext. Fingerprints travel through the hub, so a hub that substitutes them can intercept a flow; the hub is a trusted party for fingerprints, not for payloads it relays honestly.
 - A direct connection leaves the VPN. Its QUIC handshake pins the same fingerprints, so it is authenticated and encrypted. It exposes the agent's public UDP address to the peer and the STUN server.
-- Tokens and secrets are never logged by the reference code.
+- Private identity keys are never logged by the reference code.
 
 ## 19. Non-goals
 
-- The hub does not encrypt traffic itself and holds no keys. Encryption is the agents' job (section 8.6). Hub-to-agent control frames (the Hello with the token, events) are not encrypted by the overlay; protect that transport with a VPN or another tunnel.
+- The hub does not encrypt traffic itself and holds no private identity keys. Encryption is the agents' job (section 8.6). Hub-to-agent control frames are not encrypted by the overlay; an authenticated VPN must protect that transport.
 - No relay fallback for a failed direct connection, no certificate authority, and no STUN server in the hub.
 - The hub does not route to the internet or to addresses outside `10.77.0.0/16`.
 - The hub has no accounting or quotas beyond the flow and pending limits in section 11.
-- No version negotiation beyond `version: 1`. A new wire version requires a new `version` value and a coordinated release.
+- No version negotiation beyond `version: 2`. A new wire version requires a new `version` value and a coordinated release.
 
 ## 20. Release and versioning
 
 - The hub and the Go module share one release version: the `version` field in `server/Cargo.toml`.
 - Go module tags follow the same version as `client/vX.Y.Z`, where `X.Y.Z` matches `server/Cargo.toml`.
-- The wire version is separate (`version: 1`). It changes only on incompatible wire changes.
+- The wire version is separate (`version: 2`). It changes only on incompatible wire changes.

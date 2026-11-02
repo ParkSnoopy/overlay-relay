@@ -3,6 +3,11 @@ package overlayagent
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha512"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -110,6 +115,36 @@ func (h *fakeHub) serve(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		_ = conn.Close()
+		return
+	}
+	if err := overlay.WriteFrame(conn, overlay.Challenge{Nonce: hex.EncodeToString(nonce)}); err != nil {
+		_ = conn.Close()
+		return
+	}
+	var proof overlay.Proof
+	if err := overlay.ReadFrame(conn, &proof); err != nil {
+		_ = conn.Close()
+		return
+	}
+	public, err := hex.DecodeString(hello.PublicKey)
+	if err != nil {
+		_ = conn.Close()
+		return
+	}
+	publicKey, err := ecdsa.ParseUncompressedPublicKey(elliptic.P384(), public)
+	if err != nil {
+		_ = conn.Close()
+		return
+	}
+	signature, err := hex.DecodeString(proof.Signature)
+	digest := sha512.Sum384(append([]byte("overlay-relay/auth/v2:"), nonce...))
+	if err != nil || !ecdsa.VerifyASN1(publicKey, digest[:], signature) {
+		_ = conn.Close()
+		return
+	}
 	_ = conn.SetReadDeadline(time.Time{})
 	h.mu.Lock()
 	h.hellos = append(h.hellos, hello)
@@ -134,7 +169,7 @@ func (h *fakeHub) serveControl(conn net.Conn, hello *overlay.Hello) {
 		_ = overlay.WriteFrame(conn, overlay.Reply{Error: "unknown account"})
 		return
 	}
-	account := h.account(hello.Token)
+	account := h.account(hello.PublicKey)
 	account.wmu.Lock()
 	account.control = conn
 	err := overlay.WriteFrame(conn, overlay.Reply{OK: true, IP: account.ip.String(), Name: account.name})
@@ -222,7 +257,7 @@ func (h *fakeHub) dropControls() {
 
 func (h *fakeHub) serveOpen(conn net.Conn, hello *overlay.Hello) {
 	defer func() { _ = conn.Close() }()
-	requester := h.account(hello.Token)
+	requester := h.account(hello.PublicKey)
 	destination, _ := netip.ParseAddr(hello.Dst)
 	var target *hubAccount
 	h.mu.Lock()
@@ -292,7 +327,7 @@ func relay(a, b net.Conn) {
 
 type testAgent struct {
 	*Agent
-	secret []byte
+	key    *ecdsa.PrivateKey
 	mu     sync.Mutex
 	states []overlay.State
 }
@@ -305,14 +340,18 @@ type localCall struct {
 
 func (h *fakeHub) newAgent(t *testing.T, name string, dialLocal func(context.Context, string, uint16, netip.Addr) (net.Conn, error)) *testAgent {
 	t.Helper()
-	ta := &testAgent{secret: []byte("test-secret-" + name)}
+	key, err := overlay.GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ta := &testAgent{key: key}
 	if dialLocal == nil {
 		dialLocal = func(context.Context, string, uint16, netip.Addr) (net.Conn, error) {
 			return nil, errors.New("no local service")
 		}
 	}
 	// The fake hub relays plain bytes; encryption has its own tests (seal_test.go).
-	ta.Agent = New(Config{Secret: ta.secret, DisableEncryption: true, Dial: h.dial, DialLocal: dialLocal, OnState: func(s overlay.State) {
+	ta.Agent = New(Config{Identity: ta.key, DisableEncryption: true, Dial: h.dial, DialLocal: dialLocal, OnState: func(s overlay.State) {
 		ta.mu.Lock()
 		ta.states = append(ta.states, s)
 		ta.mu.Unlock()
@@ -456,7 +495,7 @@ func echoLocal(tcp, udp string, calls chan<- localCall) func(context.Context, st
 	}
 }
 
-func TestRegistrationUsesOnlyTheDerivedToken(t *testing.T) {
+func TestRegistrationUsesPublicIdentity(t *testing.T) {
 	hub := newFakeHub(t)
 	a := hub.newAgent(t, "a", nil)
 	a.start(t)
@@ -471,11 +510,12 @@ func TestRegistrationUsesOnlyTheDerivedToken(t *testing.T) {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
 	hello := hub.hellos[0]
-	if hello.Kind != overlay.KindControl || hello.Version != overlay.Version || hello.Token != overlay.Token(a.secret) {
-		t.Fatalf("unexpected hello %+v", hello)
+	public, err := overlay.PublicIdentity(a.key)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if bytes.Contains([]byte(hello.Token), a.secret) {
-		t.Fatal("secret leaked into the token")
+	if hello.Kind != overlay.KindControl || hello.Version != overlay.Version || hello.PublicKey != public {
+		t.Fatalf("unexpected hello %+v", hello)
 	}
 }
 
@@ -776,8 +816,12 @@ func TestRejectionIsReportedAndRetried(t *testing.T) {
 func TestBackoffDoublesUpToTheCap(t *testing.T) {
 	var mu sync.Mutex
 	var attempts []time.Time
+	key, err := overlay.GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
 	a := New(Config{
-		Secret: []byte("s"),
+		Identity: key,
 		Dial: func(context.Context) (net.Conn, error) {
 			mu.Lock()
 			attempts = append(attempts, time.Now())
@@ -824,8 +868,12 @@ func TestRunValidatesAndRunsOnce(t *testing.T) {
 func TestCancellationInterruptsABlockedHandshake(t *testing.T) {
 	var peers []net.Conn
 	var mu sync.Mutex
+	key, err := overlay.GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
 	a := New(Config{
-		Secret: []byte("s"),
+		Identity: key,
 		Dial: func(context.Context) (net.Conn, error) {
 			client, server := net.Pipe() // nobody reads the server end
 			mu.Lock()

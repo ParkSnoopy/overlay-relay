@@ -8,6 +8,8 @@ use std::net::Ipv4Addr;
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 
+use ring::rand::{SecureRandom, SystemRandom};
+use ring::signature::{ECDSA_P384_SHA384_ASN1, UnparsedPublicKey};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
 use tokio::sync::Mutex;
@@ -26,8 +28,8 @@ use crate::frame::{read_frame, send_frame};
 use crate::open;
 use crate::peers::{Account, MAX_PEERS_FILE, Peers};
 use crate::protocol::{
-    ERR_INVALID_REQUEST, ERR_UNAUTHORIZED, Hello, KIND_ACCEPT, KIND_CONTROL, KIND_OPEN, Reply,
-    VERSION,
+    Challenge, ERR_INVALID_REQUEST, ERR_UNAUTHORIZED, Hello, KIND_ACCEPT, KIND_CONTROL, KIND_OPEN,
+    Proof, Reply, VERSION,
 };
 use crate::state::{Requester, State};
 use crate::verifier::Verifier;
@@ -196,7 +198,9 @@ impl Hub {
         if hello.version != VERSION {
             return;
         }
-        let Some(requester) = self.authenticate(&hello.token).await else {
+        let Ok(Some(requester)) =
+            timeout(handshake, self.authenticate(&mut stream, &hello.public_key)).await
+        else {
             send_frame(&mut stream, &Reply::failed(ERR_UNAUTHORIZED))
                 .await
                 .ok();
@@ -216,8 +220,26 @@ impl Hub {
         }
     }
 
-    async fn authenticate(&self, token: &str) -> Option<Requester> {
-        let verifier = Verifier::from_token(token)?;
+    async fn authenticate(&self, stream: &mut TcpStream, public_key: &str) -> Option<Requester> {
+        let verifier = Verifier::from_public_key(public_key)?;
+        let public = hex::decode(public_key).ok()?;
+        let mut nonce = [0_u8; 32];
+        SystemRandom::new().fill(&mut nonce).ok()?;
+        send_frame(
+            stream,
+            &Challenge {
+                nonce: hex::encode(nonce),
+            },
+        )
+        .await
+        .ok()?;
+        let proof: Proof = read_frame(stream).await.ok()?;
+        let signature = hex::decode(proof.signature).ok()?;
+        let mut message = b"overlay-relay/auth/v2:".to_vec();
+        message.extend_from_slice(&nonce);
+        UnparsedPublicKey::new(&ECDSA_P384_SHA384_ASN1, public)
+            .verify(&message, &signature)
+            .ok()?;
         self.shared.state.lock().await.authenticate(&verifier)
     }
 

@@ -51,14 +51,13 @@ struct Document {
 #[derive(Deserialize)]
 struct Entry {
     #[serde(default)]
-    verifier: String,
+    public_key: String,
     #[serde(default)]
     name: String,
 }
 
 impl Peers {
-    /// Parses and validates a peers table: version 1, at most 4096 accounts,
-    /// unique 64-digit hex verifiers and names of at most 128 bytes.
+    /// Parses and validates the public-key peers table.
     ///
     /// # Errors
     /// Returns `Error::Json` when the bytes are not JSON of the expected shape
@@ -81,7 +80,7 @@ impl Peers {
         let mut seen = HashSet::with_capacity(document.accounts.len());
         let mut accounts = Vec::with_capacity(document.accounts.len());
         for entry in document.accounts {
-            let Some(verifier) = Verifier::from_hex(&entry.verifier) else {
+            let Some(verifier) = Verifier::from_public_key(&entry.public_key) else {
                 return Err(Error::Peers("invalid overlay account"));
             };
             if entry.name.len() > MAX_NAME_LEN || !seen.insert(verifier) {
@@ -100,11 +99,15 @@ impl Peers {
 mod tests {
     use super::Peers;
     use crate::error::Error;
-    use crate::verifier::Verifier;
+    use crate::protocol::VERSION;
 
     fn entry(byte: u8, name: &str) -> String {
-        let hex = Verifier::from_digest([byte; 32]).to_hex();
-        format!(r#"{{"verifier":"{hex}","name":"{name}"}}"#)
+        let key = p384::SecretKey::from_slice(&[byte; 48]);
+        let hex = key.map_or_else(
+            |_| String::new(),
+            |key| hex::encode(key.public_key().to_sec1_bytes()),
+        );
+        format!(r#"{{"public_key":"{hex}","name":"{name}"}}"#)
     }
 
     fn table(version: u32, entries: &[String]) -> Vec<u8> {
@@ -117,7 +120,7 @@ mod tests {
 
     #[test]
     fn valid_table_keeps_order_and_names() {
-        let raw = table(1, &[entry(1, "alice"), entry(2, "bob")]);
+        let raw = table(VERSION, &[entry(1, "alice"), entry(2, "bob")]);
         let names: Vec<String> = Peers::parse(&raw).map_or_else(
             |_| Vec::new(),
             |table| {
@@ -133,21 +136,21 @@ mod tests {
 
     #[test]
     fn empty_table_is_valid() {
-        assert!(Peers::parse(&table(1, &[])).is_ok());
+        assert!(Peers::parse(&table(VERSION, &[])).is_ok());
     }
 
     #[test]
     fn wrong_version_is_rejected() {
-        let result = Peers::parse(&table(2, &[entry(1, "alice")]));
+        let result = Peers::parse(&table(1, &[entry(1, "alice")]));
         assert!(
             matches!(result, Err(Error::Peers(_))),
-            "version 2 must fail"
+            "old version must fail"
         );
     }
 
     #[test]
     fn duplicate_verifiers_are_rejected() {
-        let result = Peers::parse(&table(1, &[entry(1, "alice"), entry(1, "again")]));
+        let result = Peers::parse(&table(VERSION, &[entry(1, "alice"), entry(1, "again")]));
         assert!(
             matches!(result, Err(Error::Peers(_))),
             "duplicate verifier must fail"
@@ -156,21 +159,21 @@ mod tests {
 
     #[test]
     fn bad_hex_verifier_is_rejected() {
-        let raw = br#"{"version":1,"accounts":[{"verifier":"zz","name":"x"}]}"#;
+        let raw = br#"{"version":2,"accounts":[{"public_key":"zz","name":"x"}]}"#;
         assert!(matches!(Peers::parse(raw), Err(Error::Peers(_))));
     }
 
     #[test]
     fn overlong_name_is_rejected() {
         let long = "n".repeat(129);
-        let result = Peers::parse(&table(1, &[entry(1, &long)]));
+        let result = Peers::parse(&table(VERSION, &[entry(1, &long)]));
         assert!(
             matches!(result, Err(Error::Peers(_))),
             "129-byte name must fail"
         );
         let exact = "n".repeat(128);
         assert!(
-            Peers::parse(&table(1, &[entry(1, &exact)])).is_ok(),
+            Peers::parse(&table(VERSION, &[entry(1, &exact)])).is_ok(),
             "128 bytes is allowed"
         );
     }
@@ -182,12 +185,12 @@ mod tests {
                 let digest = index.to_be_bytes();
                 let mut bytes = [0_u8; 32];
                 bytes[..4].copy_from_slice(&digest);
-                let hex = Verifier::from_digest(bytes).to_hex();
-                format!(r#"{{"verifier":"{hex}","name":"n"}}"#)
+                let hex = hex::encode(bytes);
+                format!(r#"{{"public_key":"{hex}","name":"n"}}"#)
             })
             .collect();
         assert!(matches!(
-            Peers::parse(&table(1, &entries)),
+            Peers::parse(&table(VERSION, &entries)),
             Err(Error::Peers(_))
         ));
     }

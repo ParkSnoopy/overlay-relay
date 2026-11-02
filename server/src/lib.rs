@@ -1,7 +1,7 @@
 //! Authenticated rendezvous and byte relay for overlay accounts.
 //!
 //! A [`Hub`] accepts connections only from admitted source addresses, looks up
-//! each bearer token by its verifier, and relays flows between accounts that
+//! each enrolled public key, and relays flows between accounts that
 //! chose to broadcast. Each account keeps one stable overlay address. The hub
 //! never logs credentials, tokens, verifiers, payloads or peer names.
 //!
@@ -37,9 +37,10 @@ pub use frame::{read_datagram, read_frame, send_frame, write_datagram, write_fra
 pub use hub::{Gate, Hub, Shared};
 pub use peers::{Account, MAX_NAME_LEN, MAX_PEERS_FILE, Peers};
 pub use protocol::{
-    ERR_INVALID_REQUEST, ERR_UNAUTHORIZED, ERR_UNAVAILABLE, Event, Hello, Incoming, KIND_ACCEPT,
-    KIND_CONTROL, KIND_OPEN, LISTEN_ADDRESS, MAX_ACCOUNTS, MAX_DATAGRAM, MAX_FLOWS_PER_ACCOUNT,
-    MAX_FRAME, MAX_PENDING_PER_ACCOUNT, PORT, PROTO_TCP, PROTO_UDP, Peer, Ping, Reply, VERSION,
+    Challenge, ERR_INVALID_REQUEST, ERR_UNAUTHORIZED, ERR_UNAVAILABLE, Event, Hello, Incoming,
+    KIND_ACCEPT, KIND_CONTROL, KIND_OPEN, LISTEN_ADDRESS, MAX_ACCOUNTS, MAX_DATAGRAM,
+    MAX_FLOWS_PER_ACCOUNT, MAX_FRAME, MAX_PENDING_PER_ACCOUNT, PORT, PROTO_TCP, PROTO_UDP, Peer,
+    Ping, Proof, Reply, VERSION,
 };
 pub use state::TableChange;
 pub use verifier::Verifier;

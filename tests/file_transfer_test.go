@@ -328,7 +328,7 @@ type transferEnv struct {
 
 func newFileAgent(hub string, account account, states chan<- overlay.State, sink *fileSink, compression bool) *overlayagent.Agent {
 	return overlayagent.New(overlayagent.Config{
-		Secret:      account.secret,
+		Identity:    account.key,
 		Compression: compression,
 		Dial: func(ctx context.Context) (net.Conn, error) {
 			var dialer net.Dialer
@@ -353,8 +353,8 @@ func newFileAgent(hub string, account account, states chan<- overlay.State, sink
 func startTransferEnv(t *testing.T, compression bool) *transferEnv {
 	t.Helper()
 	hubBinary := buildHub(t)
-	alice := account{name: "alice", secret: overlay.SecretUserPass("hysteria", "alice", "alice-password")}
-	bob := account{name: "bob", secret: overlay.SecretUserPass("hysteria", "bob", "bob-password")}
+	alice := newAccount(t, "alice")
+	bob := newAccount(t, "bob")
 	hub := startHub(t, hubBinary, overlay.Peers{Version: overlay.Version, Accounts: []overlay.Account{accountEntry(t, alice), accountEntry(t, bob)}})
 
 	aliceSink := startSink(t, t.TempDir())

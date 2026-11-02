@@ -12,9 +12,10 @@ use std::time::{Duration, Instant};
 use overlay_relay::{
     Config, ERR_INVALID_REQUEST, ERR_UNAUTHORIZED, ERR_UNAVAILABLE, Event, Hello, Hub, Incoming,
     KIND_ACCEPT, KIND_CONTROL, KIND_OPEN, MAX_DATAGRAM, MAX_PENDING_PER_ACCOUNT, PROTO_TCP,
-    PROTO_UDP, Ping, Reply, Resolver, VERSION, Verifier, read_datagram, read_frame, write_datagram,
-    write_frame,
+    PROTO_UDP, Ping, Proof, Reply, Resolver, VERSION, Verifier, read_datagram, read_frame,
+    write_datagram, write_frame,
 };
+use p384::ecdsa::{Signature, SigningKey, signature::Signer};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -143,18 +144,26 @@ async fn fixture(names: &[&str], tune: impl FnOnce(&mut Config)) -> TestResult<F
     })
 }
 
-fn token_of(name: &str) -> String {
-    hex::encode(Sha256::digest(format!("secret-{name}")))
+fn key_of(name: &str) -> Option<SigningKey> {
+    let mut bytes = [0_u8; 48];
+    bytes[16..].copy_from_slice(&Sha256::digest(format!("test-key-{name}")));
+    SigningKey::from_slice(&bytes).ok()
+}
+
+fn public_of(name: &str) -> String {
+    key_of(name).map_or_else(String::new, |key| {
+        hex::encode(key.verifying_key().to_encoded_point(false).as_bytes())
+    })
 }
 
 fn verifier_of(name: &str) -> Verifier {
-    Verifier::from_token(&token_of(name)).unwrap_or(Verifier::from_digest([0; 32]))
+    Verifier::from_public_key(&public_of(name)).unwrap_or(Verifier::from_digest([0; 32]))
 }
 
 async fn write_peers(path: &Path, names: &[&str]) -> TestResult {
     let accounts: Vec<serde_json::Value> = names
         .iter()
-        .map(|name| serde_json::json!({"verifier": verifier_of(name).to_hex(), "name": name}))
+        .map(|name| serde_json::json!({"public_key": public_of(name), "name": name}))
         .collect();
     let raw = serde_json::to_vec(&serde_json::json!({"version": VERSION, "accounts": accounts}))?;
     let temporary = path.with_extension("tmp");
@@ -167,7 +176,7 @@ fn control_hello(name: &str) -> Hello {
     Hello {
         version: VERSION,
         kind: KIND_CONTROL.to_owned(),
-        token: token_of(name),
+        public_key: public_of(name),
         ..Hello::default()
     }
 }
@@ -176,7 +185,7 @@ fn open_hello(name: &str, dst: &str, proto: &str, port: Option<u16>) -> Hello {
     Hello {
         version: VERSION,
         kind: KIND_OPEN.to_owned(),
-        token: token_of(name),
+        public_key: public_of(name),
         proto: proto.to_owned(),
         dst: dst.to_owned(),
         port,
@@ -188,7 +197,7 @@ fn accept_hello(name: &str, id: &str) -> Hello {
     Hello {
         version: VERSION,
         kind: KIND_ACCEPT.to_owned(),
-        token: token_of(name),
+        public_key: public_of(name),
         id: id.to_owned(),
         ..Hello::default()
     }
@@ -197,6 +206,26 @@ fn accept_hello(name: &str, id: &str) -> Hello {
 async fn dial(address: SocketAddr, hello: &Hello) -> TestResult<(TcpStream, Reply)> {
     let mut stream = TcpStream::connect(address).await?;
     write_frame(&mut stream, hello).await?;
+    let first: serde_json::Value = timeout(IO_WAIT, read_frame(&mut stream)).await??;
+    if let Some(nonce) = first.get("nonce").and_then(serde_json::Value::as_str) {
+        let key = ["alice", "bob", "carol", "dave", "hidden", "mallory"]
+            .into_iter()
+            .find(|name| public_of(name) == hello.public_key)
+            .and_then(key_of)
+            .ok_or("unknown test identity")?;
+        let mut message = b"overlay-relay/auth/v2:".to_vec();
+        message.extend_from_slice(&hex::decode(nonce)?);
+        let signature: Signature = key.sign(&message);
+        write_frame(
+            &mut stream,
+            &Proof {
+                signature: hex::encode(signature.to_der().as_bytes()),
+            },
+        )
+        .await?;
+    } else {
+        return Ok((stream, serde_json::from_value(first)?));
+    }
     let reply = timeout(IO_WAIT, read_frame::<_, Reply>(&mut stream)).await??;
     Ok((stream, reply))
 }
@@ -299,31 +328,31 @@ async fn establish(f: &mut Fixture, proto: &str, port: u16) -> TestResult<Flow> 
 }
 
 #[tokio::test]
-async fn bad_tokens_get_unauthorized_and_are_closed() -> TestResult {
+async fn bad_identities_get_unauthorized_and_are_closed() -> TestResult {
     let f = fixture(&["alice"], |_| {}).await?;
-    for token in [token_of("mallory"), "not-hex".to_owned(), String::new()] {
+    for public_key in [public_of("mallory"), "not-hex".to_owned(), String::new()] {
         let hello = Hello {
             version: VERSION,
             kind: KIND_CONTROL.to_owned(),
-            token,
+            public_key,
             ..Hello::default()
         };
         let (mut stream, reply) = dial(f.address, &hello).await?;
-        ensure!(!reply.ok, "bad token must not authenticate");
+        ensure!(!reply.ok, "bad identity must not authenticate");
         ensure_eq!(reply.error, ERR_UNAUTHORIZED);
-        ensure!(reply.ip.is_empty(), "no address may leak to a bad token");
+        ensure!(reply.ip.is_empty(), "no address may leak to a bad identity");
         expect_closed(&mut stream).await?;
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn all_zero_token_gets_probe_style_unauthorized_reply() -> TestResult {
+async fn invalid_public_key_gets_unauthorized_reply() -> TestResult {
     let f = fixture(&["alice"], |_| {}).await?;
     let hello = Hello {
         version: VERSION,
         kind: KIND_CONTROL.to_owned(),
-        token: "0".repeat(64),
+        public_key: "0".repeat(64),
         ..Hello::default()
     };
     let (mut stream, reply) = dial(f.address, &hello).await?;
@@ -332,12 +361,45 @@ async fn all_zero_token_gets_probe_style_unauthorized_reply() -> TestResult {
 }
 
 #[tokio::test]
+async fn rejects_wrong_key_and_replayed_proof() -> TestResult {
+    let f = fixture(&["alice", "bob"], |_| {}).await?;
+    let mut saved = String::new();
+    for signer in ["bob", "alice", "replay"] {
+        let mut stream = TcpStream::connect(f.address).await?;
+        write_frame(&mut stream, &control_hello("alice")).await?;
+        let challenge: overlay_relay::Challenge =
+            timeout(IO_WAIT, read_frame(&mut stream)).await??;
+        let signature = if signer == "replay" {
+            saved.clone()
+        } else {
+            let mut message = b"overlay-relay/auth/v2:".to_vec();
+            message.extend_from_slice(&hex::decode(challenge.nonce)?);
+            let key = key_of(signer).ok_or("invalid test key")?;
+            let signature: Signature = key.sign(&message);
+            hex::encode(signature.to_der().as_bytes())
+        };
+        if signer == "alice" {
+            saved.clone_from(&signature);
+        }
+        write_frame(&mut stream, &Proof { signature }).await?;
+        let reply: Reply = timeout(IO_WAIT, read_frame(&mut stream)).await??;
+        if signer == "alice" {
+            ensure!(reply.ok, "matching key must authenticate");
+        } else {
+            ensure_eq!(reply, Reply::failed(ERR_UNAUTHORIZED));
+            expect_closed(&mut stream).await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn unknown_kind_gets_invalid_request_after_authentication() -> TestResult {
     let f = fixture(&["alice"], |_| {}).await?;
     let hello = Hello {
         version: VERSION,
         kind: "bogus".to_owned(),
-        token: token_of("alice"),
+        public_key: public_of("alice"),
         ..Hello::default()
     };
     let (mut stream, reply) = dial(f.address, &hello).await?;
@@ -899,8 +961,8 @@ async fn invalid_peers_table_keeps_last_good() -> TestResult {
     let f = fixture(&["alice"], |_| {}).await?;
     let invalid = [
         "{".to_owned(),
-        r#"{"version":2,"accounts":[]}"#.to_owned(),
-        r#"{"version":1,"accounts":[{"verifier":"zz","name":"x"}]}"#.to_owned(),
+        r#"{"version":1,"accounts":[]}"#.to_owned(),
+        r#"{"version":2,"accounts":[{"public_key":"zz","name":"x"}]}"#.to_owned(),
     ];
     for content in invalid {
         tokio::fs::write(&f.peers, content.as_bytes()).await?;

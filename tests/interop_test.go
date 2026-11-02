@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
 	"io"
@@ -94,14 +95,23 @@ func startHub(t *testing.T, binary string, peers overlay.Peers) hubProcess {
 }
 
 type account struct {
-	name   string
-	secret []byte
+	name string
+	key  *ecdsa.PrivateKey
+}
+
+func newAccount(t *testing.T, name string) account {
+	t.Helper()
+	key, err := overlay.GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return account{name: name, key: key}
 }
 
 func newAgent(t *testing.T, hub string, account account, states chan<- overlay.State, local func(port uint16) string) *overlayagent.Agent {
 	t.Helper()
 	return overlayagent.New(overlayagent.Config{
-		Secret: account.secret,
+		Identity: account.key,
 		Dial: func(ctx context.Context) (net.Conn, error) {
 			var dialer net.Dialer
 			return dialer.DialContext(ctx, "tcp", hub)
@@ -136,17 +146,17 @@ func waitFor(t *testing.T, states <-chan overlay.State, done func(overlay.State)
 
 func accountEntry(t *testing.T, account account) overlay.Account {
 	t.Helper()
-	verifier, err := overlay.Verifier(overlay.Token(account.secret))
+	public, err := overlay.PublicIdentity(account.key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return overlay.Account{Verifier: verifier, Name: account.name}
+	return overlay.Account{PublicKey: public, Name: account.name}
 }
 
 func TestGoAgentAndRustHubRelayTCP(t *testing.T) {
 	binary := buildHub(t)
-	alice := account{name: "alice", secret: overlay.SecretUserPass("hysteria", "alice", "alice-password")}
-	bob := account{name: "bob", secret: overlay.SecretUserPass("hysteria", "bob", "bob-password")}
+	alice := newAccount(t, "alice")
+	bob := newAccount(t, "bob")
 	hub := startHub(t, binary, overlay.Peers{Version: overlay.Version, Accounts: []overlay.Account{accountEntry(t, alice), accountEntry(t, bob)}})
 
 	// Bob's local service receives relayed flows at the overlay port.

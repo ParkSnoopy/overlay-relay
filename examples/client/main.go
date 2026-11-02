@@ -3,7 +3,7 @@
 // Environment:
 //
 //	OVERLAY_HUB     hub address, host:port (default 127.0.0.1:6697)
-//	OVERLAY_SECRET  canonical account secret, the same value used in peers.json
+//	OVERLAY_IDENTITY  path to the enrolled private key in PKCS#8 PEM format
 //	OVERLAY_LOCAL   host that serves incoming flows (default 127.0.0.1); the port is the one the peer requested
 //	OVERLAY_CONNECT optional peer address, ip:port, to send one line to
 //
@@ -49,16 +49,24 @@ func execute() int {
 }
 
 func run(ctx context.Context) error {
-	secret := os.Getenv("OVERLAY_SECRET")
-	if secret == "" {
-		return errors.New("OVERLAY_SECRET is required")
+	identityPath := os.Getenv("OVERLAY_IDENTITY")
+	if identityPath == "" {
+		return errors.New("OVERLAY_IDENTITY is required")
+	}
+	identityBytes, err := os.ReadFile(identityPath)
+	if err != nil {
+		return err
+	}
+	identity, err := overlay.ParseIdentity(identityBytes)
+	if err != nil {
+		return err
 	}
 	hub := envOr("OVERLAY_HUB", defaultHub)
 	local := hostOf(envOr("OVERLAY_LOCAL", defaultLocal))
 
 	states := make(chan overlay.State, 64)
 	agent := overlayagent.New(overlayagent.Config{
-		Secret: []byte(secret),
+		Identity: identity,
 		Dial: func(ctx context.Context) (net.Conn, error) {
 			var dialer net.Dialer
 			return dialer.DialContext(ctx, "tcp", hub)

@@ -1,11 +1,13 @@
 # overlay-hub
 
-`overlay-hub` is the relay server for overlay-relay. It accepts connections from admitted hosts, authenticates accounts by token, and relays TCP and UDP flows between broadcasting accounts.
+`overlay-hub` is the relay server for overlay-relay. It accepts connections from admitted hosts, authenticates accounts by public key, and relays TCP and UDP flows between broadcasting accounts.
+
+Every client connection must use an authenticated VPN. The hub itself accepts TCP and does not authenticate or protect that transport against an active intermediary.
 
 - Listens on TCP `6697` by default.
 - Reads its accounts from a read-only peers table that you manage.
 - Assigns each account a stable address in `10.77.0.0/16` and remembers it in `ips.json`.
-- Never inspects relayed payloads and never logs tokens, verifiers, payloads or peer names.
+- Never inspects relayed payloads and never logs private keys, identifiers, payloads or peer names.
 - Pairs the encryption offers of the two agents of a flow. Each agent may send a certificate `fingerprint` (end-to-end encryption) and a public UDP `endpoint` (direct connection) in its `open` or `accept` hello. The hub validates them and tells each side the other's values only when both made the offer. It never holds a key. When both offered an endpoint, the hub relays nothing and ends both streams after the hand-off.
 
 ## Build
@@ -42,25 +44,18 @@ The hub logs to standard error through `tracing`. Set the level in code, not by 
 
 A JSON file. The hub reads it at startup and checks it every 2 seconds for changes.
 
-```json
-{
-  "version": 1,
-  "accounts": [
-    { "verifier": "c061fc54bb1a7534356bbe32c554c1a3985851a3d1749107b677793ffcb5ba9f", "name": "alice" }
-  ]
-}
-```
+Each account contains `public_key` and `name`. Generate a valid table with the tool below.
 
-- `version` must be `1`.
-- At most 4096 accounts. Each `verifier` is 64 lowercase or uppercase hex digits and unique.
+- `version` must be `2`.
+- At most 4096 accounts. Each `public_key` is a unique hex-encoded uncompressed P-384 point.
 - Each `name` is at most 128 bytes.
 - The file is at most 4 MiB.
 - A missing file at startup means no accounts. An invalid file at startup also means no accounts. An invalid file after startup keeps the last good table.
 
-Generate verifiers from client secrets with the example tool:
+Generate the identity on the client and transfer only its public key to the hub operator. Generate the table with the example tool:
 
 ```text
-cd ../examples && go run ./peers alice=hysteria:alice:alice-pass > ./peers.json
+cd ../examples && go run ./peers 'alice=<alice-public-key>' > ./peers.json
 ```
 
 Replace the file atomically (write a temporary file, then rename it over the target). Removing an account closes its control stream and its flows.
@@ -71,7 +66,7 @@ The repository root has a `Dockerfile` that builds this crate as a static musl b
 
 ```text
 docker build -t overlay-relay:0.1.0 ..
-docker run -d -p 6697:6697 \
+docker run -d \
   -e OVERLAY_ALLOWED_HOST=client-host \
   -v ./peers-dir:/etc/overlay-relay:ro \
   -v overlay-relay-data:/var/lib/overlay-relay \
@@ -79,6 +74,7 @@ docker run -d -p 6697:6697 \
 ```
 
 - The image sets `OVERLAY_PEERS_PATH=/etc/overlay-relay/peers.json`, `OVERLAY_DATA_DIR=/var/lib/overlay-relay`, `OVERLAY_LISTEN_ADDRESS=0.0.0.0:6697`.
+- Attach the container to the authenticated VPN network. Do not expose the hub directly to an untrusted network.
 - Mount the peers directory, not a single file. The hub watches the directory for renames.
 - The data volume must be writable by uid `65532`.
 

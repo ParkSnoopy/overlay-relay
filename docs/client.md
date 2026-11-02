@@ -1,13 +1,14 @@
 # Overlay client agent
 
 Base: `client/overlayagent/` and `client/overlay/` in the overlay-relay repository.
-The snoo-box client glue (tunnel start, route exclusion, Xray routing, account secret, connection state) is documented in [snoo-box overlay client](https://github.com/ParkSnoopy/snoo-box/blob/main/docs/app/backend/client/overlay/ARCHITECTURE.md).
+The snoo-box client glue (tunnel start, route exclusion, Xray routing and connection state) is documented in [snoo-box overlay client](https://github.com/ParkSnoopy/snoo-box/blob/main/docs/app/backend/client/overlay/ARCHITECTURE.md).
 
 ## Agent
 
 [agent.go](../client/overlayagent/agent.go) and [flow.go](../client/overlayagent/flow.go) hold the platform-independent agent.
 The platform supplies `Dial` (one hub stream through the VPN session), `DialLocal` (where an incoming flow ends) and `OnState`.
-`Run` dials the hub, sends `Hello{control}` with the derived token and tracks the reply, peer snapshots, incoming requests and pongs.
+`Run` sends `Hello{control}` with the public identity, signs the hub's challenge, and tracks the reply, peer snapshots, incoming requests and pongs.
+The caller must route each hub connection through an authenticated VPN. The challenge alone does not authenticate the hub or prevent active interception.
 It pings every 30 seconds, treats 75 seconds without any frame as a dead hub, and reconnects with capped exponential backoff from 1 to 30 seconds while its context lives.
 Every change calls `OnState` with `Available`, `Broadcasting` and `Connected`; a rejected account carries the hub's short reason.
 `Ready` delivers the overlay address once at the first registration and `IP` returns the latest address.
@@ -21,7 +22,7 @@ At most 128 incoming flows run at once, and malformed requests are dropped witho
 `Outbound` opens a flow to a peer with `Hello{open}` and returns the stream after an OK reply.
 A UDP flow exposes one datagram per Read and Write and keeps partial records across read deadlines.
 It refuses addresses outside `overlay.CIDR`, the agent's own address and addresses missing from the last peer snapshot before touching the hub, which stays the authority.
-Tokens, secrets and payloads never enter logs.
+Private keys and payloads never enter logs.
 
 ## Checks
 

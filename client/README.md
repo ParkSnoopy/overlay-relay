@@ -2,7 +2,7 @@
 
 Go module `github.com/ParkSnoopy/overlay-relay/client`. It contains:
 
-- `overlay`: wire types, frame codec, token and verifier derivation, peers table validation.
+- `overlay`: wire types, frame codec, identity keys, and peers table validation.
 - `overlayagent`: a reference agent that registers with a hub, tracks peers, opens outbound flows, serves inbound flows, and probes a hub for readiness.
 
 The module has no daemon and no platform code. Your application supplies the network dialers and the local service dialer. The agent runs in your process.
@@ -27,6 +27,7 @@ import (
     "log"
     "net"
     "net/netip"
+    "os"
     "strconv"
 
     "github.com/ParkSnoopy/overlay-relay/client/overlay"
@@ -36,11 +37,15 @@ import (
 func main() {
     ctx := context.Background()
 
-    agent := overlayagent.New(overlayagent.Config{
-        // Canonical account secret. Use the same bytes the operator put in the peers table.
-        Secret: []byte("hysteria:alice:alice-pass"),
+    data, err := os.ReadFile("alice.pem")
+    if err != nil { log.Fatal(err) }
+    identity, err := overlay.ParseIdentity(data)
+    if err != nil { log.Fatal(err) }
 
-        // Opens one stream to the hub. Route it through your VPN session if needed.
+    agent := overlayagent.New(overlayagent.Config{
+        Identity: identity,
+
+        // Route every hub stream through an authenticated VPN session.
         Dial: func(ctx context.Context) (net.Conn, error) {
             var d net.Dialer
             return d.DialContext(ctx, "tcp", "hub.example.net:6697")
@@ -90,7 +95,7 @@ Notes:
 
 ## Encryption and direct connections
 
-Every agent makes a self-signed flow certificate when it is created. It sends the certificate's SHA-256 fingerprint to the hub with each `open` or `accept`, and the hub hands the other side's fingerprint back. Each side then runs TLS 1.3 over the relayed stream and accepts only the certificate with that fingerprint, so a hub that only relays, and anyone on the network, sees nothing but ciphertext. The fingerprints themselves travel through the hub, so a hub that replaces them can intercept a flow: use a hub you trust. The secret never leaves the device.
+Every agent makes a self-signed flow certificate when it is created. It sends the certificate's SHA-256 fingerprint to the hub with each `open` or `accept`, and the hub hands the other side's fingerprint back. Each side then runs TLS 1.3 over the relayed stream and accepts only the certificate with that fingerprint, so a hub that only relays, and anyone on the network, sees nothing but ciphertext. The fingerprints themselves travel through the hub, so a hub that replaces them can intercept a flow: use a hub you trust. The private identity key never leaves the device.
 
 - Encryption is on by default. Set `Config.DisableEncryption` to turn it off.
 - An agent with encryption on refuses a peer that cannot encrypt: `Outbound` returns an error and an incoming flow is dropped. It never downgrades to plaintext.
@@ -113,21 +118,15 @@ cfg.Direct = &overlayagent.DirectOptions{
 - A direct connection that fails to come up makes the flow fail. It does not fall back to the relay, because that would hide a network change from the caller.
 - `DirectOptions.Timeout` bounds the connection attempt (default 10 seconds).
 
-## Account secrets and tokens
+## Account identities
 
 ```go
-token := overlay.Token(secret)          // 64 hex digits, sent to the hub
-verifier, err := overlay.Verifier(token) // 64 hex digits, stored in the peers table
+key, err := overlay.GenerateIdentity()
+encoded, err := overlay.EncodeIdentity(key) // store securely and reuse
+public, err := overlay.PublicIdentity(key) // enroll this public key with the hub
 ```
 
-Helpers for the two account formats used in practice:
-
-```go
-overlay.SecretXray(uuid)                     // "xray:" + lowercase UUID
-overlay.SecretUserPass(engine, user, pass)   // engine + ":" + user + ":" + pass
-```
-
-The derivation is documented in [`../docs/LLM_WIKI.md`](../docs/LLM_WIKI.md#4-identity-secrets-tokens-verifiers) with a test vector.
+The client must use the same key across reconnects. Use `overlay.ParseIdentity` to load the stored PKCS#8 PEM. An authenticated VPN is required for every hub stream. The signature exchange alone does not authenticate the hub or protect against an active intermediary.
 
 ## State
 
@@ -150,7 +149,7 @@ if err := overlayagent.Probe(ctx, "hub.example.net:6697"); err != nil {
 }
 ```
 
-`Probe` sends an all-zero token and expects an `unauthorized` reply. It never uses a real account.
+`Probe` uses a fresh unregistered key and expects an `unauthorized` reply. It never uses a real account. Its TCP connection must also travel through the authenticated VPN.
 
 ## Wire helpers
 

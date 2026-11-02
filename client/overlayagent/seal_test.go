@@ -17,7 +17,11 @@ import (
 
 func sealedAgent(t *testing.T) *Agent {
 	t.Helper()
-	a := New(Config{Secret: []byte("secret")})
+	key, err := overlay.GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := New(Config{Identity: key})
 	if a.identity == nil || a.identityErr != nil {
 		t.Fatalf("identity not created: %v", a.identityErr)
 	}
@@ -135,7 +139,11 @@ func TestSealFailsWhenThePeerOffersNoEncryption(t *testing.T) {
 }
 
 func TestSealIsSkippedWhenEncryptionIsDisabled(t *testing.T) {
-	a := New(Config{Secret: []byte("s"), DisableEncryption: true})
+	key, err := overlay.GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := New(Config{Identity: key, DisableEncryption: true})
 	left, right := net.Pipe()
 	defer func() { _ = left.Close(); _ = right.Close() }()
 	conn, err := a.seal(context.Background(), left, &overlay.Reply{OK: true}, true)

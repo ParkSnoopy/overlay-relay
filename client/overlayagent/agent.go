@@ -7,6 +7,10 @@ package overlayagent
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/rand"
+	"crypto/sha512"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net"
@@ -27,9 +31,11 @@ const (
 
 // Config wires an Agent to its platform.
 type Config struct {
-	// Secret is the canonical account secret (see the overlay.Secret* helpers).
-	Secret []byte
-	// Dial opens one stream to the hub through the VPN session.
+	// Identity is the persistent private key enrolled with the hub.
+	Identity *ecdsa.PrivateKey
+	// Dial opens one stream to the hub through an authenticated VPN session.
+	// The caller must enforce this: the handshake does not authenticate the hub
+	// or protect the stream against an active intermediary.
 	Dial func(ctx context.Context) (net.Conn, error)
 	// DialLocal completes an INCOMING flow locally. For UDP it returns a
 	// connected net.Conn whose Read and Write each carry one datagram.
@@ -79,9 +85,9 @@ var defaultTiming = timing{
 
 // Agent is one session's overlay participant. Create it with New and run it once.
 type Agent struct {
-	cfg    Config
-	token  string
-	timing timing
+	cfg       Config
+	publicKey string
+	timing    timing
 
 	emitMu sync.Mutex // serializes snapshot-and-publish so states stay ordered
 
@@ -104,18 +110,22 @@ type Agent struct {
 	direct      atomic.Pointer[direct]
 }
 
-// New builds an idle agent. The secret is used only to derive the bearer token.
+// New builds an idle agent using its enrolled identity.
 func New(cfg Config) *Agent {
+	publicKey, identityErr := overlay.PublicIdentity(cfg.Identity)
 	a := &Agent{
-		cfg:      cfg,
-		token:    overlay.Token(cfg.Secret),
-		timing:   defaultTiming,
-		peerSet:  map[netip.Addr]struct{}{},
-		ready:    make(chan netip.Addr, 1),
-		inflight: make(chan struct{}, maxIncoming),
+		cfg:         cfg,
+		publicKey:   publicKey,
+		identityErr: identityErr,
+		timing:      defaultTiming,
+		peerSet:     map[netip.Addr]struct{}{},
+		ready:       make(chan netip.Addr, 1),
+		inflight:    make(chan struct{}, maxIncoming),
 	}
 	if !cfg.DisableEncryption {
-		a.identity, a.identityErr = newIdentity()
+		var err error
+		a.identity, err = newIdentity()
+		a.identityErr = errors.Join(a.identityErr, err)
 	}
 	return a
 }
@@ -134,11 +144,11 @@ func (a *Agent) Ready() <-chan netip.Addr { return a.ready }
 // Run keeps the control stream registered with the hub until ctx ends.
 // It returns ctx.Err() after every goroutine it started has stopped.
 func (a *Agent) Run(ctx context.Context) error {
-	if a.cfg.Dial == nil || a.cfg.DialLocal == nil || len(a.cfg.Secret) == 0 {
+	if a.cfg.Dial == nil || a.cfg.DialLocal == nil || a.cfg.Identity == nil {
 		return errors.New("overlay agent is not configured")
 	}
 	if a.identityErr != nil {
-		return errors.New("overlay flow certificate could not be created")
+		return errors.New("overlay identity or flow certificate is invalid")
 	}
 	a.mu.Lock()
 	if a.started {
@@ -185,7 +195,7 @@ func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
 		return false, "overlay hub is unreachable"
 	}
 	defer closeConn(conn)
-	reply, err := a.handshake(ctx, conn, &overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl, Token: a.token})
+	reply, err := a.handshake(ctx, conn, &overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl})
 	if err != nil {
 		slog.Debug("Overlay control handshake failed")
 		return false, "overlay hub is unreachable"
@@ -225,7 +235,24 @@ func (a *Agent) handshake(ctx context.Context, conn net.Conn, hello *overlay.Hel
 	if err := conn.SetDeadline(time.Now().Add(a.timing.handshake)); err != nil {
 		return reply, err
 	}
+	hello.PublicKey = a.publicKey
 	if err := overlay.WriteFrame(conn, hello); err != nil {
+		return reply, err
+	}
+	var challenge overlay.Challenge
+	if err := overlay.ReadFrame(conn, &challenge); err != nil {
+		return reply, err
+	}
+	nonce, err := hex.DecodeString(challenge.Nonce)
+	if err != nil || len(nonce) != 32 {
+		return reply, errors.New("invalid overlay challenge")
+	}
+	digest := sha512.Sum384(append([]byte("overlay-relay/auth/v2:"), nonce...))
+	signature, err := ecdsa.SignASN1(rand.Reader, a.cfg.Identity, digest[:])
+	if err != nil {
+		return reply, err
+	}
+	if err := overlay.WriteFrame(conn, overlay.Proof{Signature: hex.EncodeToString(signature)}); err != nil {
 		return reply, err
 	}
 	if err := overlay.ReadFrame(conn, &reply); err != nil {

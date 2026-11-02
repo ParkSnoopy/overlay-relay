@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// The only accepted wire version, carried in `Hello.version`.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Port the hub listens on inside its private container network.
 pub const PORT: u16 = 6697;
@@ -55,7 +55,7 @@ pub const PROTO_UDP: &str = "udp";
 /// The only reason given when a destination is missing, hidden or refused.
 pub const ERR_UNAVAILABLE: &str = "peer unavailable";
 
-/// Reason given when a token does not authenticate or an accept is not allowed.
+/// Reason given when an identity does not authenticate or an accept is not allowed.
 pub const ERR_UNAUTHORIZED: &str = "unauthorized";
 
 /// Reason given for an unknown Hello kind.
@@ -69,8 +69,8 @@ pub struct Hello {
     pub version: u32,
     /// Stream kind: [`KIND_CONTROL`], [`KIND_OPEN`] or [`KIND_ACCEPT`].
     pub kind: String,
-    /// Hex-encoded 32-byte bearer token derived by the client.
-    pub token: String,
+    /// Hex-encoded uncompressed P-384 public key.
+    pub public_key: String,
     /// Protocol for an open request.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub proto: String,
@@ -91,6 +91,20 @@ pub struct Hello {
     /// fingerprint, means the sender offers a direct connection.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub endpoint: String,
+}
+
+/// Fresh nonce issued to one connection.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Challenge {
+    /// Hex-encoded challenge bytes.
+    pub nonce: String,
+}
+
+/// Signature of a challenge by the client's P-384 key.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Proof {
+    /// Hex-encoded DER ECDSA signature.
+    pub signature: String,
 }
 
 /// The hub's answer to a [`Hello`] and, on a control stream, to a ping.

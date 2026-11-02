@@ -1,11 +1,10 @@
-//! Account verifiers: the SHA-256 digest of a client's raw token bytes.
-//! The hub stores and compares verifiers, never tokens.
+//! Account identifiers derived from public keys.
 
 use std::fmt;
 
 use sha2::{Digest, Sha256};
 
-/// The SHA-256 digest of a token's 32 raw bytes.
+/// The SHA-256 digest of an uncompressed P-384 public key.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Verifier([u8; 32]);
 
@@ -16,11 +15,14 @@ impl Verifier {
         Self(digest)
     }
 
-    /// Derives the verifier of a token given as 64 hex digits. Returns `None`
-    /// when the token is not exactly 32 bytes of hex.
+    /// Derives the identifier of an uncompressed P-384 public key.
     #[must_use]
-    pub fn from_token(token: &str) -> Option<Self> {
-        let raw: [u8; 32] = hex::decode(token).ok()?.try_into().ok()?;
+    pub fn from_public_key(public_key: &str) -> Option<Self> {
+        let raw: [u8; 97] = hex::decode(public_key).ok()?.try_into().ok()?;
+        if raw[0] != 4 {
+            return None;
+        }
+        p384::PublicKey::from_sec1_bytes(&raw).ok()?;
         let digest: [u8; 32] = Sha256::digest(raw).into();
         Some(Self(digest))
     }
@@ -67,26 +69,33 @@ mod tests {
     }
 
     #[test]
-    fn token_derives_digest_of_raw_bytes() {
-        let token = token_hex('1');
-        let verifier = Verifier::from_token(&token);
-        assert!(verifier.is_some(), "a 64-digit hex token must be valid");
+    fn public_key_derives_digest_of_raw_bytes() {
+        let public_key = concat!(
+            "04",
+            "aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7",
+            "3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f"
+        );
+        let verifier = Verifier::from_public_key(public_key);
+        assert!(verifier.is_some(), "an encoded key must have an identifier");
         let hex = verifier.map_or_else(String::new, Verifier::to_hex);
         assert_eq!(hex.len(), 64);
         assert_eq!(Verifier::from_hex(&hex), verifier, "hex must round-trip");
     }
 
     #[test]
-    fn malformed_tokens_have_no_verifier() {
-        assert!(Verifier::from_token("").is_none(), "empty token");
-        assert!(Verifier::from_token("not-hex").is_none(), "non-hex token");
+    fn malformed_keys_have_no_verifier() {
+        assert!(Verifier::from_public_key("").is_none(), "empty key");
         assert!(
-            Verifier::from_token(&token_hex('1')[..62]).is_none(),
-            "short token"
+            Verifier::from_public_key("not-hex").is_none(),
+            "non-hex key"
         );
         assert!(
-            Verifier::from_token(&format!("{}00", token_hex('1'))).is_none(),
-            "long token"
+            Verifier::from_public_key(&token_hex('1')[..62]).is_none(),
+            "short key"
+        );
+        assert!(
+            Verifier::from_public_key(&format!("04{}", "11".repeat(97))).is_none(),
+            "long key"
         );
         assert!(
             Verifier::from_hex(&token_hex('z')).is_none(),

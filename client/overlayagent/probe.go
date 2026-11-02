@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
-	"strings"
+
 	"time"
 
 	"github.com/ParkSnoopy/overlay-relay/client/overlay"
@@ -12,8 +12,7 @@ import (
 
 const errUnauthorized = "unauthorized"
 
-// Probe proves that the hub admits this source and parses frames without any
-// real account: an all-zero token must receive a well-formed unauthorized reply.
+// Probe checks admission using a fresh, unregistered identity.
 func Probe(ctx context.Context, address string) error {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
@@ -25,12 +24,13 @@ func Probe(ctx context.Context, address string) error {
 	defer func() { _ = conn.Close() }()
 	deadline, _ := ctx.Deadline()
 	_ = conn.SetDeadline(deadline)
-	hello := overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl, Token: strings.Repeat("0", 64)}
-	if err := overlay.WriteFrame(conn, hello); err != nil {
+	key, err := overlay.GenerateIdentity()
+	if err != nil {
 		return err
 	}
-	var answer overlay.Reply
-	if err := overlay.ReadFrame(conn, &answer); err != nil {
+	agent := New(Config{Identity: key, DisableEncryption: true})
+	answer, err := agent.handshake(ctx, conn, &overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl})
+	if err != nil {
 		return err
 	}
 	if answer.OK || answer.Error != errUnauthorized {
