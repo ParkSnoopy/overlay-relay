@@ -54,11 +54,12 @@ pub async fn serve(
     };
     let id = request_id();
     let (accept_tx, accept_rx) = oneshot::channel();
-    let admitted = shared
-        .state
-        .lock()
-        .await
-        .admit_request(&requester, request.destination, &id, accept_tx);
+    let admitted =
+        shared
+            .state
+            .lock()
+            .await
+            .admit_request(&requester, request.destination, &id, accept_tx);
     let Some((destination, target)) = admitted else {
         refuse(&mut stream).await;
         return;
@@ -101,7 +102,14 @@ pub async fn serve(
     if opened {
         let proto = if request.udp { PROTO_UDP } else { PROTO_TCP };
         debug!(proto, "overlay flow opened");
-        splice(stream, acceptor, request.udp, shared.config.udp_idle, cancel).await;
+        splice(
+            stream,
+            acceptor,
+            request.udp,
+            shared.config.udp_idle,
+            cancel,
+        )
+        .await;
         debug!(proto, "overlay flow closed");
     }
     shared.state.lock().await.remove_flow(flow_id);
@@ -151,7 +159,10 @@ async fn await_answer(
             }
             // The acceptor claimed the request just before the deadline and is
             // handing over its stream, so the answer is already on its way.
-            accepted.await.ok().map_or(Answer::Expired, Answer::Accepted)
+            accepted
+                .await
+                .ok()
+                .map_or(Answer::Expired, Answer::Accepted)
         }
     }
 }
@@ -162,5 +173,7 @@ fn request_id() -> String {
 }
 
 async fn refuse(stream: &mut TcpStream) {
-    send_frame(stream, &Reply::failed(ERR_UNAVAILABLE)).await.ok();
+    send_frame(stream, &Reply::failed(ERR_UNAVAILABLE))
+        .await
+        .ok();
 }

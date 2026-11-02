@@ -18,10 +18,7 @@ pub const LAST_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 77, 255, 255);
 #[must_use]
 pub const fn assignable(address: Ipv4Addr) -> bool {
     let [first, second, third, fourth] = address.octets();
-    first == 10
-        && second == 77
-        && !(third == 0 && fourth == 0)
-        && !(third == 255 && fourth == 255)
+    first == 10 && second == 77 && !(third == 0 && fourth == 0) && !(third == 255 && fourth == 255)
 }
 
 /// Assigns one address to every account in `verifiers`.
@@ -106,7 +103,14 @@ mod tests {
             .iter()
             .map(|v| assigned.as_ref().ok().and_then(|map| map.get(v).copied()))
             .collect();
-        assert_eq!(got, vec![Some(ip("10.77.0.1")), Some(ip("10.77.0.2")), Some(ip("10.77.0.3"))]);
+        assert_eq!(
+            got,
+            vec![
+                Some(ip("10.77.0.1")),
+                Some(ip("10.77.0.2")),
+                Some(ip("10.77.0.3"))
+            ]
+        );
     }
 
     #[test]
@@ -118,10 +122,18 @@ mod tests {
 
         let after_removal = assign(&[a, c], &first, LAST_ADDRESS).unwrap_or_default();
         assert_eq!(after_removal.get(&a), Some(&ip("10.77.0.1")));
-        assert_eq!(after_removal.get(&c), Some(&ip("10.77.0.3")), "survivor keeps its address");
+        assert_eq!(
+            after_removal.get(&c),
+            Some(&ip("10.77.0.3")),
+            "survivor keeps its address"
+        );
 
         let with_new = assign(&[a, c, d], &after_removal, LAST_ADDRESS).unwrap_or_default();
-        assert_eq!(with_new.get(&d), Some(&ip("10.77.0.2")), "freed address is reused");
+        assert_eq!(
+            with_new.get(&d),
+            Some(&ip("10.77.0.2")),
+            "freed address is reused"
+        );
     }
 
     #[test]
@@ -132,13 +144,20 @@ mod tests {
         stored.insert(b, ip("10.77.0.5"));
         let assigned = assign(&[a, b], &stored, LAST_ADDRESS).unwrap_or_default();
         assert_eq!(assigned.get(&a), Some(&ip("10.77.0.5")));
-        assert_eq!(assigned.get(&b), Some(&ip("10.77.0.1")), "second claimant is renumbered");
+        assert_eq!(
+            assigned.get(&b),
+            Some(&ip("10.77.0.1")),
+            "second claimant is renumbered"
+        );
     }
 
     #[test]
     fn exhausted_space_is_an_error() {
         let verifiers = [account(1), account(2), account(3)];
         let result = assign(&verifiers, &HashMap::new(), ip("10.77.0.2"));
-        assert!(matches!(result, Err(Error::AddressExhausted)), "only two addresses fit");
+        assert!(
+            matches!(result, Err(Error::AddressExhausted)),
+            "only two addresses fit"
+        );
     }
 }

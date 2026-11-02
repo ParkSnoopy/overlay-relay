@@ -57,7 +57,10 @@ pub async fn serve(
             dirty: Arc::clone(&dirty),
             close: close.clone(),
         };
-        (generation, state.register_control(requester.verifier, handle))
+        (
+            generation,
+            state.register_control(requester.verifier, handle),
+        )
     };
     if let Some(old) = replaced {
         old.close.cancel();

@@ -116,7 +116,13 @@ mod tests {
         let raw = table(1, &[entry(1, "alice"), entry(2, "bob")]);
         let names: Vec<String> = Peers::parse(&raw).map_or_else(
             |_| Vec::new(),
-            |table| table.accounts().iter().map(|a| a.name().to_owned()).collect(),
+            |table| {
+                table
+                    .accounts()
+                    .iter()
+                    .map(|a| a.name().to_owned())
+                    .collect()
+            },
         );
         assert_eq!(names, vec!["alice".to_owned(), "bob".to_owned()]);
     }
@@ -129,13 +135,19 @@ mod tests {
     #[test]
     fn wrong_version_is_rejected() {
         let result = Peers::parse(&table(2, &[entry(1, "alice")]));
-        assert!(matches!(result, Err(Error::Peers(_))), "version 2 must fail");
+        assert!(
+            matches!(result, Err(Error::Peers(_))),
+            "version 2 must fail"
+        );
     }
 
     #[test]
     fn duplicate_verifiers_are_rejected() {
         let result = Peers::parse(&table(1, &[entry(1, "alice"), entry(1, "again")]));
-        assert!(matches!(result, Err(Error::Peers(_))), "duplicate verifier must fail");
+        assert!(
+            matches!(result, Err(Error::Peers(_))),
+            "duplicate verifier must fail"
+        );
     }
 
     #[test]
@@ -148,9 +160,15 @@ mod tests {
     fn overlong_name_is_rejected() {
         let long = "n".repeat(129);
         let result = Peers::parse(&table(1, &[entry(1, &long)]));
-        assert!(matches!(result, Err(Error::Peers(_))), "129-byte name must fail");
+        assert!(
+            matches!(result, Err(Error::Peers(_))),
+            "129-byte name must fail"
+        );
         let exact = "n".repeat(128);
-        assert!(Peers::parse(&table(1, &[entry(1, &exact)])).is_ok(), "128 bytes is allowed");
+        assert!(
+            Peers::parse(&table(1, &[entry(1, &exact)])).is_ok(),
+            "128 bytes is allowed"
+        );
     }
 
     #[test]
@@ -164,7 +182,10 @@ mod tests {
                 format!(r#"{{"verifier":"{hex}","name":"n"}}"#)
             })
             .collect();
-        assert!(matches!(Peers::parse(&table(1, &entries)), Err(Error::Peers(_))));
+        assert!(matches!(
+            Peers::parse(&table(1, &entries)),
+            Err(Error::Peers(_))
+        ));
     }
 
     #[test]

@@ -146,7 +146,7 @@ func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
 		return false, "overlay hub is unreachable"
 	}
 	defer closeConn(conn)
-	reply, err := a.handshake(ctx, conn, overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl, Token: a.token})
+	reply, err := a.handshake(ctx, conn, &overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl, Token: a.token})
 	if err != nil {
 		slog.Debug("Overlay control handshake failed")
 		return false, "overlay hub is unreachable"
@@ -179,7 +179,7 @@ func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
 
 // handshake sends hello and reads the hub's reply within the handshake bound.
 // The deadline is cleared on success so the stream can live on.
-func (a *Agent) handshake(ctx context.Context, conn net.Conn, hello overlay.Hello) (overlay.Reply, error) {
+func (a *Agent) handshake(ctx context.Context, conn net.Conn, hello *overlay.Hello) (overlay.Reply, error) {
 	var reply overlay.Reply
 	stop := context.AfterFunc(ctx, func() { closeConn(conn) })
 	defer stop()

@@ -22,7 +22,7 @@ func Probe(ctx context.Context, address string) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	deadline, _ := ctx.Deadline()
 	_ = conn.SetDeadline(deadline)
 	hello := overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl, Token: strings.Repeat("0", 64)}

@@ -181,13 +181,7 @@ impl Hub {
             return;
         };
         let config = &self.shared.config;
-        if !admitted(
-            config.resolver.as_ref(),
-            &config.allowed_hosts,
-            remote.ip(),
-        )
-        .await
-        {
+        if !admitted(config.resolver.as_ref(), &config.allowed_hosts, remote.ip()).await {
             return;
         }
         self.serve_connection(stream, session).await;

@@ -236,5 +236,5 @@ func Assignable(address netip.Addr) bool {
 		return false
 	}
 	b := address.As4()
-	return !(b[2] == 0 && b[3] == 0) && !(b[2] == 255 && b[3] == 255)
+	return (b[2] != 0 || b[3] != 0) && (b[2] != 255 || b[3] != 255)
 }

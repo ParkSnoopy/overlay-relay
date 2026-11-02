@@ -42,7 +42,8 @@ async fn run() -> Result<()> {
         return Err(Error::Config("overlay admission requires an allowed host"));
     }
     let host_count = hosts.len();
-    let peers_path = env::var(PEERS_PATH_ENV).map_or_else(|_| PathBuf::from(PEERS_PATH), PathBuf::from);
+    let peers_path =
+        env::var(PEERS_PATH_ENV).map_or_else(|_| PathBuf::from(PEERS_PATH), PathBuf::from);
     let data_dir = env::var(DATA_DIR_ENV).map_or_else(|_| PathBuf::from(DATA_DIR), PathBuf::from);
     let listen = env::var(LISTEN_ADDRESS_ENV).unwrap_or_else(|_| LISTEN_ADDRESS.to_owned());
     let config = Config::new(peers_path, data_dir, hosts);

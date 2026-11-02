@@ -45,7 +45,9 @@ impl Verifier {
             .0
             .iter()
             .zip(other.0.iter())
-            .fold(0_u8, |accumulated, (left, right)| accumulated | (left ^ right));
+            .fold(0_u8, |accumulated, (left, right)| {
+                accumulated | (left ^ right)
+            });
         difference == 0
     }
 }
@@ -78,9 +80,18 @@ mod tests {
     fn malformed_tokens_have_no_verifier() {
         assert!(Verifier::from_token("").is_none(), "empty token");
         assert!(Verifier::from_token("not-hex").is_none(), "non-hex token");
-        assert!(Verifier::from_token(&token_hex('1')[..62]).is_none(), "short token");
-        assert!(Verifier::from_token(&format!("{}00", token_hex('1'))).is_none(), "long token");
-        assert!(Verifier::from_hex(&token_hex('z')).is_none(), "non-hex verifier");
+        assert!(
+            Verifier::from_token(&token_hex('1')[..62]).is_none(),
+            "short token"
+        );
+        assert!(
+            Verifier::from_token(&format!("{}00", token_hex('1'))).is_none(),
+            "long token"
+        );
+        assert!(
+            Verifier::from_hex(&token_hex('z')).is_none(),
+            "non-hex verifier"
+        );
     }
 
     #[test]
@@ -89,7 +100,10 @@ mod tests {
         let mut other = [7_u8; 32];
         assert!(first.matches(&Verifier::from_digest(other)));
         other[31] = 8;
-        assert!(!first.matches(&Verifier::from_digest(other)), "one differing byte");
+        assert!(
+            !first.matches(&Verifier::from_digest(other)),
+            "one differing byte"
+        );
     }
 
     #[test]

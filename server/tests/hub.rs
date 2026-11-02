@@ -227,7 +227,10 @@ async fn next_incoming(stream: &mut TcpStream) -> TestResult<Incoming> {
 }
 
 /// Reads events until the control stream reports exactly the names in `want`.
-async fn await_peers(stream: &mut TcpStream, want: &[&str]) -> TestResult<Vec<overlay_relay::Peer>> {
+async fn await_peers(
+    stream: &mut TcpStream,
+    want: &[&str],
+) -> TestResult<Vec<overlay_relay::Peer>> {
     let mut expected: Vec<String> = want.iter().map(|name| (*name).to_owned()).collect();
     expected.sort();
     loop {
@@ -288,7 +291,11 @@ async fn establish(f: &mut Fixture, proto: &str, port: u16) -> TestResult<Flow> 
     if !reply.ok {
         return Err(format!("open rejected: {reply:?}").into());
     }
-    Ok(Flow { alice, bob, incoming })
+    Ok(Flow {
+        alice,
+        bob,
+        incoming,
+    })
 }
 
 #[tokio::test]
@@ -355,7 +362,10 @@ async fn oversized_and_wrong_version_frames_are_dropped() -> TestResult {
 
 #[tokio::test]
 async fn silent_connection_hits_the_handshake_deadline() -> TestResult {
-    let f = fixture(&["alice"], |c| c.handshake_timeout = Duration::from_millis(100)).await?;
+    let f = fixture(&["alice"], |c| {
+        c.handshake_timeout = Duration::from_millis(100);
+    })
+    .await?;
     let mut stream = TcpStream::connect(f.address).await?;
     expect_closed(&mut stream).await
 }
@@ -399,7 +409,10 @@ async fn admission_follows_current_resolution() -> TestResult {
     let mapped: IpAddr = "::ffff:127.0.0.1".parse()?;
     *f.addresses.lock().await = vec![mapped];
     let (_stream, reply) = register(f.address, "alice").await?;
-    ensure!(reply.ok, "mapped loopback must be admitted after re-resolution");
+    ensure!(
+        reply.ok,
+        "mapped loopback must be admitted after re-resolution"
+    );
     Ok(())
 }
 
@@ -463,10 +476,16 @@ async fn refused_opens_are_indistinguishable() -> TestResult {
         refused(f.address, hello).await?;
     }
     let mut bob_control = bob_control;
-    while let Ok(Ok(event)) =
-        timeout(Duration::from_millis(200), read_frame::<_, Event>(&mut bob_control)).await
+    while let Ok(Ok(event)) = timeout(
+        Duration::from_millis(200),
+        read_frame::<_, Event>(&mut bob_control),
+    )
+    .await
     {
-        ensure!(!matches!(event, Event::Incoming(_)), "a refused request reached a peer");
+        ensure!(
+            !matches!(event, Event::Incoming(_)),
+            "a refused request reached a peer"
+        );
     }
     f.held.push(bob_control);
     Ok(())
@@ -508,14 +527,23 @@ async fn udp_flow_preserves_datagram_framing() -> TestResult {
     let mut f = fixture(&["alice", "bob"], |_| {}).await?;
     let mut flow = establish(&mut f, PROTO_UDP, 5353).await?;
     ensure_eq!(flow.incoming.proto, PROTO_UDP);
-    let datagrams: Vec<Vec<u8>> = vec![b"a".to_vec(), Vec::new(), vec![b'x'; 1400], b"last".to_vec()];
+    let datagrams: Vec<Vec<u8>> = vec![
+        b"a".to_vec(),
+        Vec::new(),
+        vec![b'x'; 1400],
+        b"last".to_vec(),
+    ];
     for datagram in &datagrams {
         write_datagram(&mut flow.alice, datagram).await?;
     }
     let mut buffer = vec![0_u8; MAX_DATAGRAM];
     for want in &datagrams {
         let size = timeout(IO_WAIT, read_datagram(&mut flow.bob, &mut buffer)).await??;
-        ensure_eq!(&buffer[..size], want.as_slice(), "datagram boundaries must survive");
+        ensure_eq!(
+            &buffer[..size],
+            want.as_slice(),
+            "datagram boundaries must survive"
+        );
     }
     write_datagram(&mut flow.bob, b"pong").await?;
     let size = timeout(IO_WAIT, read_datagram(&mut flow.alice, &mut buffer)).await??;
@@ -525,7 +553,10 @@ async fn udp_flow_preserves_datagram_framing() -> TestResult {
 
 #[tokio::test]
 async fn udp_flow_ends_when_idle() -> TestResult {
-    let mut f = fixture(&["alice", "bob"], |c| c.udp_idle = Duration::from_millis(150)).await?;
+    let mut f = fixture(&["alice", "bob"], |c| {
+        c.udp_idle = Duration::from_millis(150);
+    })
+    .await?;
     let mut flow = establish(&mut f, PROTO_UDP, 53).await?;
     expect_closed(&mut flow.alice).await?;
     expect_closed(&mut flow.bob).await
@@ -533,17 +564,28 @@ async fn udp_flow_ends_when_idle() -> TestResult {
 
 #[tokio::test]
 async fn missing_accept_reports_unavailable_and_late_accept_fails() -> TestResult {
-    let f = fixture(&["alice", "bob"], |c| c.accept_timeout = Duration::from_millis(150)).await?;
+    let f = fixture(&["alice", "bob"], |c| {
+        c.accept_timeout = Duration::from_millis(150);
+    })
+    .await?;
     let (mut bob_control, _) = register(f.address, "bob").await?;
     let (_alice_control, _) = register(f.address, "alice").await?;
     let bob_ip = f.ip("bob").await?.to_string();
     let started = Instant::now();
-    let (_stream, reply) = open_flow(f.address, open_hello("alice", &bob_ip, PROTO_TCP, Some(80))).await?;
+    let (_stream, reply) =
+        open_flow(f.address, open_hello("alice", &bob_ip, PROTO_TCP, Some(80))).await?;
     ensure_eq!(reply, Reply::failed(ERR_UNAVAILABLE));
-    ensure!(started.elapsed() >= Duration::from_millis(100), "must wait for the accept");
+    ensure!(
+        started.elapsed() >= Duration::from_millis(100),
+        "must wait for the accept"
+    );
     let id = next_incoming(&mut bob_control).await?.id;
     let (_late, late) = dial(f.address, &accept_hello("bob", &id)).await?;
-    ensure_eq!(late, Reply::failed(ERR_UNAUTHORIZED), "a late accept finds nothing");
+    ensure_eq!(
+        late,
+        Reply::failed(ERR_UNAUTHORIZED),
+        "a late accept finds nothing"
+    );
     Ok(())
 }
 
@@ -554,27 +596,44 @@ async fn accept_is_bound_to_destination_and_single_use() -> TestResult {
     let (_alice_control, _) = register(f.address, "alice").await?;
     let (_carol_control, _) = register(f.address, "carol").await?;
     let bob_ip = f.ip("bob").await?.to_string();
-    let opened: JoinHandle<TestResult<(TcpStream, Reply)>> =
-        tokio::spawn(open_flow(f.address, open_hello("alice", &bob_ip, PROTO_TCP, Some(80))));
+    let opened: JoinHandle<TestResult<(TcpStream, Reply)>> = tokio::spawn(open_flow(
+        f.address,
+        open_hello("alice", &bob_ip, PROTO_TCP, Some(80)),
+    ));
     let id = next_incoming(&mut bob_control).await?.id;
     for name in ["carol", "hidden", "alice", "mallory"] {
         let (_stream, reply) = dial(f.address, &accept_hello(name, &id)).await?;
-        ensure_eq!(reply, Reply::failed(ERR_UNAUTHORIZED), "{name} accepted a foreign request");
+        ensure_eq!(
+            reply,
+            Reply::failed(ERR_UNAUTHORIZED),
+            "{name} accepted a foreign request"
+        );
     }
     let (_stream, reply) = dial(f.address, &accept_hello("bob", &"0".repeat(32))).await?;
-    ensure_eq!(reply, Reply::failed(ERR_UNAUTHORIZED), "an unknown id must not be accepted");
+    ensure_eq!(
+        reply,
+        Reply::failed(ERR_UNAUTHORIZED),
+        "an unknown id must not be accepted"
+    );
     let (_accepted, reply) = dial(f.address, &accept_hello("bob", &id)).await?;
     ensure!(reply.ok, "the destination's accept must succeed");
     let (_flow, open_reply) = opened.await??;
     ensure!(open_reply.ok, "the open must succeed once accepted");
     let (_second, reply) = dial(f.address, &accept_hello("bob", &id)).await?;
-    ensure_eq!(reply, Reply::failed(ERR_UNAUTHORIZED), "an accept is single use");
+    ensure_eq!(
+        reply,
+        Reply::failed(ERR_UNAUTHORIZED),
+        "an accept is single use"
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn pending_requests_are_bounded_per_destination() -> TestResult {
-    let f = fixture(&["alice", "bob"], |c| c.accept_timeout = Duration::from_secs(1)).await?;
+    let f = fixture(&["alice", "bob"], |c| {
+        c.accept_timeout = Duration::from_secs(1);
+    })
+    .await?;
     let (mut bob_control, _) = register(f.address, "bob").await?;
     let (_alice_control, _) = register(f.address, "alice").await?;
     let bob_ip = f.ip("bob").await?.to_string();
@@ -587,24 +646,38 @@ async fn pending_requests_are_bounded_per_destination() -> TestResult {
         sleep(Duration::from_millis(20)).await;
     }
     let mut incoming = 0;
-    while let Ok(Ok(event)) =
-        timeout(Duration::from_millis(300), read_frame::<_, Event>(&mut bob_control)).await
+    while let Ok(Ok(event)) = timeout(
+        Duration::from_millis(300),
+        read_frame::<_, Event>(&mut bob_control),
+    )
+    .await
     {
         if matches!(event, Event::Incoming(_)) {
             incoming += 1;
         }
     }
-    ensure_eq!(incoming, MAX_PENDING_PER_ACCOUNT, "only the pending cap may reach bob");
+    ensure_eq!(
+        incoming,
+        MAX_PENDING_PER_ACCOUNT,
+        "only the pending cap may reach bob"
+    );
     for handle in handles {
         let (_stream, reply) = handle.await??;
-        ensure_eq!(reply, Reply::failed(ERR_UNAVAILABLE), "every request ends unavailable");
+        ensure_eq!(
+            reply,
+            Reply::failed(ERR_UNAVAILABLE),
+            "every request ends unavailable"
+        );
     }
     Ok(())
 }
 
 #[tokio::test]
 async fn control_replacement_and_idle_close() -> TestResult {
-    let f = fixture(&["alice", "bob"], |c| c.control_idle = Duration::from_millis(300)).await?;
+    let f = fixture(&["alice", "bob"], |c| {
+        c.control_idle = Duration::from_millis(300);
+    })
+    .await?;
     let (mut first, _) = register(f.address, "alice").await?;
     let (mut second, _) = register(f.address, "alice").await?;
     expect_closed(&mut first).await?;
@@ -640,7 +713,11 @@ async fn removed_account_loses_control_and_flows() -> TestResult {
     expect_closed(&mut flow.bob).await?;
     await_peers(&mut carol, &["bob"]).await?;
     let (_stream, reply) = dial(f.address, &control_hello("alice")).await?;
-    ensure_eq!(reply, Reply::failed(ERR_UNAUTHORIZED), "a removed account must not authenticate");
+    ensure_eq!(
+        reply,
+        Reply::failed(ERR_UNAUTHORIZED),
+        "a removed account must not authenticate"
+    );
     Ok(())
 }
 
@@ -686,18 +763,29 @@ async fn addresses_are_stable_across_restart_and_reused_on_removal() -> TestResu
     let first = load_hub(&peers, dir.path(), &["a", "b", "c"]).await?;
     ensure_eq!(
         addresses_of(&first, &["a", "b", "c"]).await,
-        vec![Some("10.77.0.1".parse::<Ipv4Addr>()?), Some("10.77.0.2".parse::<Ipv4Addr>()?), Some("10.77.0.3".parse::<Ipv4Addr>()?)]
+        vec![
+            Some("10.77.0.1".parse::<Ipv4Addr>()?),
+            Some("10.77.0.2".parse::<Ipv4Addr>()?),
+            Some("10.77.0.3".parse::<Ipv4Addr>()?)
+        ]
     );
     let second = load_hub(&peers, dir.path(), &["c", "b", "a"]).await?;
     ensure_eq!(
         addresses_of(&second, &["a", "b", "c"]).await,
-        vec![Some("10.77.0.1".parse::<Ipv4Addr>()?), Some("10.77.0.2".parse::<Ipv4Addr>()?), Some("10.77.0.3".parse::<Ipv4Addr>()?)],
+        vec![
+            Some("10.77.0.1".parse::<Ipv4Addr>()?),
+            Some("10.77.0.2".parse::<Ipv4Addr>()?),
+            Some("10.77.0.3".parse::<Ipv4Addr>()?)
+        ],
         "reordering and restart keep addresses"
     );
     let third = load_hub(&peers, dir.path(), &["a", "c"]).await?;
     ensure_eq!(
         addresses_of(&third, &["a", "c"]).await,
-        vec![Some("10.77.0.1".parse::<Ipv4Addr>()?), Some("10.77.0.3".parse::<Ipv4Addr>()?)],
+        vec![
+            Some("10.77.0.1".parse::<Ipv4Addr>()?),
+            Some("10.77.0.3".parse::<Ipv4Addr>()?)
+        ],
         "survivors keep addresses"
     );
     let fourth = load_hub(&peers, dir.path(), &["a", "c", "d"]).await?;
@@ -710,11 +798,23 @@ async fn addresses_are_stable_across_restart_and_reused_on_removal() -> TestResu
     let assignments = dir.path().join("ips.json");
     let saved = tokio::fs::read(&assignments).await?;
     tokio::fs::write(&peers, b"{").await?;
-    Hub::new(Config::new(peers.clone(), dir.path().to_path_buf(), Vec::new())).await?;
-    ensure_eq!(tokio::fs::read(&assignments).await?, saved, "a broken table must not erase assignments");
+    Hub::new(Config::new(
+        peers.clone(),
+        dir.path().to_path_buf(),
+        Vec::new(),
+    ))
+    .await?;
+    ensure_eq!(
+        tokio::fs::read(&assignments).await?,
+        saved,
+        "a broken table must not erase assignments"
+    );
 
     tokio::fs::write(&assignments, b"garbage").await?;
     let corrupt = Hub::new(Config::new(peers, dir.path().to_path_buf(), Vec::new())).await;
-    ensure!(corrupt.is_err(), "corrupt assignments must be an error, not renumbering");
+    ensure!(
+        corrupt.is_err(),
+        "corrupt assignments must be an error, not renumbering"
+    );
     Ok(())
 }

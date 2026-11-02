@@ -117,18 +117,18 @@ func (h *fakeHub) serve(conn net.Conn) {
 	h.accepted.Add(1)
 	switch hello.Kind {
 	case overlay.KindControl:
-		h.serveControl(conn, hello)
+		h.serveControl(conn, &hello)
 	case overlay.KindOpen:
-		h.serveOpen(conn, hello)
+		h.serveOpen(conn, &hello)
 	case overlay.KindAccept:
-		h.serveAccept(conn, hello)
+		h.serveAccept(conn, &hello)
 	default:
 		_ = overlay.WriteFrame(conn, overlay.Reply{Error: "bad kind"})
 		_ = conn.Close()
 	}
 }
 
-func (h *fakeHub) serveControl(conn net.Conn, hello overlay.Hello) {
+func (h *fakeHub) serveControl(conn net.Conn, hello *overlay.Hello) {
 	defer func() { _ = conn.Close() }()
 	if h.rejectControl.Load() || hello.Version != overlay.Version {
 		_ = overlay.WriteFrame(conn, overlay.Reply{Error: "unknown account"})
@@ -220,7 +220,7 @@ func (h *fakeHub) dropControls() {
 	}
 }
 
-func (h *fakeHub) serveOpen(conn net.Conn, hello overlay.Hello) {
+func (h *fakeHub) serveOpen(conn net.Conn, hello *overlay.Hello) {
 	defer func() { _ = conn.Close() }()
 	requester := h.account(hello.Token)
 	destination, _ := netip.ParseAddr(hello.Dst)
@@ -255,7 +255,7 @@ func (h *fakeHub) serveOpen(conn net.Conn, hello overlay.Hello) {
 	}
 }
 
-func (h *fakeHub) serveAccept(conn net.Conn, hello overlay.Hello) {
+func (h *fakeHub) serveAccept(conn net.Conn, hello *overlay.Hello) {
 	h.mu.Lock()
 	accepted := h.pending[hello.ID]
 	delete(h.pending, hello.ID)
@@ -385,7 +385,7 @@ func hasPeer(ip netip.Addr) func(overlay.State) bool {
 	}
 }
 
-func tcpEcho(t *testing.T) (string, func()) {
+func tcpEcho(t *testing.T) (address string, shutdown func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -413,7 +413,7 @@ func tcpEcho(t *testing.T) (string, func()) {
 	return listener.Addr().String(), stop
 }
 
-func udpEcho(t *testing.T) (string, func()) {
+func udpEcho(t *testing.T) (address string, shutdown func()) {
 	t.Helper()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -677,7 +677,7 @@ func TestIncomingConcurrencyIsBounded(t *testing.T) {
 	// Capacity returns once flows finish.
 	hub.push(bIP, overlay.Incoming{ID: "again", Proto: overlay.ProtoTCP, Src: "10.77.7.7", Port: 80})
 	deadline = time.Now().Add(3 * time.Second)
-	for started.Load() < maxIncoming+1 && time.Now().Before(deadline) {
+	for started.Load() <= maxIncoming && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if started.Load() != maxIncoming+1 {
@@ -878,6 +878,12 @@ func TestNoGoroutineLeaksAfterTraffic(t *testing.T) {
 		a.waitReady(t)
 		bIP := b.waitReady(t)
 		a.waitState(t, "B listed", hasPeer(bIP))
+		var kept []net.Conn
+		defer func() {
+			for _, conn := range kept {
+				_ = conn.Close()
+			}
+		}()
 		for _, proto := range []string{overlay.ProtoTCP, overlay.ProtoUDP} {
 			conn, err := a.Outbound(context.Background(), proto, netip.AddrPortFrom(bIP, 9))
 			if err != nil {
@@ -890,7 +896,7 @@ func TestNoGoroutineLeaksAfterTraffic(t *testing.T) {
 				t.Fatalf("%s echo = %q, %v", proto, buffer[:n], err)
 			}
 			// Leave the flows open: cancellation must reap them.
-			defer func() { _ = conn.Close() }()
+			kept = append(kept, conn)
 		}
 		stopA()
 		stopB()

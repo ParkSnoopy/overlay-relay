@@ -93,11 +93,16 @@ impl State {
                 closed_controls += 1;
             }
         }
-        self.pending
-            .retain(|_, pending| !removed.contains(&pending.requester) && !removed.contains(&pending.destination));
+        self.pending.retain(|_, pending| {
+            !removed.contains(&pending.requester) && !removed.contains(&pending.destination)
+        });
         let mut closed_flows = 0;
         for flow in self.flows.values() {
-            if flow.accounts.iter().any(|verifier| removed.contains(verifier)) {
+            if flow
+                .accounts
+                .iter()
+                .any(|verifier| removed.contains(verifier))
+            {
                 flow.cancel.cancel();
                 closed_flows += 1;
             }
@@ -236,7 +241,9 @@ impl State {
     /// Registers an active flow between two accounts. Returns `None` when an
     /// account is missing from the table or already holds its flow limit.
     pub fn open_flow(&mut self, accounts: [Verifier; 2], cancel: CancellationToken) -> Option<u64> {
-        let known = accounts.iter().all(|verifier| self.accounts.contains_key(verifier));
+        let known = accounts
+            .iter()
+            .all(|verifier| self.accounts.contains_key(verifier));
         let capacity = accounts
             .iter()
             .all(|verifier| self.flow_count(verifier) < MAX_FLOWS_PER_ACCOUNT);
@@ -291,8 +298,20 @@ mod tests {
         let (a, b) = (account(1), account(2));
         let mut state = State::default();
         let change = state.replace_table(vec![
-            (a, "a".to_owned(), "10.77.0.1".parse::<Ipv4Addr>().unwrap_or(Ipv4Addr::UNSPECIFIED)),
-            (b, "b".to_owned(), "10.77.0.2".parse::<Ipv4Addr>().unwrap_or(Ipv4Addr::UNSPECIFIED)),
+            (
+                a,
+                "a".to_owned(),
+                "10.77.0.1"
+                    .parse::<Ipv4Addr>()
+                    .unwrap_or(Ipv4Addr::UNSPECIFIED),
+            ),
+            (
+                b,
+                "b".to_owned(),
+                "10.77.0.2"
+                    .parse::<Ipv4Addr>()
+                    .unwrap_or(Ipv4Addr::UNSPECIFIED),
+            ),
         ]);
         assert_eq!(change.accounts, 2);
         for index in 0..MAX_FLOWS_PER_ACCOUNT {
@@ -312,17 +331,34 @@ mod tests {
         let (a, b) = (account(1), account(2));
         let mut state = State::default();
         state.replace_table(vec![
-            (a, "a".to_owned(), "10.77.0.1".parse::<Ipv4Addr>().unwrap_or(Ipv4Addr::UNSPECIFIED)),
-            (b, "b".to_owned(), "10.77.0.2".parse::<Ipv4Addr>().unwrap_or(Ipv4Addr::UNSPECIFIED)),
+            (
+                a,
+                "a".to_owned(),
+                "10.77.0.1"
+                    .parse::<Ipv4Addr>()
+                    .unwrap_or(Ipv4Addr::UNSPECIFIED),
+            ),
+            (
+                b,
+                "b".to_owned(),
+                "10.77.0.2"
+                    .parse::<Ipv4Addr>()
+                    .unwrap_or(Ipv4Addr::UNSPECIFIED),
+            ),
         ]);
         let token = CancellationToken::new();
         assert!(state.open_flow([a, b], token.clone()).is_some());
         let change = state.replace_table(vec![(
             b,
             "b".to_owned(),
-            "10.77.0.2".parse::<Ipv4Addr>().unwrap_or(Ipv4Addr::UNSPECIFIED),
+            "10.77.0.2"
+                .parse::<Ipv4Addr>()
+                .unwrap_or(Ipv4Addr::UNSPECIFIED),
         )]);
         assert_eq!(change.closed_flows, 1);
-        assert!(token.is_cancelled(), "the flow of a removed account must be cancelled");
+        assert!(
+            token.is_cancelled(),
+            "the flow of a removed account must be cancelled"
+        );
     }
 }

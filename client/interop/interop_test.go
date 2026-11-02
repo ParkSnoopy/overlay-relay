@@ -46,7 +46,7 @@ func freeAddress(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	return listener.Addr().String()
 }
 
@@ -82,7 +82,7 @@ func startHub(t *testing.T, binary string, peers overlay.Peers) hubProcess {
 	for {
 		conn, err := net.DialTimeout("tcp", address, 200*time.Millisecond)
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
 			break
 		}
 		if time.Now().After(deadline) {
@@ -154,7 +154,7 @@ func TestGoAgentAndRustHubRelayTCP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer service.Close()
+	defer func() { _ = service.Close() }()
 	port := uint16(service.Addr().(*net.TCPAddr).Port)
 	go func() {
 		for {
@@ -163,7 +163,7 @@ func TestGoAgentAndRustHubRelayTCP(t *testing.T) {
 				return
 			}
 			go func() {
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 				_, _ = io.Copy(conn, conn)
 			}()
 		}
@@ -194,7 +194,7 @@ func TestGoAgentAndRustHubRelayTCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open flow to bob: %v", err)
 	}
-	defer flow.Close()
+	defer func() { _ = flow.Close() }()
 	if _, err := flow.Write([]byte("ping over overlay")); err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestGoAgentAndRustHubRelayTCP(t *testing.T) {
 	// An address outside the peer snapshot is refused by the hub without relaying.
 	unknown := netip.AddrPortFrom(netip.MustParseAddr("10.77.200.200"), port)
 	if conn, err := aliceAgent.Outbound(ctx, overlay.ProtoTCP, unknown); err == nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatal("flow to unknown address succeeded")
 	}
 

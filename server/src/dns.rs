@@ -49,7 +49,10 @@ pub async fn admitted(resolver: &dyn Resolver, hosts: &[String], remote: IpAddr)
         let Ok(Ok(addresses)) = timeout(LOOKUP_TIMEOUT, resolver.resolve(host)).await else {
             continue;
         };
-        if addresses.iter().any(|address| address.to_canonical() == remote) {
+        if addresses
+            .iter()
+            .any(|address| address.to_canonical() == remote)
+        {
             return true;
         }
     }

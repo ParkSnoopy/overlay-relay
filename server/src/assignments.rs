@@ -94,7 +94,11 @@ mod tests {
         let mut assignments = HashMap::new();
         assignments.insert(verifier, address);
         save(&path, &assignments).await?;
-        ensure_eq!(load(&path).await?, assignments, "saved assignments must load back");
+        ensure_eq!(
+            load(&path).await?,
+            assignments,
+            "saved assignments must load back"
+        );
         let mode = std::fs::metadata(&path)?.permissions().mode() & 0o777;
         ensure_eq!(mode, 0o600, "ips.json must not be world-readable");
         Ok(())
@@ -103,7 +107,10 @@ mod tests {
     #[tokio::test]
     async fn missing_file_loads_empty() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        ensure!(load(&dir.path().join(FILE_NAME)).await?.is_empty(), "missing file must load empty");
+        ensure!(
+            load(&dir.path().join(FILE_NAME)).await?.is_empty(),
+            "missing file must load empty"
+        );
         Ok(())
     }
 
@@ -124,7 +131,10 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join(FILE_NAME);
         tokio::fs::write(&path, b"null").await?;
-        ensure!(load(&path).await?.is_empty(), "null document must load empty");
+        ensure!(
+            load(&path).await?.is_empty(),
+            "null document must load empty"
+        );
         Ok(())
     }
 }

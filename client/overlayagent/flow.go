@@ -39,7 +39,7 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 	if err != nil {
 		return nil, errors.New("overlay hub is unreachable")
 	}
-	reply, err := a.handshake(ctx, conn, overlay.Hello{Version: overlay.Version, Kind: overlay.KindOpen, Token: a.token, Proto: proto, Dst: ip.String(), Port: dst.Port()})
+	reply, err := a.handshake(ctx, conn, &overlay.Hello{Version: overlay.Version, Kind: overlay.KindOpen, Token: a.token, Proto: proto, Dst: ip.String(), Port: dst.Port()})
 	if err != nil {
 		closeConn(conn)
 		return nil, errors.New("overlay hub is unreachable")
@@ -83,7 +83,7 @@ func (a *Agent) serveIncoming(ctx context.Context, in overlay.Incoming, src neti
 	if err != nil {
 		return err
 	}
-	reply, err := a.handshake(ctx, hub, overlay.Hello{Version: overlay.Version, Kind: overlay.KindAccept, Token: a.token, ID: in.ID})
+	reply, err := a.handshake(ctx, hub, &overlay.Hello{Version: overlay.Version, Kind: overlay.KindAccept, Token: a.token, ID: in.ID})
 	if err != nil || !reply.OK {
 		closeConn(hub)
 		return errors.Join(err, errors.New("hub refused the accept stream"))
