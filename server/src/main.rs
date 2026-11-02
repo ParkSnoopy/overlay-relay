@@ -18,8 +18,8 @@ const ALLOWED_HOST_ENV: &str = "OVERLAY_ALLOWED_HOST";
 const PEERS_PATH_ENV: &str = "OVERLAY_PEERS_PATH";
 const DATA_DIR_ENV: &str = "OVERLAY_DATA_DIR";
 const LISTEN_ADDRESS_ENV: &str = "OVERLAY_LISTEN_ADDRESS";
-const PEERS_PATH: &str = "/etc/snoo-box-overlay/peers.json";
-const DATA_DIR: &str = "/var/lib/snoo-box-overlay";
+const PEERS_PATH: &str = "/etc/overlay-relay/peers.json";
+const DATA_DIR: &str = "/var/lib/overlay-relay";
 
 #[tokio::main]
 async fn main() -> ExitCode {

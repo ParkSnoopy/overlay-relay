@@ -12,8 +12,8 @@ The hub never learns credentials: it stores only verifiers, `overlay.Verifier(to
 ## Inputs
 
 - `OVERLAY_ALLOWED_HOST` is a comma-separated list of engine container names and is required.
-- `/etc/snoo-box-overlay/peers.json` is the read-only `overlay.Peers` table written by the manager.
-- `/var/lib/snoo-box-overlay` is the only writable path and holds `ips.json`.
+- `/etc/overlay-relay/peers.json` is the read-only `overlay.Peers` table written by the manager.
+- `/var/lib/overlay-relay` is the only writable path and holds `ips.json`.
 
 ## Admission
 
