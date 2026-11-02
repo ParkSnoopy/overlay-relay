@@ -1,4 +1,4 @@
-package interop
+package tests
 
 import (
 	"context"
@@ -19,7 +19,7 @@ import (
 
 // The Rust hub is built from the sibling server crate and run as a real process,
 // so the Go agent and the Rust relay meet over loopback TCP with the shipped wire format.
-const serverManifest = "../../server/Cargo.toml"
+const serverManifest = "../server/Cargo.toml"
 
 type hubProcess struct {
 	address string
@@ -33,7 +33,7 @@ func buildHub(t *testing.T) string {
 	if err := build.Run(); err != nil {
 		t.Fatalf("build overlay-hub: %v", err)
 	}
-	binary, err := filepath.Abs("../../server/target/debug/overlay-hub")
+	binary, err := filepath.Abs("../server/target/debug/overlay-hub")
 	if err != nil {
 		t.Fatal(err)
 	}

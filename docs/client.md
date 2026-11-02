@@ -26,5 +26,5 @@ Tokens, secrets and payloads never enter logs.
 ## Checks
 
 - Run `go test -race ./...` from `client/`; the agent tests use an in-process hub speaking the wire contract and covers registration, peers, TCP and UDP flows, refusals, concurrency bounds, reconnects, backoff, cancellation and goroutine leaks.
-- Run `go test -race ./interop` from `client/` for the Go agent against the Rust hub; it builds `server/` with cargo.
+- Run `go test -race -count=1 ./...` from `tests/` for the Go agent against the Rust hub; it builds `server/` with cargo.
 - Integration with the real hub and routed traffic on each platform is a separate acceptance step.

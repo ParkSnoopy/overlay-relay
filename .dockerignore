@@ -1,0 +1,9 @@
+**/target/
+.git/
+client/
+examples/
+tests/
+docs/
+go.work
+go.work.sum
+*.log
