@@ -1,0 +1,84 @@
+[package]
+name = "overlay-relay"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+# ============================================
+# RUST-MAGIC-LINTER (maximum preset)
+# https://github.com/ParkSnoopy/rust-magic-linter
+# ============================================
+# MAXIMUM PROFILE
+# Broad lint groups at deny level, with explicit relaxations below.
+# See CONSTITUTION.md for design guidance and overrides.
+# Add to Cargo.toml; use [workspace.lints.*] in workspace roots.
+# clippy.toml configures thresholds but does not enable lints.
+
+[lints.rust]
+# Safety (forbid cannot be overridden by local lint attributes)
+unsafe_code = "forbid"
+non_ascii_idents = "forbid"
+
+# Quality enforcement
+warnings = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+
+# Documentation enforcement
+missing_docs = "deny"
+missing_debug_implementations = "deny"
+missing_copy_implementations = "deny"
+unfulfilled_lint_expectations = "deny"
+
+[lints.rustdoc]
+all = { level = "deny", priority = -1 }
+
+[lints.clippy]
+# Lint groups (individual entries override priority -1 groups)
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+
+# Panic restrictions (stricter than Google's invariant-panic guidance)
+unwrap_used = "deny"              # Handle missing values and errors explicitly.
+expect_used = "deny"              # Handle missing values and errors explicitly.
+panic = "deny"                    # Do not call panic!() explicitly.
+panic_in_result_fn = "deny"        # Do not panic in functions returning Result.
+
+# Lint suppression restrictions
+allow_attributes = "deny"         # Do not add #[allow(...)]; fix the cause.
+allow_attributes_without_reason = "deny"  # Require reasons where allowances are permitted.
+
+# Code hygiene
+dbg_macro = "deny"                # Remove dbg!() calls.
+todo = "deny"                     # Do not leave todo!() placeholders.
+unimplemented = "deny"            # Do not leave unimplemented!() placeholders.
+print_stdout = "deny"             # Use structured logging or explicit writers.
+print_stderr = "deny"             # Use structured logging or explicit writers.
+
+# Async safety
+await_holding_lock = "deny"       # Do not hold synchronous lock guards across await.
+large_futures = "deny"            # Avoid excessively large futures.
+
+# Process and memory safety
+exit = "deny"                     # Return control rather than calling process::exit.
+mem_forget = "deny"               # Do not bypass destructors with mem::forget.
+
+# Performance
+large_stack_arrays = "deny"
+large_types_passed_by_value = "deny"
+
+# Relaxations (design guidance still applies when a lint is disabled)
+multiple_crate_versions = "allow"   # Unavoidable with transitive deps
+
+# Cast lints - too many false positives even for strict projects
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+
+# Nursery lints that have too many false positives
+cognitive_complexity = "allow"      # Its clippy.toml threshold is inactive here.
