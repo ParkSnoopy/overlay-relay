@@ -35,6 +35,9 @@ type Config struct {
 	DialLocal func(ctx context.Context, proto string, port uint16, src netip.Addr) (net.Conn, error)
 	// OnState receives every state change. It must not block.
 	OnState func(overlay.State)
+	// Compression DEFLATEs flow bytes in chunks (see overlay.Compressed). Default
+	// off. Both peers of a flow must enable it, because the hub relays bytes unchanged.
+	Compression bool
 }
 
 type timing struct {

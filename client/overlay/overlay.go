@@ -60,7 +60,7 @@ const (
 
 // Hello is the first frame on every stream a client opens to the hub.
 type Hello struct {
-	Version int    `json:"v"`
+	Version int    `json:"version"`
 	Kind    string `json:"kind"`
 	Token   string `json:"token"`
 	Proto   string `json:"proto,omitempty"` // open
@@ -156,7 +156,7 @@ type Account struct {
 
 // Peers is the hub's read-only account table, written by the server manager.
 type Peers struct {
-	Version  int       `json:"v"`
+	Version  int       `json:"version"`
 	Accounts []Account `json:"accounts"`
 }
 

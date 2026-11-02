@@ -156,7 +156,7 @@ async fn write_peers(path: &Path, names: &[&str]) -> TestResult {
         .iter()
         .map(|name| serde_json::json!({"verifier": verifier_of(name).to_hex(), "name": name}))
         .collect();
-    let raw = serde_json::to_vec(&serde_json::json!({"v": VERSION, "accounts": accounts}))?;
+    let raw = serde_json::to_vec(&serde_json::json!({"version": VERSION, "accounts": accounts}))?;
     let temporary = path.with_extension("tmp");
     tokio::fs::write(&temporary, raw).await?;
     tokio::fs::rename(&temporary, path).await?;
@@ -165,7 +165,7 @@ async fn write_peers(path: &Path, names: &[&str]) -> TestResult {
 
 fn control_hello(name: &str) -> Hello {
     Hello {
-        v: VERSION,
+        version: VERSION,
         kind: KIND_CONTROL.to_owned(),
         token: token_of(name),
         ..Hello::default()
@@ -174,7 +174,7 @@ fn control_hello(name: &str) -> Hello {
 
 fn open_hello(name: &str, dst: &str, proto: &str, port: Option<u16>) -> Hello {
     Hello {
-        v: VERSION,
+        version: VERSION,
         kind: KIND_OPEN.to_owned(),
         token: token_of(name),
         proto: proto.to_owned(),
@@ -186,7 +186,7 @@ fn open_hello(name: &str, dst: &str, proto: &str, port: Option<u16>) -> Hello {
 
 fn accept_hello(name: &str, id: &str) -> Hello {
     Hello {
-        v: VERSION,
+        version: VERSION,
         kind: KIND_ACCEPT.to_owned(),
         token: token_of(name),
         id: id.to_owned(),
@@ -303,7 +303,7 @@ async fn bad_tokens_get_unauthorized_and_are_closed() -> TestResult {
     let f = fixture(&["alice"], |_| {}).await?;
     for token in [token_of("mallory"), "not-hex".to_owned(), String::new()] {
         let hello = Hello {
-            v: VERSION,
+            version: VERSION,
             kind: KIND_CONTROL.to_owned(),
             token,
             ..Hello::default()
@@ -321,7 +321,7 @@ async fn bad_tokens_get_unauthorized_and_are_closed() -> TestResult {
 async fn all_zero_token_gets_probe_style_unauthorized_reply() -> TestResult {
     let f = fixture(&["alice"], |_| {}).await?;
     let hello = Hello {
-        v: VERSION,
+        version: VERSION,
         kind: KIND_CONTROL.to_owned(),
         token: "0".repeat(64),
         ..Hello::default()
@@ -335,7 +335,7 @@ async fn all_zero_token_gets_probe_style_unauthorized_reply() -> TestResult {
 async fn unknown_kind_gets_invalid_request_after_authentication() -> TestResult {
     let f = fixture(&["alice"], |_| {}).await?;
     let hello = Hello {
-        v: VERSION,
+        version: VERSION,
         kind: "bogus".to_owned(),
         token: token_of("alice"),
         ..Hello::default()
@@ -353,7 +353,7 @@ async fn oversized_and_wrong_version_frames_are_dropped() -> TestResult {
     expect_closed(&mut raw).await?;
     let mut wrong = TcpStream::connect(f.address).await?;
     let hello = Hello {
-        v: 9,
+        version: 9,
         ..control_hello("alice")
     };
     write_frame(&mut wrong, &hello).await?;
@@ -726,8 +726,8 @@ async fn invalid_peers_table_keeps_last_good() -> TestResult {
     let f = fixture(&["alice"], |_| {}).await?;
     let invalid = [
         "{".to_owned(),
-        r#"{"v":2,"accounts":[]}"#.to_owned(),
-        r#"{"v":1,"accounts":[{"verifier":"zz","name":"x"}]}"#.to_owned(),
+        r#"{"version":2,"accounts":[]}"#.to_owned(),
+        r#"{"version":1,"accounts":[{"verifier":"zz","name":"x"}]}"#.to_owned(),
     ];
     for content in invalid {
         tokio::fs::write(&f.peers, content.as_bytes()).await?;

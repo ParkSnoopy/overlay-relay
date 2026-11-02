@@ -48,6 +48,9 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 		closeConn(conn)
 		return nil, errors.New(boundedReason(reply.Error))
 	}
+	if a.cfg.Compression {
+		conn = overlay.Compressed(conn)
+	}
 	if proto == overlay.ProtoUDP {
 		return &datagramConn{Conn: conn, buffer: make([]byte, 2+overlay.MaxDatagram)}, nil
 	}
@@ -87,6 +90,9 @@ func (a *Agent) serveIncoming(ctx context.Context, in overlay.Incoming, src neti
 	if err != nil || !reply.OK {
 		closeConn(hub)
 		return errors.Join(err, errors.New("hub refused the accept stream"))
+	}
+	if a.cfg.Compression {
+		hub = overlay.Compressed(hub)
 	}
 	local, err := a.cfg.DialLocal(ctx, in.Proto, in.Port, src)
 	if err != nil {

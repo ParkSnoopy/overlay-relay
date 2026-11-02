@@ -85,6 +85,7 @@ Notes:
 - `Outbound` refuses your own address and any address outside `10.77.0.0/16`.
 - `IP()` returns the current address, or the zero value before the first registration.
 - Inbound flows are served automatically. Up to 128 are handled at once. Extra requests are dropped.
+- `Config.Compression` (default `false`) DEFLATEs flow bytes in chunks. Both peers of a flow must enable it.
 
 ## Account secrets and tokens
 

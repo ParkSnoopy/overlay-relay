@@ -193,7 +193,7 @@ impl Hub {
             Ok(Ok(hello)) => hello,
             _ => return,
         };
-        if hello.v != VERSION {
+        if hello.version != VERSION {
             return;
         }
         let Some(requester) = self.authenticate(&hello.token).await else {

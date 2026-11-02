@@ -95,7 +95,7 @@ Go modules are joined by the root [`go.work`](go.work). Run Go commands from a m
 
 ## Versioning
 
-The release version is the `version` field in [`server/Cargo.toml`](server/Cargo.toml). Go module tags follow it as `client/vX.Y.Z`. The wire version is separate: messages carry `"v": 1`.
+The release version is the `version` field in [`server/Cargo.toml`](server/Cargo.toml). Go module tags follow it as `client/vX.Y.Z`. The wire version is separate: messages carry `"version": 1`.
 
 ## License
 

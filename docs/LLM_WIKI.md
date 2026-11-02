@@ -11,6 +11,7 @@ Where this document and the code disagree, the code in `server/` (hub) and `clie
 - A **client** that "broadcasts" registers a **control stream** with the hub. The hub then tells it which other broadcasting accounts exist (`peers`).
 - A client opens a **flow** (TCP or UDP) to a peer's overlay address and port. The hub asks the peer to accept, pairs the two streams, and relays bytes between them.
 - The hub never inspects payload bytes after the handshake. It forwards them unchanged.
+- Agents may optionally compress flow bytes (section 8.5). The hub is unaware of it.
 - Hidden accounts (not broadcasting) hold an address but never register a control stream, so they are never listed and cannot be reached.
 
 ## 2. Glossary
@@ -75,7 +76,7 @@ A JSON file read by the hub:
 
 ```json
 {
-  "v": 1,
+  "version": 1,
   "accounts": [
     { "verifier": "c061fc54bb1a7534356bbe32c554c1a3985851a3d1749107b677793ffcb5ba9f", "name": "alice" },
     { "verifier": "d7a251289707b2f388411c5aa04961a52d12ab890b786e3a3cbdc2c04c5fca02", "name": "bob" }
@@ -85,7 +86,7 @@ A JSON file read by the hub:
 
 Validation rules (enforced by the hub; a violation makes the whole table invalid):
 
-- `v` must equal `1`.
+- `version` must equal `1`.
 - At most `4096` accounts.
 - Each `verifier` is exactly 64 hex digits and unique.
 - Each `name` is at most `128` bytes.
@@ -122,7 +123,7 @@ All field names are lowercase JSON keys.
 
 | Field | Type | Used by | Meaning |
 |---|---|---|---|
-| `v` | integer | all | Must be `1`. Otherwise the hub closes the stream silently. |
+| `version` | integer | all | Must be `1`. Otherwise the hub closes the stream silently. |
 | `kind` | string | all | `"control"`, `"open"` or `"accept"`. Anything else gets reply `invalid request`. |
 | `token` | string | all | 64 lowercase hex digits (section 4). |
 | `proto` | string | open | `"tcp"` or `"udp"`. |
@@ -169,7 +170,7 @@ Any other content on a control stream ends the control stream (see section 8.1).
 
 ### 8.1 Control stream
 
-1. Client dials the hub, sends `Hello{v:1, kind:"control", token}`.
+1. Client dials the hub, sends `Hello{version:1, kind:"control", token}`.
 2. Hub replies:
    - Success: `Reply{ok:true, ip, name}`. The account is now registered. The client's address is `ip`.
    - Failure: `Reply{ok:false, error:"unauthorized"}` and the stream closes.
@@ -184,7 +185,7 @@ Writes from the hub to a control stream have a `10` second write deadline. A sta
 
 Preconditions the hub enforces: the requester has an active control stream; the destination has an active control stream; the destination is not the requester; each side has fewer than `256` active flows; the destination has fewer than `4` pending requests.
 
-1. Client dials the hub, sends `Hello{v:1, kind:"open", token, proto, dst, port}`.
+1. Client dials the hub, sends `Hello{version:1, kind:"open", token, proto, dst, port}`.
 2. The hub validates `proto`, `dst`, `port`. Any invalid value gets `Reply{ok:false, error:"peer unavailable"}`.
 3. The hub looks up the destination. If the destination is missing, hidden, not connected, the requester itself, or a precondition fails, the reply is `peer unavailable`. This is intentionally identical for every case, so a requester cannot discover hidden accounts.
 4. The hub sends an `incoming` event to the destination's control stream with a fresh random `id` (16 random bytes, 32 hex digits) and waits up to `10` seconds for the destination to answer.
@@ -194,11 +195,28 @@ Preconditions the hub enforces: the requester has an active control stream; the 
 ### 8.3 Accept stream (destination side)
 
 1. The destination receives an `incoming` event `{id, proto, src, port}` on its control stream. `src` is the requester's overlay address. `port` is the destination port requested.
-2. The destination dials the hub and sends `Hello{v:1, kind:"accept", token, id}`. The `id` must be the one from the event.
+2. The destination dials the hub and sends `Hello{version:1, kind:"accept", token, id}`. The `id` must be the one from the event.
 3. The hub pairs the stream with the pending request only if the token belongs to the destination account that was asked. Otherwise: `Reply{ok:false, error:"unauthorized"}`.
 4. The accept stream waits (up to the `10` second accept timeout measured from the incoming event). When the open side is accepted, the accept stream receives `Reply{ok:true}` and switches to relay mode.
 5. If the pending request expired or was refused, the accept stream is closed without a successful reply.
 6. The destination then connects to its local service on `port` (for TCP, a stream; for UDP, a datagram socket). `src` is informational; the application chooses the local target. The reference `LocalDialer` dials the device's own address, so the local service sees this device as its peer, and services bound only to loopback are not reachable through it.
+
+### 8.5 Optional flow compression (client-side, not hub)
+
+The hub relays flow bytes unchanged, so compression is an agreement between the two agents of one flow. The reference agent enables it with `Config.Compression` (default off). The setting must match on the requester and on the destination. Otherwise the destination reads garbage.
+
+When enabled, the bytes after the handshake use chunks:
+
+```
+kind (1 byte) | body length (uint16, big-endian) | body
+kind 0: body is the plain bytes (raw)
+kind 1: body is a raw DEFLATE stream that inflates to the plain bytes
+```
+
+- A writer splits plain data into chunks of at most `16384` bytes.
+- A writer uses kind `1` only for chunks of at least `512` bytes whose compressed form is smaller.
+- A reader rejects unknown kinds and rejects inflated output above `16384` bytes.
+- The hub never sees the chunk framing. The same bytes relayed in either mode look like any other flow.
 
 ### 8.4 Relay mode
 
@@ -325,7 +343,7 @@ Then: dial the hub, send the open Hello, read the reply. On `ok:true` the stream
 `overlayagent.Probe(ctx, address)` proves that a hub admits this source and parses frames without any real account:
 
 1. Dial the hub.
-2. Send `Hello{v:1, kind:"control", token:"000...0"}` (64 zeros).
+2. Send `Hello{version:1, kind:"control", token:"000...0"}` (64 zeros).
 3. Expect `Reply{ok:false, error:"unauthorized"}`.
 
 Use it as a health check. Any other reply means a misconfigured hub or an unexpected source.
@@ -418,10 +436,10 @@ The hub logs with `tracing`. It never logs tokens, verifiers, payloads or peer n
 - The hub does not encrypt traffic. Confidentiality and integrity of relayed bytes come from the transport the deployer places underneath (for example, a VPN tunnel).
 - The hub does not route to the internet or to addresses outside `10.77.0.0/16`.
 - The hub has no accounting or quotas beyond the flow and pending limits in section 11.
-- No version negotiation beyond `v: 1`. A new wire version requires a new `v` value and a coordinated release.
+- No version negotiation beyond `version: 1`. A new wire version requires a new `version` value and a coordinated release.
 
 ## 20. Release and versioning
 
 - The hub and the Go module share one release version: the `version` field in `server/Cargo.toml`.
 - Go module tags follow the same version as `client/vX.Y.Z`, where `X.Y.Z` matches `server/Cargo.toml`.
-- The wire version is separate (`v: 1`). It changes only on incompatible wire changes.
+- The wire version is separate (`version: 1`). It changes only on incompatible wire changes.

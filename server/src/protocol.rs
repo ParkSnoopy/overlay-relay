@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The only accepted wire version, carried in `Hello.v`.
+/// The only accepted wire version, carried in `Hello.version`.
 pub const VERSION: u32 = 1;
 
 /// Port the hub listens on inside its private container network.
@@ -56,7 +56,7 @@ pub const ERR_INVALID_REQUEST: &str = "invalid request";
 #[serde(default)]
 pub struct Hello {
     /// Wire version; must equal [`VERSION`].
-    pub v: u32,
+    pub version: u32,
     /// Stream kind: [`KIND_CONTROL`], [`KIND_OPEN`] or [`KIND_ACCEPT`].
     pub kind: String,
     /// Hex-encoded 32-byte bearer token derived by the client.

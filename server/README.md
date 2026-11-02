@@ -43,14 +43,14 @@ A JSON file. The hub reads it at startup and checks it every 2 seconds for chang
 
 ```json
 {
-  "v": 1,
+  "version": 1,
   "accounts": [
     { "verifier": "c061fc54bb1a7534356bbe32c554c1a3985851a3d1749107b677793ffcb5ba9f", "name": "alice" }
   ]
 }
 ```
 
-- `v` must be `1`.
+- `version` must be `1`.
 - At most 4096 accounts. Each `verifier` is 64 lowercase or uppercase hex digits and unique.
 - Each `name` is at most 128 bytes.
 - The file is at most 4 MiB.

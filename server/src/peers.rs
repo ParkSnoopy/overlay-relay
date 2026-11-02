@@ -43,7 +43,7 @@ pub struct Peers {
 
 #[derive(Deserialize)]
 struct Document {
-    v: u32,
+    version: u32,
     #[serde(default)]
     accounts: Vec<Entry>,
 }
@@ -75,7 +75,7 @@ impl Peers {
     }
 
     fn validate(document: Document) -> Result<Self> {
-        if document.v != VERSION || document.accounts.len() > MAX_ACCOUNTS {
+        if document.version != VERSION || document.accounts.len() > MAX_ACCOUNTS {
             return Err(Error::Peers("invalid overlay peers table"));
         }
         let mut seen = HashSet::with_capacity(document.accounts.len());
@@ -108,7 +108,11 @@ mod tests {
     }
 
     fn table(version: u32, entries: &[String]) -> Vec<u8> {
-        format!(r#"{{"v":{version},"accounts":[{}]}}"#, entries.join(",")).into_bytes()
+        format!(
+            r#"{{"version":{version},"accounts":[{}]}}"#,
+            entries.join(",")
+        )
+        .into_bytes()
     }
 
     #[test]
@@ -152,7 +156,7 @@ mod tests {
 
     #[test]
     fn bad_hex_verifier_is_rejected() {
-        let raw = br#"{"v":1,"accounts":[{"verifier":"zz","name":"x"}]}"#;
+        let raw = br#"{"version":1,"accounts":[{"verifier":"zz","name":"x"}]}"#;
         assert!(matches!(Peers::parse(raw), Err(Error::Peers(_))));
     }
 
