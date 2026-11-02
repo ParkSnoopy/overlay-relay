@@ -192,7 +192,7 @@ func (h *fakeHub) broadcastPeers() {
 }
 
 // push injects an Incoming event as if a requester existed.
-func (h *fakeHub) push(ip netip.Addr, in overlay.Incoming) {
+func (h *fakeHub) push(ip netip.Addr, in *overlay.Incoming) {
 	h.mu.Lock()
 	var target *hubAccount
 	for _, a := range h.accounts {
@@ -201,7 +201,7 @@ func (h *fakeHub) push(ip netip.Addr, in overlay.Incoming) {
 		}
 	}
 	h.mu.Unlock()
-	h.send(target, overlay.Event{Incoming: &in})
+	h.send(target, overlay.Event{Incoming: in})
 }
 
 func (h *fakeHub) dropControls() {
@@ -311,7 +311,8 @@ func (h *fakeHub) newAgent(t *testing.T, name string, dialLocal func(context.Con
 			return nil, errors.New("no local service")
 		}
 	}
-	ta.Agent = New(Config{Secret: ta.secret, Dial: h.dial, DialLocal: dialLocal, OnState: func(s overlay.State) {
+	// The fake hub relays plain bytes; encryption has its own tests (seal_test.go).
+	ta.Agent = New(Config{Secret: ta.secret, DisableEncryption: true, Dial: h.dial, DialLocal: dialLocal, OnState: func(s overlay.State) {
 		ta.mu.Lock()
 		ta.states = append(ta.states, s)
 		ta.mu.Unlock()
@@ -659,7 +660,7 @@ func TestIncomingConcurrencyIsBounded(t *testing.T) {
 	b.start(t)
 	bIP := b.waitReady(t)
 	for i := range maxIncoming + 22 {
-		hub.push(bIP, overlay.Incoming{ID: fmt.Sprintf("x%d", i), Proto: overlay.ProtoTCP, Src: "10.77.7.7", Port: 80})
+		hub.push(bIP, &overlay.Incoming{ID: fmt.Sprintf("x%d", i), Proto: overlay.ProtoTCP, Src: "10.77.7.7", Port: 80})
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for started.Load() < maxIncoming && time.Now().Before(deadline) {
@@ -675,7 +676,7 @@ func TestIncomingConcurrencyIsBounded(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	// Capacity returns once flows finish.
-	hub.push(bIP, overlay.Incoming{ID: "again", Proto: overlay.ProtoTCP, Src: "10.77.7.7", Port: 80})
+	hub.push(bIP, &overlay.Incoming{ID: "again", Proto: overlay.ProtoTCP, Src: "10.77.7.7", Port: 80})
 	deadline = time.Now().Add(3 * time.Second)
 	for started.Load() <= maxIncoming && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
@@ -694,7 +695,7 @@ func TestMalformedIncomingRequestsAreIgnored(t *testing.T) {
 	})
 	b.start(t)
 	bIP := b.waitReady(t)
-	for _, in := range []overlay.Incoming{
+	for _, in := range []*overlay.Incoming{
 		{ID: "", Proto: "tcp", Src: "10.77.7.7", Port: 80},
 		{ID: "a", Proto: "sctp", Src: "10.77.7.7", Port: 80},
 		{ID: "b", Proto: "tcp", Src: "192.0.2.1", Port: 80},
@@ -703,7 +704,7 @@ func TestMalformedIncomingRequestsAreIgnored(t *testing.T) {
 	} {
 		hub.push(bIP, in)
 	}
-	hub.push(bIP, overlay.Incoming{ID: "ok", Proto: "tcp", Src: "10.77.7.7", Port: 80})
+	hub.push(bIP, &overlay.Incoming{ID: "ok", Proto: "tcp", Src: "10.77.7.7", Port: 80})
 	deadline := time.Now().Add(3 * time.Second)
 	for calls.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)

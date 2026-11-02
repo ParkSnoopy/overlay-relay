@@ -83,6 +83,14 @@ pub struct Hello {
     /// Incoming identifier for an accept request.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub id: String,
+    /// SHA-256 fingerprint (64 hex digits) of the sender's flow certificate.
+    /// Present means the sender offers an end-to-end encrypted flow.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub fingerprint: String,
+    /// Public UDP endpoint (`ip:port`) of the sender. Present, together with a
+    /// fingerprint, means the sender offers a direct connection.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub endpoint: String,
 }
 
 /// The hub's answer to a [`Hello`] and, on a control stream, to a ping.
@@ -100,6 +108,23 @@ pub struct Reply {
     /// Control only: the account's display name.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,
+    /// Open and accept only: both sides offered a fingerprint, so the flow is
+    /// end-to-end encrypted.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub secure: bool,
+    /// Open and accept only: both sides offered an endpoint, so the flow
+    /// continues on a direct connection and the hub relays nothing.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub direct: bool,
+    /// Direct only: the flow identifier both sides use to find each other.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    /// Secure only: the other side's flow certificate fingerprint.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub fingerprint: String,
+    /// Direct only: the other side's public UDP endpoint.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub endpoint: String,
 }
 
 impl Reply {
@@ -117,6 +142,32 @@ impl Reply {
     pub fn failed(error: &str) -> Self {
         Self {
             error: error.to_owned(),
+            ..Self::default()
+        }
+    }
+
+    /// The success reply of a paired flow. `peer` is the other side's offer;
+    /// the flow is secure only when both sides offered a fingerprint, and
+    /// direct only when both also offered an endpoint.
+    #[must_use]
+    pub fn paired(id: &str, own: &Offer, peer: &Offer) -> Self {
+        let secure = own.secure() && peer.secure();
+        let direct = own.direct() && peer.direct();
+        Self {
+            ok: true,
+            secure,
+            direct,
+            id: if direct { id.to_owned() } else { String::new() },
+            fingerprint: if secure {
+                peer.fingerprint.clone()
+            } else {
+                String::new()
+            },
+            endpoint: if direct {
+                peer.endpoint.clone()
+            } else {
+                String::new()
+            },
             ..Self::default()
         }
     }
@@ -153,6 +204,12 @@ pub struct Incoming {
     pub src: String,
     /// Destination port requested.
     pub port: u16,
+    /// The requester's flow certificate fingerprint, when it offers encryption.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub fingerprint: String,
+    /// The requester's public UDP endpoint, when it offers a direct connection.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub endpoint: String,
 }
 
 /// A frame the hub pushes on a control stream after the registration reply.
@@ -166,6 +223,65 @@ pub enum Event {
     Incoming(Incoming),
     /// Answer to a ping.
     Pong(bool),
+}
+
+/// What one side offers for a flow beyond the plain relay: encryption (a
+/// fingerprint) and, on top of it, a direct connection (an endpoint).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Offer {
+    /// Lowercase hex SHA-256 of the side's flow certificate; empty means no offer.
+    pub fingerprint: String,
+    /// Canonical `ip:port` of the side's public UDP endpoint; empty means none.
+    pub endpoint: String,
+}
+
+impl Offer {
+    /// Validates the offer fields of a Hello. An endpoint without a
+    /// fingerprint, a malformed fingerprint and a malformed endpoint are all invalid.
+    #[must_use]
+    pub fn parse(fingerprint: &str, endpoint: &str) -> Option<Self> {
+        if fingerprint.is_empty() {
+            return endpoint.is_empty().then(Self::default);
+        }
+        let valid = fingerprint.len() == FINGERPRINT_DIGITS
+            && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if !valid {
+            return None;
+        }
+        let endpoint = if endpoint.is_empty() {
+            String::new()
+        } else {
+            parse_endpoint(endpoint)?.to_string()
+        };
+        Some(Self {
+            fingerprint: fingerprint.to_ascii_lowercase(),
+            endpoint,
+        })
+    }
+
+    /// Whether this side offers end-to-end encryption.
+    #[must_use]
+    pub const fn secure(&self) -> bool {
+        !self.fingerprint.is_empty()
+    }
+
+    /// Whether this side offers a direct connection.
+    #[must_use]
+    pub const fn direct(&self) -> bool {
+        self.secure() && !self.endpoint.is_empty()
+    }
+}
+
+/// Hex digits in a SHA-256 fingerprint.
+pub const FINGERPRINT_DIGITS: usize = 64;
+
+/// Parses a public endpoint. Port zero, unspecified and multicast addresses
+/// can never be reached and are refused.
+fn parse_endpoint(value: &str) -> Option<std::net::SocketAddr> {
+    let address: std::net::SocketAddr = value.parse().ok()?;
+    let usable =
+        address.port() != 0 && !address.ip().is_unspecified() && !address.ip().is_multicast();
+    usable.then_some(address)
 }
 
 /// Keep-alive frame sent by the agent on a control stream.

@@ -522,6 +522,179 @@ async fn tcp_flow_splices_both_ways_with_half_close() -> TestResult {
     Ok(())
 }
 
+/// A fingerprint-shaped value made of one repeated hex digit.
+fn print(digit: char) -> String {
+    digit.to_string().repeat(64)
+}
+
+/// Opens a TCP flow from alice to bob where each side attaches its offer
+/// (`fingerprint`, `endpoint`). Returns the flow and both success replies.
+async fn establish_offered(
+    f: &mut Fixture,
+    alice: (&str, &str),
+    bob: (&str, &str),
+) -> TestResult<(Flow, Reply, Reply)> {
+    let (mut bob_control, _) = register(f.address, "bob").await?;
+    let (alice_control, _) = register(f.address, "alice").await?;
+    let bob_ip = f.ip("bob").await?;
+    f.held.push(alice_control);
+    let mut open = open_hello("alice", &bob_ip.to_string(), PROTO_TCP, Some(2222));
+    alice.0.clone_into(&mut open.fingerprint);
+    alice.1.clone_into(&mut open.endpoint);
+    let opened = tokio::spawn(open_flow(f.address, open));
+    let incoming = next_incoming(&mut bob_control).await?;
+    f.held.push(bob_control);
+    let mut accept = accept_hello("bob", &incoming.id);
+    bob.0.clone_into(&mut accept.fingerprint);
+    bob.1.clone_into(&mut accept.endpoint);
+    let (bob_stream, bob_reply) = dial(f.address, &accept).await?;
+    let (alice_stream, alice_reply) = opened.await??;
+    let flow = Flow {
+        alice: alice_stream,
+        bob: bob_stream,
+        incoming,
+    };
+    Ok((flow, alice_reply, bob_reply))
+}
+
+#[tokio::test]
+async fn matching_fingerprints_secure_the_relayed_flow() -> TestResult {
+    let mut f = fixture(&["alice", "bob"], |_| {}).await?;
+    let (alice_print, bob_print) = (print('a'), print('B'));
+    let (mut flow, alice_reply, bob_reply) =
+        establish_offered(&mut f, (&alice_print, ""), (&bob_print, "")).await?;
+    // The destination sees the requester's offer before it answers.
+    ensure_eq!(flow.incoming.fingerprint, alice_print);
+    ensure_eq!(flow.incoming.endpoint, "");
+    // Each side learns the other side's fingerprint, lowercase, and nothing else.
+    ensure_eq!(
+        alice_reply,
+        Reply {
+            ok: true,
+            secure: true,
+            fingerprint: bob_print.to_ascii_lowercase(),
+            ..Reply::default()
+        }
+    );
+    ensure_eq!(
+        bob_reply,
+        Reply {
+            ok: true,
+            secure: true,
+            fingerprint: alice_print,
+            ..Reply::default()
+        }
+    );
+    // The flow is still relayed: the hub carries the bytes unchanged.
+    flow.alice.write_all(b"sealed").await?;
+    let mut buffer = [0_u8; 6];
+    timeout(IO_WAIT, flow.bob.read_exact(&mut buffer)).await??;
+    ensure_eq!(&buffer, b"sealed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn matching_endpoints_hand_the_flow_to_a_direct_connection() -> TestResult {
+    let mut f = fixture(&["alice", "bob"], |_| {}).await?;
+    let (alice_print, bob_print) = (print('a'), print('b'));
+    let (mut flow, alice_reply, bob_reply) = establish_offered(
+        &mut f,
+        (&alice_print, "203.0.113.7:4001"),
+        (&bob_print, "198.51.100.9:4002"),
+    )
+    .await?;
+    ensure_eq!(flow.incoming.endpoint, "203.0.113.7:4001");
+    ensure_eq!(
+        alice_reply,
+        Reply {
+            ok: true,
+            secure: true,
+            direct: true,
+            id: flow.incoming.id.clone(),
+            fingerprint: bob_print,
+            endpoint: "198.51.100.9:4002".to_owned(),
+            ..Reply::default()
+        }
+    );
+    ensure_eq!(
+        bob_reply,
+        Reply {
+            ok: true,
+            secure: true,
+            direct: true,
+            id: flow.incoming.id.clone(),
+            fingerprint: alice_print,
+            endpoint: "203.0.113.7:4001".to_owned(),
+            ..Reply::default()
+        }
+    );
+    // The hub relays nothing and ends both streams.
+    expect_closed(&mut flow.alice).await?;
+    expect_closed(&mut flow.bob).await
+}
+
+#[tokio::test]
+async fn one_sided_offers_fall_back_to_the_plain_relay() -> TestResult {
+    let mut f = fixture(&["alice", "bob"], |_| {}).await?;
+    let alice_print = print('a');
+    let (mut flow, alice_reply, bob_reply) =
+        establish_offered(&mut f, (&alice_print, "203.0.113.7:4001"), ("", "")).await?;
+    // Without a counter-offer neither reply carries anything but success.
+    ensure_eq!(alice_reply, Reply::accepted());
+    ensure_eq!(bob_reply, Reply::accepted());
+    flow.alice.write_all(b"plain").await?;
+    let mut buffer = [0_u8; 5];
+    timeout(IO_WAIT, flow.bob.read_exact(&mut buffer)).await??;
+    ensure_eq!(&buffer, b"plain");
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_offers_are_refused() -> TestResult {
+    let mut f = fixture(&["alice", "bob"], |_| {}).await?;
+    let (mut bob_control, _) = register(f.address, "bob").await?;
+    let (alice_control, _) = register(f.address, "alice").await?;
+    let bob_ip = f.ip("bob").await?.to_string();
+    f.held.push(alice_control);
+
+    let valid = print('a');
+    let bad_opens = [
+        ("", "203.0.113.7:4001"),
+        ("not-a-fingerprint", ""),
+        (valid.as_str(), "not-an-endpoint"),
+        (valid.as_str(), "203.0.113.7:0"),
+        (valid.as_str(), "0.0.0.0:4001"),
+    ];
+    for (fingerprint, endpoint) in bad_opens {
+        let mut hello = open_hello("alice", &bob_ip, PROTO_TCP, Some(2222));
+        fingerprint.clone_into(&mut hello.fingerprint);
+        endpoint.clone_into(&mut hello.endpoint);
+        refused(f.address, hello).await?;
+    }
+
+    // A malformed accept offer is rejected as an invalid request and leaves the
+    // pending request claimable.
+    let mut open = open_hello("alice", &bob_ip, PROTO_TCP, Some(2222));
+    print('a').clone_into(&mut open.fingerprint);
+    let opened = tokio::spawn(open_flow(f.address, open));
+    let incoming = next_incoming(&mut bob_control).await?;
+    f.held.push(bob_control);
+    let mut bad = accept_hello("bob", &incoming.id);
+    "zz".clone_into(&mut bad.fingerprint);
+    let (_, reply) = dial(f.address, &bad).await?;
+    ensure_eq!(reply, Reply::failed(ERR_INVALID_REQUEST));
+    let mut good = accept_hello("bob", &incoming.id);
+    print('b').clone_into(&mut good.fingerprint);
+    let (_, reply) = dial(f.address, &good).await?;
+    ensure!(
+        reply.ok && reply.secure,
+        "a valid accept must still succeed"
+    );
+    let (_, reply) = opened.await??;
+    ensure!(reply.ok && reply.secure, "the open must succeed: {reply:?}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn udp_flow_preserves_datagram_framing() -> TestResult {
     let mut f = fixture(&["alice", "bob"], |_| {}).await?;

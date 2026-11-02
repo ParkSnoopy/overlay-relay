@@ -35,11 +35,13 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 	if !peer {
 		return nil, errors.New(overlay.ErrUnavailable)
 	}
+	hello := &overlay.Hello{Version: overlay.Version, Kind: overlay.KindOpen, Token: a.token, Proto: proto, Dst: ip.String(), Port: dst.Port()}
+	a.offer(ctx, hello, true)
 	conn, err := a.cfg.Dial(ctx)
 	if err != nil {
 		return nil, errors.New("overlay hub is unreachable")
 	}
-	reply, err := a.handshake(ctx, conn, &overlay.Hello{Version: overlay.Version, Kind: overlay.KindOpen, Token: a.token, Proto: proto, Dst: ip.String(), Port: dst.Port()})
+	reply, err := a.handshake(ctx, conn, hello)
 	if err != nil {
 		closeConn(conn)
 		return nil, errors.New("overlay hub is unreachable")
@@ -48,17 +50,21 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 		closeConn(conn)
 		return nil, errors.New(boundedReason(reply.Error))
 	}
+	flow, err := a.finishOutbound(ctx, conn, &reply)
+	if err != nil {
+		return nil, err
+	}
 	if a.cfg.Compression {
-		conn = overlay.Compressed(conn)
+		flow = overlay.Compressed(flow)
 	}
 	if proto == overlay.ProtoUDP {
-		return &datagramConn{Conn: conn, buffer: make([]byte, 2+overlay.MaxDatagram)}, nil
+		return &datagramConn{Conn: flow, buffer: make([]byte, 2+overlay.MaxDatagram)}, nil
 	}
-	return conn, nil
+	return flow, nil
 }
 
 // accept starts handling one Incoming request unless the concurrency bound is reached.
-func (a *Agent) accept(ctx context.Context, in overlay.Incoming) {
+func (a *Agent) accept(ctx context.Context, in *overlay.Incoming) {
 	src, err := netip.ParseAddr(in.Src)
 	if (in.Proto != overlay.ProtoTCP && in.Proto != overlay.ProtoUDP) || in.Port == 0 || in.ID == "" || err != nil || !overlay.Assignable(src.Unmap()) {
 		slog.Debug("Overlay ignored a malformed incoming request")
@@ -81,28 +87,42 @@ func (a *Agent) accept(ctx context.Context, in overlay.Incoming) {
 	}()
 }
 
-func (a *Agent) serveIncoming(ctx context.Context, in overlay.Incoming, src netip.Addr) error {
+func (a *Agent) serveIncoming(ctx context.Context, in *overlay.Incoming, src netip.Addr) error {
+	// Register for a direct connection before the accept, so the requester can
+	// never reach the listener ahead of the registration.
+	exp := a.expectDirect(in)
+	defer exp.cancel()
+	hello := &overlay.Hello{Version: overlay.Version, Kind: overlay.KindAccept, Token: a.token, ID: in.ID}
+	a.offer(ctx, hello, exp != nil)
+	if hello.Endpoint == "" {
+		exp.cancel()
+		exp = nil
+	}
 	hub, err := a.cfg.Dial(ctx)
 	if err != nil {
 		return err
 	}
-	reply, err := a.handshake(ctx, hub, &overlay.Hello{Version: overlay.Version, Kind: overlay.KindAccept, Token: a.token, ID: in.ID})
+	reply, err := a.handshake(ctx, hub, hello)
 	if err != nil || !reply.OK {
 		closeConn(hub)
 		return errors.Join(err, errors.New("hub refused the accept stream"))
 	}
+	flow, err := a.finishIncoming(ctx, hub, &reply, in, exp)
+	if err != nil {
+		return err
+	}
 	if a.cfg.Compression {
-		hub = overlay.Compressed(hub)
+		flow = overlay.Compressed(flow)
 	}
 	local, err := a.cfg.DialLocal(ctx, in.Proto, in.Port, src)
 	if err != nil {
-		closeConn(hub)
+		closeConn(flow)
 		return err
 	}
 	if in.Proto == overlay.ProtoUDP {
-		return spliceUDP(ctx, hub, local, a.timing.udpIdle)
+		return spliceUDP(ctx, flow, local, a.timing.udpIdle)
 	}
-	return spliceTCP(ctx, hub, local)
+	return spliceTCP(ctx, flow, local)
 }
 
 type closeWriter interface{ CloseWrite() error }

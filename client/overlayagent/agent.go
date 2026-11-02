@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ParkSnoopy/overlay-relay/client/overlay"
@@ -38,6 +39,29 @@ type Config struct {
 	// Compression DEFLATEs flow bytes in chunks (see overlay.Compressed). Default
 	// off. Both peers of a flow must enable it, because the hub relays bytes unchanged.
 	Compression bool
+	// DisableEncryption turns off end-to-end encryption. By default every flow
+	// is encrypted between the two agents with TLS 1.3 (or QUIC on a direct
+	// connection), and a flow whose peer does not support encryption fails.
+	DisableEncryption bool
+	// Direct lets flows bypass the hub when both peers enable it. Nil (the
+	// default) keeps every flow on the relay.
+	Direct *DirectOptions
+}
+
+// DirectOptions configures direct connections. Two peers connect directly
+// over the internet with QUIC when both enable it, and the hub then relays
+// nothing. It needs encryption. A direct flow that fails to connect fails; it
+// never falls back to the relay.
+type DirectOptions struct {
+	// STUNServers lists host:port STUN servers, asked from outside the VPN to
+	// learn the public UDP endpoint. At least one is required.
+	STUNServers []string
+	// ListenPacket opens the UDP socket for direct connections. Return a socket
+	// that bypasses the VPN. Nil listens on all addresses, any port.
+	ListenPacket func(ctx context.Context) (net.PacketConn, error)
+	// Timeout bounds how long a direct connection may take to come up.
+	// Zero means ten seconds.
+	Timeout time.Duration
 }
 
 type timing struct {
@@ -74,11 +98,15 @@ type Agent struct {
 
 	flows    sync.WaitGroup
 	inflight chan struct{}
+
+	identity    *identity // flow certificate; nil when encryption is off or unavailable
+	identityErr error
+	direct      atomic.Pointer[direct]
 }
 
 // New builds an idle agent. The secret is used only to derive the bearer token.
 func New(cfg Config) *Agent {
-	return &Agent{
+	a := &Agent{
 		cfg:      cfg,
 		token:    overlay.Token(cfg.Secret),
 		timing:   defaultTiming,
@@ -86,6 +114,10 @@ func New(cfg Config) *Agent {
 		ready:    make(chan netip.Addr, 1),
 		inflight: make(chan struct{}, maxIncoming),
 	}
+	if !cfg.DisableEncryption {
+		a.identity, a.identityErr = newIdentity()
+	}
+	return a
 }
 
 // IP returns this account's overlay address, or the zero Addr before the first registration.
@@ -105,6 +137,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	if a.cfg.Dial == nil || a.cfg.DialLocal == nil || len(a.cfg.Secret) == 0 {
 		return errors.New("overlay agent is not configured")
 	}
+	if a.identityErr != nil {
+		return errors.New("overlay flow certificate could not be created")
+	}
 	a.mu.Lock()
 	if a.started {
 		a.mu.Unlock()
@@ -117,6 +152,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		cancel()
 		a.flows.Wait()
 	}()
+	a.startDirect(runCtx)
 
 	a.emit()
 	delay := a.timing.backoffMin
@@ -234,7 +270,7 @@ func (a *Agent) readEvents(ctx context.Context, conn net.Conn) {
 		case event.Peers != nil:
 			a.setPeers(*event.Peers)
 		case event.Incoming != nil:
-			a.accept(ctx, *event.Incoming)
+			a.accept(ctx, event.Incoming)
 		}
 	}
 }

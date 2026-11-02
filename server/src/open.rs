@@ -15,20 +15,23 @@ use tracing::debug;
 
 use crate::frame::send_frame;
 use crate::hub::Shared;
-use crate::protocol::{ERR_UNAVAILABLE, Event, Hello, Incoming, PROTO_TCP, PROTO_UDP, Reply};
+use crate::protocol::{
+    ERR_UNAVAILABLE, Event, Hello, Incoming, Offer, PROTO_TCP, PROTO_UDP, Reply,
+};
 use crate::splice::splice;
-use crate::state::Requester;
+use crate::state::{Accepted, Requester};
 
 /// A validated open request.
 struct OpenRequest {
     destination: Ipv4Addr,
     port: u16,
     udp: bool,
+    offer: Offer,
 }
 
 /// How the wait for an accept ended.
 enum Answer {
-    Accepted(TcpStream),
+    Accepted(Accepted),
     Expired,
     Shutdown,
 }
@@ -36,7 +39,7 @@ enum Answer {
 /// Outcome of one wait step, before any state is touched.
 enum Wait {
     Shutdown,
-    Received(Option<TcpStream>),
+    Received(Option<Accepted>),
     TimedOut,
 }
 
@@ -69,6 +72,8 @@ pub async fn serve(
         proto: hello.proto.clone(),
         src: requester.ip.to_string(),
         port: request.port,
+        fingerprint: request.offer.fingerprint.clone(),
+        endpoint: request.offer.endpoint.clone(),
     };
     if let Err(error) = target.outbound.try_send(Event::Incoming(incoming)) {
         if matches!(error, TrySendError::Full(_)) {
@@ -78,14 +83,31 @@ pub async fn serve(
         refuse(&mut stream).await;
         return;
     }
-    let mut acceptor = match await_answer(shared, &id, accept_rx, &session).await {
-        Answer::Accepted(acceptor) => acceptor,
+    let Accepted {
+        stream: mut acceptor,
+        offer: accepted,
+    } = match await_answer(shared, &id, accept_rx, &session).await {
+        Answer::Accepted(accepted) => accepted,
         Answer::Expired => {
             refuse(&mut stream).await;
             return;
         }
         Answer::Shutdown => return,
     };
+    if request.offer.direct() && accepted.direct() {
+        // Both sides continue on a direct connection; the hub relays nothing.
+        send_frame(&mut stream, &Reply::paired(&id, &request.offer, &accepted))
+            .await
+            .ok();
+        send_frame(
+            &mut acceptor,
+            &Reply::paired(&id, &accepted, &request.offer),
+        )
+        .await
+        .ok();
+        debug!("overlay flow handed to a direct connection");
+        return;
+    }
     let cancel = session.child_token();
     let flow = shared
         .state
@@ -97,8 +119,15 @@ pub async fn serve(
         refuse(&mut acceptor).await;
         return;
     };
-    let opened = send_frame(&mut stream, &Reply::accepted()).await.is_ok()
-        && send_frame(&mut acceptor, &Reply::accepted()).await.is_ok();
+    let opened = send_frame(&mut stream, &Reply::paired(&id, &request.offer, &accepted))
+        .await
+        .is_ok()
+        && send_frame(
+            &mut acceptor,
+            &Reply::paired(&id, &accepted, &request.offer),
+        )
+        .await
+        .is_ok();
     if opened {
         let proto = if request.udp { PROTO_UDP } else { PROTO_TCP };
         debug!(proto, "overlay flow opened");
@@ -124,10 +153,12 @@ fn parse_open(hello: &Hello) -> Option<OpenRequest> {
         _ => return None,
     };
     let destination = hello.dst.parse().ok()?;
+    let offer = Offer::parse(&hello.fingerprint, &hello.endpoint)?;
     Some(OpenRequest {
         destination,
         port,
         udp,
+        offer,
     })
 }
 
@@ -135,7 +166,7 @@ fn parse_open(hello: &Hello) -> Option<OpenRequest> {
 async fn await_answer(
     shared: &Shared,
     id: &str,
-    mut accepted: oneshot::Receiver<TcpStream>,
+    mut accepted: oneshot::Receiver<Accepted>,
     session: &CancellationToken,
 ) -> Answer {
     let timer = sleep(shared.config.accept_timeout);

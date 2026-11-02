@@ -75,6 +75,13 @@ type Hello struct {
 	Dst     string `json:"dst,omitempty"`   // open: destination overlay IP
 	Port    uint16 `json:"port,omitempty"`  // open: destination port
 	ID      string `json:"id,omitempty"`    // accept: Incoming.ID
+
+	// Fingerprint is the SHA-256 of the sender's flow certificate, as 64 hex
+	// digits. Sending it offers an end-to-end encrypted flow (open, accept).
+	Fingerprint string `json:"fingerprint,omitempty"`
+	// Endpoint is the sender's public UDP address, ip:port. Sending it with a
+	// fingerprint offers a direct connection (open, accept).
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // Reply is the hub's answer to Hello and, on a control stream, to Ping.
@@ -84,6 +91,16 @@ type Reply struct {
 	Error string `json:"error,omitempty"`
 	IP    string `json:"ip,omitempty"`   // control: this account's address
 	Name  string `json:"name,omitempty"` // control: this account's display name
+
+	// Secure reports that both sides offered a fingerprint, so the flow is
+	// end-to-end encrypted. Fingerprint is then the other side's.
+	Secure      bool   `json:"secure,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+	// Direct reports that both sides offered an endpoint too. The hub then
+	// relays nothing; ID names the flow and Endpoint is the other side's address.
+	Direct   bool   `json:"direct,omitempty"`
+	ID       string `json:"id,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // Peer is one other broadcasting account.
@@ -98,6 +115,10 @@ type Incoming struct {
 	Proto string `json:"proto"`
 	Src   string `json:"src"`
 	Port  uint16 `json:"port"`
+
+	// Fingerprint and Endpoint carry the requester's offer, when it made one.
+	Fingerprint string `json:"fingerprint,omitempty"`
+	Endpoint    string `json:"endpoint,omitempty"`
 }
 
 // Event is any frame the hub pushes on a control stream after the Reply.

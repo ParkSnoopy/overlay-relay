@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::control::ControlHandle;
-use crate::protocol::{MAX_FLOWS_PER_ACCOUNT, MAX_PENDING_PER_ACCOUNT, Peer};
+use crate::protocol::{MAX_FLOWS_PER_ACCOUNT, MAX_PENDING_PER_ACCOUNT, Offer, Peer};
 use crate::verifier::Verifier;
 
 /// An authenticated account, as seen by one stream.
@@ -24,6 +24,15 @@ pub struct Requester {
     pub ip: Ipv4Addr,
 }
 
+/// What the destination hands to a waiting open request: its stream and its offer.
+#[derive(Debug)]
+pub struct Accepted {
+    /// The accept stream.
+    pub stream: TcpStream,
+    /// What the destination offers for the flow.
+    pub offer: Offer,
+}
+
 /// An open request waiting for its destination to accept.
 #[derive(Debug)]
 pub struct Pending {
@@ -31,8 +40,8 @@ pub struct Pending {
     pub requester: Verifier,
     /// Verifier of the account that must accept.
     pub destination: Verifier,
-    /// Hands the acceptor's stream to the waiting open request.
-    pub accept: oneshot::Sender<TcpStream>,
+    /// Hands the acceptor's stream and offer to the waiting open request.
+    pub accept: oneshot::Sender<Accepted>,
 }
 
 #[derive(Debug)]
@@ -200,7 +209,7 @@ impl State {
         requester: &Requester,
         destination: Ipv4Addr,
         id: &str,
-        accept: oneshot::Sender<TcpStream>,
+        accept: oneshot::Sender<Accepted>,
     ) -> Option<(Verifier, ControlHandle)> {
         let dest = *self.by_ip.get(&destination)?;
         let allowed = dest != requester.verifier

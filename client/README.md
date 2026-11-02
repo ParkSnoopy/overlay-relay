@@ -86,6 +86,32 @@ Notes:
 - `IP()` returns the current address, or the zero value before the first registration.
 - Inbound flows are served automatically. Up to 128 are handled at once. Extra requests are dropped.
 - `Config.Compression` (default `false`) DEFLATEs flow bytes in chunks. Both peers of a flow must enable it.
+- Flows are encrypted end to end by default. See [Encryption and direct connections](#encryption-and-direct-connections).
+
+## Encryption and direct connections
+
+Every agent makes a self-signed flow certificate when it is created. It sends the certificate's SHA-256 fingerprint to the hub with each `open` or `accept`, and the hub hands the other side's fingerprint back. Each side then runs TLS 1.3 over the relayed stream and accepts only the certificate with that fingerprint, so a hub that only relays, and anyone on the network, sees nothing but ciphertext. The fingerprints themselves travel through the hub, so a hub that replaces them can intercept a flow: use a hub you trust. The secret never leaves the device.
+
+- Encryption is on by default. Set `Config.DisableEncryption` to turn it off.
+- An agent with encryption on refuses a peer that cannot encrypt: `Outbound` returns an error and an incoming flow is dropped. It never downgrades to plaintext.
+- Both peers must agree. Run the same setting on both sides of a flow, or leave the default.
+
+Direct connections are off by default. Set `Config.Direct` and two agents that both enable it connect to each other over the internet with QUIC, and the hub relays nothing:
+
+```go
+cfg.Direct = &overlayagent.DirectOptions{
+    STUNServers: []string{"stun.example.net:3478"}, // required
+    ListenPacket: func(ctx context.Context) (net.PacketConn, error) {
+        // Return a UDP socket that bypasses the VPN. Nil listens on all addresses.
+    },
+}
+```
+
+- The agent asks the STUN server, over the socket the QUIC connection will use, for its public UDP endpoint. Query it from outside the VPN, or the hub-side address you learn is not reachable.
+- Both peers hole-punch their NAT and connect. The QUIC handshake pins the same certificate fingerprints, so the connection is authenticated and encrypted.
+- If only one side enables `Direct`, or an agent cannot learn its endpoint, the flow stays on the encrypted relay.
+- A direct connection that fails to come up makes the flow fail. It does not fall back to the relay, because that would hide a network change from the caller.
+- `DirectOptions.Timeout` bounds the connection attempt (default 10 seconds).
 
 ## Account secrets and tokens
 

@@ -6,6 +6,7 @@
 - Reads its accounts from a read-only peers table that you manage.
 - Assigns each account a stable address in `10.77.0.0/16` and remembers it in `ips.json`.
 - Never inspects relayed payloads and never logs tokens, verifiers, payloads or peer names.
+- Pairs the encryption offers of the two agents of a flow. Each agent may send a certificate `fingerprint` (end-to-end encryption) and a public UDP `endpoint` (direct connection) in its `open` or `accept` hello. The hub validates them and tells each side the other's values only when both made the offer. It never holds a key. When both offered an endpoint, the hub relays nothing and ends both streams after the hand-off.
 
 ## Build
 

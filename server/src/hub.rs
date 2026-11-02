@@ -206,7 +206,7 @@ impl Hub {
             KIND_CONTROL => control::serve(&self.shared, stream, requester, session).await,
             KIND_OPEN => open::serve(&self.shared, stream, requester, &hello, session).await,
             KIND_ACCEPT => {
-                accept::serve(&self.shared, stream, requester.verifier, &hello.id).await;
+                accept::serve(&self.shared, stream, requester.verifier, &hello).await;
             }
             _ => {
                 send_frame(&mut stream, &Reply::failed(ERR_INVALID_REQUEST))

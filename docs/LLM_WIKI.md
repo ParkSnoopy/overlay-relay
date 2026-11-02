@@ -11,6 +11,7 @@ Where this document and the code disagree, the code in `server/` (hub) and `clie
 - A **client** that "broadcasts" registers a **control stream** with the hub. The hub then tells it which other broadcasting accounts exist (`peers`).
 - A client opens a **flow** (TCP or UDP) to a peer's overlay address and port. The hub asks the peer to accept, pairs the two streams, and relays bytes between them.
 - The hub never inspects payload bytes after the handshake. It forwards them unchanged.
+- Agents encrypt flows end to end by default (section 8.6) and may connect directly, bypassing the hub (section 8.7). The hub only forwards the offers.
 - Agents may optionally compress flow bytes (section 8.5). The hub is unaware of it.
 - Hidden accounts (not broadcasting) hold an address but never register a control stream, so they are never listed and cannot be reached.
 
@@ -130,6 +131,10 @@ All field names are lowercase JSON keys.
 | `dst` | string | open | Destination overlay IPv4 text, for example `"10.77.0.2"`. |
 | `port` | integer | open | Destination port, `1..65535`. `0` or absent is refused. |
 | `id` | string | accept | The `id` from the Incoming event being answered. |
+| `fingerprint` | string | open, accept | Offer of end-to-end encryption: the SHA-256 of the sender's flow certificate, 64 hex digits (any case; the hub lowercases it). |
+| `endpoint` | string | open, accept | Offer of a direct connection: the sender's public UDP address `ip:port`. Valid only with a `fingerprint`. Port `0`, unspecified and multicast addresses are refused. |
+
+A malformed or inconsistent offer (bad fingerprint, bad endpoint, endpoint without fingerprint) gets `Reply{ok:false, error:"invalid request"}`. A refused `accept` leaves the pending request claimable.
 
 Optional fields that do not apply to a kind may be omitted. The hub ignores unrelated fields.
 
@@ -141,8 +146,13 @@ Optional fields that do not apply to a kind may be omitted. The hub ignores unre
 | `error` | string | Present when `ok` is `false`. One of the error values in section 9. |
 | `ip` | string | Control only. This account's overlay address. |
 | `name` | string | Control only. This account's display name from the table. |
+| `secure` | bool | Open and accept only. Both sides offered a fingerprint (section 8.6). |
+| `fingerprint` | string | Secure only. The other side's flow certificate fingerprint, lowercase. |
+| `direct` | bool | Open and accept only. Both sides also offered an endpoint (section 8.7). |
+| `id` | string | Direct only. The flow identifier, equal to the `id` of the Incoming event. |
+| `endpoint` | string | Direct only. The other side's public UDP address. |
 
-The hub omits empty string fields. A client must treat a missing `ok` as `false`.
+The hub omits empty string fields and false booleans. A client must treat a missing `ok` as `false`.
 
 ### 7.3 Events on a control stream (hub to client, after the registration reply)
 
@@ -155,7 +165,7 @@ Each event is one frame with exactly one of these top-level keys:
 ```
 
 - `peers`: the full current list of **other** broadcasting accounts, sorted by IP ascending. It is sent once after registration and again on every change. Each change replaces the previous list; it is not a delta.
-- `incoming`: a request that the receiving account must answer on a new accept stream (section 8.3).
+- `incoming`: a request that the receiving account must answer on a new accept stream (section 8.3). It also carries the requester's `fingerprint` and `endpoint` when the requester made those offers.
 - `pong`: reply to a ping (section 8.1).
 
 ### 7.4 Ping (client to hub, on a control stream)
@@ -189,7 +199,7 @@ Preconditions the hub enforces: the requester has an active control stream; the 
 2. The hub validates `proto`, `dst`, `port`. Any invalid value gets `Reply{ok:false, error:"peer unavailable"}`.
 3. The hub looks up the destination. If the destination is missing, hidden, not connected, the requester itself, or a precondition fails, the reply is `peer unavailable`. This is intentionally identical for every case, so a requester cannot discover hidden accounts.
 4. The hub sends an `incoming` event to the destination's control stream with a fresh random `id` (16 random bytes, 32 hex digits) and waits up to `10` seconds for the destination to answer.
-5. On success, the hub sends `Reply{ok:true}` on the open stream and the same `Reply{ok:true}` on the destination's accept stream. Both sides then switch to relay mode (section 8.4).
+5. On success, the hub sends a success reply on the open stream and one on the destination's accept stream. The replies follow the two offers (sections 8.6 and 8.7). Without a common offer both are plain `Reply{ok:true}`. Both sides then switch to relay mode (section 8.4), unless the flow is direct.
 6. On timeout or refusal, the open stream receives `Reply{ok:false, error:"peer unavailable"}`.
 
 ### 8.3 Accept stream (destination side)
@@ -217,6 +227,32 @@ kind 1: body is a raw DEFLATE stream that inflates to the plain bytes
 - A writer uses kind `1` only for chunks of at least `512` bytes whose compressed form is smaller.
 - A reader rejects unknown kinds and rejects inflated output above `16384` bytes.
 - The hub never sees the chunk framing. The same bytes relayed in either mode look like any other flow.
+- Compression sits inside encryption: the agent compresses first, then encrypts (sections 8.6 and 8.7).
+
+### 8.6 End-to-end encryption (client-side, default on)
+
+The reference agent encrypts every flow unless `Config.DisableEncryption` is set.
+
+1. The agent makes one self-signed ECDSA P-256 certificate per instance. Its fingerprint is the lowercase hex SHA-256 of the DER certificate.
+2. The requester puts `fingerprint` in its `open` Hello. The destination reads it from the `incoming` event and puts its own in its `accept` Hello.
+3. If both offered, the hub marks both success replies `secure:true` and gives each side the other's fingerprint. If either did not, neither reply is secure.
+4. Right after the success reply, the requester runs a TLS 1.3 client handshake and the destination a TLS 1.3 server handshake over the stream. ALPN is `overlay-relay/flow-1` and the server name is `overlay-relay`. Both sides present their certificate and require the peer's (`RequireAnyClientCert`). Each side accepts exactly one certificate: the one whose SHA-256 equals the fingerprint the hub reported. Chain and name checks do not apply.
+5. A handshake failure closes the stream. TCP flows carry the application bytes inside TLS. UDP flows carry their datagram records inside TLS.
+6. An agent with encryption on treats a success reply without `secure:true` as a failure. It never falls back to plaintext. An agent with encryption off sends no fingerprint, so a flow with an encrypting peer fails on the peer's side.
+
+Trust: the fingerprints reach each agent through the hub. A relaying hub and a network observer see only ciphertext, but a hub that substitutes fingerprints can intercept a flow.
+
+### 8.7 Direct connection (client-side, opt-in)
+
+The reference agent offers a direct connection when `Config.Direct` is set and encryption is on.
+
+1. At start, the agent opens one UDP socket (`DirectOptions.ListenPacket`, default all addresses) and serves QUIC on it. The socket should bypass the VPN.
+2. For every open and accept it asks a STUN server (RFC 5389 Binding request, over that same socket, retried every 500 ms for up to 3 s) for its public UDP address. It sends it as `endpoint`. If no STUN answer arrives, it sends no endpoint and the flow stays on the relay.
+3. If both sides offered an endpoint, the hub sends each side `Reply{ok:true, secure:true, direct:true, id, fingerprint, endpoint}` and closes both streams. It relays nothing.
+4. The destination registers the `id` before it sends its accept, so the requester cannot arrive early. Both sides send a short packet toward the other's endpoint every 200 ms to open their NAT.
+5. The requester dials the destination's endpoint with QUIC. ALPN is `overlay-relay/direct-1`, the TLS server name is the flow `id`, and both sides pin the fingerprint as in section 8.6. The destination picks the pinned fingerprint by that server name and refuses an unknown name.
+6. The requester opens one bidirectional stream and writes a single byte `0x01` so the destination can accept it. After that the stream carries the flow bytes exactly as a relayed flow would (compression, if enabled, sits on top).
+7. If the connection does not come up within `DirectOptions.Timeout` (default 10 s), the flow fails. It does not fall back to the relay.
 
 ### 8.4 Relay mode
 
@@ -432,11 +468,14 @@ The hub logs with `tracing`. It never logs tokens, verifiers, payloads or peer n
 - Admission by source address is a first gate; the token is the second.
 - The hub returns the same `peer unavailable` for missing, hidden, self, and refused destinations. A requester cannot enumerate accounts.
 - The hub does not interpret relayed payloads.
+- Flows are end-to-end encrypted by default (section 8.6). A relaying hub and a network observer see only ciphertext. Fingerprints travel through the hub, so a hub that substitutes them can intercept a flow; the hub is a trusted party for fingerprints, not for payloads it relays honestly.
+- A direct connection leaves the VPN. Its QUIC handshake pins the same fingerprints, so it is authenticated and encrypted. It exposes the agent's public UDP address to the peer and the STUN server.
 - Tokens and secrets are never logged by the reference code.
 
 ## 19. Non-goals
 
-- The hub does not encrypt traffic. Confidentiality and integrity of relayed bytes come from the transport the deployer places underneath (for example, a VPN tunnel).
+- The hub does not encrypt traffic itself and holds no keys. Encryption is the agents' job (section 8.6). Hub-to-agent control frames (the Hello with the token, events) are not encrypted by the overlay; protect that transport with a VPN or another tunnel.
+- No relay fallback for a failed direct connection, no certificate authority, and no STUN server in the hub.
 - The hub does not route to the internet or to addresses outside `10.77.0.0/16`.
 - The hub has no accounting or quotas beyond the flow and pending limits in section 11.
 - No version negotiation beyond `version: 1`. A new wire version requires a new `version` value and a coordinated release.

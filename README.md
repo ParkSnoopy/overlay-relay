@@ -2,7 +2,7 @@
 
 Authenticated rendezvous and byte relay for overlay accounts.
 
-Each account gets a stable private IPv4 address in `10.77.0.0/16`. Accounts that choose to broadcast register with a hub, see the other broadcasting accounts, and open TCP or UDP flows to them. The hub pairs the two sides and relays bytes. It does not read the payload.
+Each account gets a stable private IPv4 address in `10.77.0.0/16`. Accounts that choose to broadcast register with a hub, see the other broadcasting accounts, and open TCP or UDP flows to them. The hub pairs the two sides and relays bytes. It does not read the payload: agents encrypt every flow end to end (TLS 1.3, certificate fingerprints exchanged through the hub), so a relaying hub sees only ciphertext. Two agents can also opt in to a direct QUIC connection, and the hub then relays nothing.
 
 ## Components
 

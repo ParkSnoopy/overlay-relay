@@ -47,6 +47,16 @@ The hub computes the verifier of the token, looks it up with a constant-time com
 - `accept` must carry the destination's token and a pending identifier, and each identifier is accepted once.
   Anything else receives `unauthorized`.
 
+`open` and `accept` may carry an offer: `fingerprint` (64 hex digits, the SHA-256 of the agent's flow certificate) and `endpoint` (a public `ip:port`).
+A malformed offer, an endpoint without a fingerprint, port zero and an unspecified or multicast address are refused with `invalid request`, and a refused `accept` leaves the pending request claimable.
+The `Incoming` event repeats the requester's offer. Each success reply then follows the two offers:
+
+- Both sent a fingerprint: `secure` is true and the reply carries the other side's `fingerprint`. The flow is still spliced.
+- Both also sent an endpoint: `direct` is true, and the reply carries the flow `id` and the other side's `endpoint`. The hub sends the replies, relays nothing and closes both streams.
+- Otherwise the reply is a plain `ok`, as before.
+
+The hub only forwards the offers. Agents authenticate each other by the fingerprint, so anyone who watches or alters the network, and a hub that only relays, sees nothing but ciphertext. The fingerprints themselves travel through the hub, so a hub that replaces them can still intercept a flow. Run a hub you trust.
+
 Hidden accounts never appear in a `Peers` event, an error or a log line, and an account without a control stream can neither open nor accept.
 
 ## Limits
