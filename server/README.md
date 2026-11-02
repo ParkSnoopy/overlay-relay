@@ -66,7 +66,7 @@ Replace the file atomically (write a temporary file, then rename it over the tar
 
 ## Container
 
-The repository root has a `Dockerfile` that builds this crate into a distroless, non-root image:
+The repository root has a `Dockerfile` that builds this crate as a static musl binary on `rust:1-slim` and runs it on `debian:13-slim` as a non-root user:
 
 ```text
 docker build -t overlay-relay:0.1.0 ..

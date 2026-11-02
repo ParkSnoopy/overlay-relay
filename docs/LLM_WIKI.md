@@ -419,7 +419,8 @@ The hub logs with `tracing`. It never logs tokens, verifiers, payloads or peer n
 ## 17. Container
 
 - `Dockerfile` at the repository root builds the hub from `server/` with `cargo build --release --locked`.
-- Runtime image: distroless `cc-debian12:nonroot`, user `65532`, entrypoint `/usr/local/bin/overlay-hub`.
+- Build image: `rust:1-slim`, target `x86_64-unknown-linux-musl`, static binary.
+- Runtime image: `debian:13-slim`, user `65532`, entrypoint `/usr/local/bin/overlay-hub`.
 - Defaults set in the image: `OVERLAY_PEERS_PATH=/etc/overlay-relay/peers.json`, `OVERLAY_DATA_DIR=/var/lib/overlay-relay`, `OVERLAY_LISTEN_ADDRESS=0.0.0.0:6697`.
 - Mount the peers table as a **directory** (for example `/etc/overlay-relay`), not as a single file. The hub watches for replacement by rename, which a single-file bind mount does not see.
 - The data directory must be writable by uid `65532`.
