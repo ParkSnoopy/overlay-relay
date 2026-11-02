@@ -16,11 +16,11 @@ ARG TARGET
 RUN apt-get update \
  && apt-get install -y --no-install-recommends musl-tools \
  && rm -rf /var/lib/apt/lists/* \
- && rustup target add ${TARGET}
+ && rustup target add "$TARGET"
 WORKDIR /src
 COPY server/ ./server/
-RUN cargo build --release --locked --target ${TARGET} --manifest-path server/Cargo.toml --bin overlay-hub \
- && install -D -m 0755 server/target/${TARGET}/release/overlay-hub /out/overlay-hub
+RUN cargo build --release --locked --target "$TARGET" --manifest-path server/Cargo.toml --bin overlay-hub \
+ && install -D -m 0755 server/target/"$TARGET"/release/overlay-hub /out/overlay-hub
 
 FROM ${RUNTIME_IMAGE}
 COPY --from=build /out/overlay-hub /usr/local/bin/overlay-hub
