@@ -6,20 +6,22 @@
 
 use std::net::Ipv4Addr;
 
-use tokio::net::TcpStream;
-use tokio::select;
-use tokio::sync::{mpsc::error::TrySendError, oneshot};
-use tokio::time::sleep;
+use tokio::{
+    net::TcpStream,
+    select,
+    sync::{mpsc::error::TrySendError, oneshot},
+    time::sleep,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::frame::send_frame;
-use crate::hub::Shared;
-use crate::protocol::{
-    ERR_UNAVAILABLE, Event, Hello, Incoming, Offer, PROTO_TCP, PROTO_UDP, Reply,
+use crate::{
+    frame::send_frame,
+    hub::Shared,
+    protocol::{ERR_UNAVAILABLE, Event, Hello, Incoming, Offer, PROTO_TCP, PROTO_UDP, Reply},
+    splice::splice,
+    state::{Accepted, Requester},
 };
-use crate::splice::splice;
-use crate::state::{Accepted, Requester};
 
 /// A validated open request.
 struct OpenRequest {

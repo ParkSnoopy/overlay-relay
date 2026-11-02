@@ -2,13 +2,16 @@
 
 use std::time::Duration;
 
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::time::timeout;
+use serde::{Serialize, de::DeserializeOwned};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    time::timeout,
+};
 
-use crate::error::{Error, Result};
-use crate::protocol::{MAX_FRAME, USABLE_DATAGRAM, USABLE_FRAME};
+use crate::{
+    error::{Error, Result},
+    protocol::{MAX_FRAME, USABLE_DATAGRAM, USABLE_FRAME},
+};
 
 /// Deadline for one outbound frame, so a stalled peer cannot pin a task.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);

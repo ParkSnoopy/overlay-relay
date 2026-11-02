@@ -4,9 +4,11 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 
-use crate::error::{Error, Result};
-use crate::protocol::{MAX_ACCOUNTS, VERSION};
-use crate::verifier::Verifier;
+use crate::{
+    error::{Error, Result},
+    protocol::{MAX_ACCOUNTS, VERSION},
+    verifier::Verifier,
+};
 
 /// Largest peers table the hub reads, in bytes.
 pub const MAX_PEERS_FILE: u64 = 4 << 20;
@@ -98,8 +100,7 @@ impl Peers {
 #[cfg(test)]
 mod tests {
     use super::Peers;
-    use crate::error::Error;
-    use crate::protocol::VERSION;
+    use crate::{error::Error, protocol::VERSION};
 
     fn entry(byte: u8, name: &str) -> String {
         let key = p384::SecretKey::from_slice(&[byte; 48]);

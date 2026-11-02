@@ -1,12 +1,7 @@
 //! Source admission: a connecting address must exactly match a current address
 //! of an allowed host. Hosts are resolved again for every connection.
 
-use std::fmt::Debug;
-use std::future::Future;
-use std::io;
-use std::net::IpAddr;
-use std::pin::Pin;
-use std::time::Duration;
+use std::{fmt::Debug, future::Future, io, net::IpAddr, pin::Pin, time::Duration};
 
 use tokio::time::timeout;
 

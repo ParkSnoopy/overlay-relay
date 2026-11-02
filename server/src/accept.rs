@@ -4,11 +4,13 @@
 
 use tokio::net::TcpStream;
 
-use crate::frame::send_frame;
-use crate::hub::Shared;
-use crate::protocol::{ERR_INVALID_REQUEST, ERR_UNAUTHORIZED, Hello, Offer, Reply};
-use crate::state::Accepted;
-use crate::verifier::Verifier;
+use crate::{
+    frame::send_frame,
+    hub::Shared,
+    protocol::{ERR_INVALID_REQUEST, ERR_UNAUTHORIZED, Hello, Offer, Reply},
+    state::Accepted,
+    verifier::Verifier,
+};
 
 /// Claims the pending request named by `hello.id` for `acceptor` and hands
 /// over `stream`. Requests that are unknown, expired, already used, or

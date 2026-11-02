@@ -5,14 +5,20 @@
 //! UDP flows carry datagram records as raw bytes, so copying preserves framing.
 //! A UDP flow with no traffic for the idle period is cancelled.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
+};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::select;
-use tokio::time::sleep;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{
+        TcpStream,
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+    },
+    select,
+    time::sleep,
+};
 use tokio_util::sync::CancellationToken;
 
 /// Bytes moved per read.

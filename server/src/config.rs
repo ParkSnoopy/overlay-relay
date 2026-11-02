@@ -1,8 +1,6 @@
 //! Hub inputs: files, admission hosts, the resolver and timing limits.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use crate::dns::{Resolver, SystemResolver};
 

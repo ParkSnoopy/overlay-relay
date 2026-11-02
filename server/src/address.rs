@@ -1,11 +1,15 @@
 //! The overlay address space and stable, lowest-free address assignment.
 
-use std::collections::{HashMap, HashSet};
-use std::hash::BuildHasher;
-use std::net::Ipv4Addr;
+use std::{
+    collections::{HashMap, HashSet},
+    hash::BuildHasher,
+    net::Ipv4Addr,
+};
 
-use crate::error::{Error, Result};
-use crate::verifier::Verifier;
+use crate::{
+    error::{Error, Result},
+    verifier::Verifier,
+};
 
 /// The first address handed to an account.
 pub const FIRST_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 77, 0, 1);
@@ -70,12 +74,10 @@ fn next_free(cursor: &mut u32, last: u32, used: &HashSet<Ipv4Addr>) -> Result<Ip
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::net::Ipv4Addr;
+    use std::{collections::HashMap, net::Ipv4Addr};
 
     use super::{LAST_ADDRESS, assign, assignable};
-    use crate::error::Error;
-    use crate::verifier::Verifier;
+    use crate::{error::Error, verifier::Verifier};
 
     fn account(byte: u8) -> Verifier {
         Verifier::from_digest([byte; 32])

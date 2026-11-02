@@ -3,14 +3,14 @@
 //! Admitted hosts come only from the `OVERLAY_ALLOWED_HOST` environment
 //! variable, a comma-separated list. The peers table is read-only.
 
-use std::env;
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::{env, path::PathBuf, process::ExitCode};
 
 use overlay_relay::{Config, Error, Hub, LISTEN_ADDRESS, Result};
-use tokio::net::TcpListener;
-use tokio::select;
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::{
+    net::TcpListener,
+    select,
+    signal::unix::{SignalKind, signal},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{Level, error, info};
 

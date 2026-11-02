@@ -2,16 +2,19 @@
 //! and active flows. Callers hold the state lock only for these synchronous
 //! operations and never across an await point.
 
-use std::collections::{HashMap, HashSet};
-use std::net::Ipv4Addr;
+use std::{
+    collections::{HashMap, HashSet},
+    net::Ipv4Addr,
+};
 
-use tokio::net::TcpStream;
-use tokio::sync::oneshot;
+use tokio::{net::TcpStream, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::control::ControlHandle;
-use crate::protocol::{MAX_FLOWS_PER_ACCOUNT, MAX_PENDING_PER_ACCOUNT, Offer, Peer};
-use crate::verifier::Verifier;
+use crate::{
+    control::ControlHandle,
+    protocol::{MAX_FLOWS_PER_ACCOUNT, MAX_PENDING_PER_ACCOUNT, Offer, Peer},
+    verifier::Verifier,
+};
 
 /// An authenticated account, as seen by one stream.
 #[derive(Debug, Clone)]
@@ -295,8 +298,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::State;
-    use crate::protocol::MAX_FLOWS_PER_ACCOUNT;
-    use crate::verifier::Verifier;
+    use crate::{protocol::MAX_FLOWS_PER_ACCOUNT, verifier::Verifier};
 
     fn account(byte: u8) -> Verifier {
         Verifier::from_digest([byte; 32])

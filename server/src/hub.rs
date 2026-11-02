@@ -1,38 +1,54 @@
 //! The hub: startup, peers-table reloads, the accept loop, source admission and
 //! dispatch of each connection to its stream kind.
 
-use std::collections::HashMap;
-use std::fmt;
-use std::io::ErrorKind;
-use std::net::Ipv4Addr;
-use std::os::unix::fs::MetadataExt;
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    fmt,
+    io::ErrorKind,
+    net::Ipv4Addr,
+    os::unix::fs::MetadataExt,
+    sync::Arc,
+};
 
-use ring::rand::{SecureRandom, SystemRandom};
-use ring::signature::{ECDSA_P384_SHA384_ASN1, UnparsedPublicKey};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::select;
-use tokio::sync::Mutex;
-use tokio::time::{interval, timeout};
+use ring::{
+    rand::{SecureRandom, SystemRandom},
+    signature::{ECDSA_P384_SHA384_ASN1, UnparsedPublicKey},
+};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    select,
+    sync::Mutex,
+    time::{interval, timeout},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::accept;
-use crate::address::{LAST_ADDRESS, assign};
-use crate::assignments;
-use crate::config::Config;
-use crate::control;
-use crate::dns::admitted;
-use crate::error::{Error, Result};
-use crate::frame::{read_frame, send_frame};
-use crate::open;
-use crate::peers::{Account, MAX_PEERS_FILE, Peers};
-use crate::protocol::{
-    Challenge, ERR_INVALID_REQUEST, ERR_UNAUTHORIZED, Hello, KIND_ACCEPT, KIND_CONTROL, KIND_OPEN,
-    Proof, Reply, VERSION,
+use crate::{
+    accept,
+    address::{LAST_ADDRESS, assign},
+    assignments,
+    config::Config,
+    control,
+    dns::admitted,
+    error::{Error, Result},
+    frame::{read_frame, send_frame},
+    open,
+    peers::{Account, MAX_PEERS_FILE, Peers},
+    protocol::{
+        Challenge,
+        ERR_INVALID_REQUEST,
+        ERR_UNAUTHORIZED,
+        Hello,
+        KIND_ACCEPT,
+        KIND_CONTROL,
+        KIND_OPEN,
+        Proof,
+        Reply,
+        VERSION,
+    },
+    state::{Requester, State},
+    verifier::Verifier,
 };
-use crate::state::{Requester, State};
-use crate::verifier::Verifier;
 
 /// Inputs the hub keeps for its lifetime.
 #[derive(Debug)]

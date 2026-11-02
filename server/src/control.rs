@@ -4,22 +4,27 @@
 //! sends queued events and the freshest snapshot, and a reader that answers
 //! pings. Either half ending cancels the other.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
-use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::select;
-use tokio::sync::{Notify, mpsc};
-use tokio::time::timeout;
+use tokio::{
+    net::{
+        TcpStream,
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+    },
+    select,
+    sync::{Notify, mpsc},
+    time::timeout,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::frame::{read_frame, send_frame};
-use crate::hub::Shared;
-use crate::protocol::{Event, Ping, Reply};
-use crate::state::Requester;
-use crate::verifier::Verifier;
+use crate::{
+    frame::{read_frame, send_frame},
+    hub::Shared,
+    protocol::{Event, Ping, Reply},
+    state::Requester,
+    verifier::Verifier,
+};
 
 /// Events that may wait for a control writer before the stream is dropped.
 const EVENT_QUEUE: usize = 16;

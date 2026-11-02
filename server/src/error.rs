@@ -1,9 +1,7 @@
 //! Error type shared by the hub. Messages are fixed strings or I/O and JSON
 //! descriptions; they never include credentials, tokens, payloads or names.
 
-use std::error::Error as StdError;
-use std::fmt;
-use std::io;
+use std::{error::Error as StdError, fmt, io};
 
 /// Result alias used across the crate.
 pub type Result<T, E = Error> = std::result::Result<T, E>;

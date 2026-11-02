@@ -1,28 +1,53 @@
 //! End-to-end tests for the hub over real local sockets. They use only the
 //! public API and mirror the behaviour of the Go overlay hub tests.
 
-use std::future::Future;
-use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    future::Future,
+    io,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use overlay_relay::{
-    Config, ERR_INVALID_REQUEST, ERR_UNAUTHORIZED, ERR_UNAVAILABLE, Event, Hello, Hub, Incoming,
-    KIND_ACCEPT, KIND_CONTROL, KIND_OPEN, MAX_DATAGRAM, MAX_PENDING_PER_ACCOUNT, PROTO_TCP,
-    PROTO_UDP, Ping, Proof, Reply, Resolver, VERSION, Verifier, read_datagram, read_frame,
-    write_datagram, write_frame,
+    Config,
+    ERR_INVALID_REQUEST,
+    ERR_UNAUTHORIZED,
+    ERR_UNAVAILABLE,
+    Event,
+    Hello,
+    Hub,
+    Incoming,
+    KIND_ACCEPT,
+    KIND_CONTROL,
+    KIND_OPEN,
+    MAX_DATAGRAM,
+    MAX_PENDING_PER_ACCOUNT,
+    PROTO_TCP,
+    PROTO_UDP,
+    Ping,
+    Proof,
+    Reply,
+    Resolver,
+    VERSION,
+    Verifier,
+    read_datagram,
+    read_frame,
+    write_datagram,
+    write_frame,
 };
 use p384::ecdsa::{Signature, SigningKey, signature::Signer};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
-use tokio::time::{sleep, timeout};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::Mutex,
+    task::JoinHandle,
+    time::{sleep, timeout},
+};
 use tokio_util::sync::CancellationToken;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;

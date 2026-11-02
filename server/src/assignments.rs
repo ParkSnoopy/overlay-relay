@@ -3,15 +3,19 @@
 //! The file maps verifier hex to an `IPv4` address. Writes go through a temporary
 //! file created with mode 0600, fsynced, then renamed over the old file.
 
-use std::collections::{BTreeMap, HashMap};
-use std::io::ErrorKind;
-use std::net::{IpAddr, Ipv4Addr};
-use std::path::Path;
+use std::{
+    collections::{BTreeMap, HashMap},
+    io::ErrorKind,
+    net::{IpAddr, Ipv4Addr},
+    path::Path,
+};
 
 use tokio::io::AsyncWriteExt;
 
-use crate::error::{Error, Result};
-use crate::verifier::Verifier;
+use crate::{
+    error::{Error, Result},
+    verifier::Verifier,
+};
 
 /// File name of the persisted assignments inside the data directory.
 pub const FILE_NAME: &str = "ips.json";
@@ -77,13 +81,13 @@ async fn write_then_rename(temporary: &Path, path: &Path, raw: &[u8]) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::net::Ipv4Addr;
-    use std::os::unix::fs::PermissionsExt;
+    use std::{collections::HashMap, net::Ipv4Addr, os::unix::fs::PermissionsExt};
 
     use super::{FILE_NAME, load, save};
-    use crate::error::{Error, Result};
-    use crate::verifier::Verifier;
+    use crate::{
+        error::{Error, Result},
+        verifier::Verifier,
+    };
 
     #[tokio::test]
     async fn saved_assignments_load_back_with_private_mode() -> Result<()> {
