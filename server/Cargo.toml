@@ -2,8 +2,33 @@
 name = "overlay-relay"
 version = "0.1.0"
 edition = "2024"
+description = "Authenticated rendezvous and byte relay for overlay VPN accounts"
+license = "GPL-3.0-only"
+repository = "https://github.com/ParkSnoopy/overlay-relay"
+readme = "README.md"
+keywords = ["vpn", "overlay", "relay", "tokio"]
+categories = ["network-programming", "asynchronous"]
+
+[[bin]]
+name = "overlay-hub"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
 
 [dependencies]
+hex = "0.4"
+rand = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "fs", "signal"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
 
 # ============================================
 # RUST-MAGIC-LINTER (maximum preset)
