@@ -18,6 +18,16 @@ pub const MAX_FRAME: usize = 16 << 10;
 /// Largest UDP payload carried as one datagram record.
 pub const MAX_DATAGRAM: usize = 65535;
 
+/// Bytes kept free below each transport limit, so headers and encoding overhead
+/// never cross a hard bound. Writers stay under the usable limits.
+pub const SAFETY_SPACE: usize = 128;
+
+/// Largest payload the hub writes as one frame.
+pub const USABLE_FRAME: usize = MAX_FRAME - SAFETY_SPACE;
+
+/// Largest payload the hub writes as one datagram record.
+pub const USABLE_DATAGRAM: usize = MAX_DATAGRAM - SAFETY_SPACE;
+
 /// Most accounts one peers table may hold.
 pub const MAX_ACCOUNTS: usize = 4096;
 

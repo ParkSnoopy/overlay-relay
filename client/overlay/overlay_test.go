@@ -33,7 +33,7 @@ func TestFramesRoundTripAndBounds(t *testing.T) {
 	if err := ReadFrame(&buffer, &hello); err != nil || hello.Port != 22 || hello.Dst != "10.77.0.2" {
 		t.Fatalf("hello = %+v, %v", hello, err)
 	}
-	if err := WriteFrame(&buffer, strings.Repeat("x", MaxFrame)); err == nil {
+	if err := WriteFrame(&buffer, strings.Repeat("x", UsableFrame)); err == nil {
 		t.Fatal("oversized frame accepted")
 	}
 	if err := ReadFrame(bytes.NewReader([]byte{0xff, 0xff}), &hello); err == nil {

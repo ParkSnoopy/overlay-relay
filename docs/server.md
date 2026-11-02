@@ -33,7 +33,7 @@ Allocations are written atomically with mode `0600` to `ips.json` keyed by verif
 
 ## Protocol
 
-The client sends a `Hello` within 10 seconds, and every frame is bounded by `overlay.MaxFrame`.
+The client sends a `Hello` within 10 seconds, and every frame it reads is bounded by `overlay.MaxFrame` (16 KiB on the wire).
 The hub computes the verifier of the token, looks it up with a constant-time comparison and answers an unknown token with `unauthorized` before closing.
 
 - `control` registers the account as broadcasting and replies with its address and name.

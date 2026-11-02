@@ -40,6 +40,14 @@ const (
 	MaxFrame = 16 << 10
 	// MaxDatagram bounds one UDP payload carried inside a UDP stream.
 	MaxDatagram = 65535
+	// SafetySpace is kept free below each transport limit, so headers and
+	// encoding overhead never cross a hard bound. Writers stay under the usable
+	// limits; readers accept up to the wire limits.
+	SafetySpace = 128
+	// UsableFrame is the largest payload a writer emits as one frame.
+	UsableFrame = MaxFrame - SafetySpace
+	// UsableDatagram is the largest payload a writer emits as one datagram record.
+	UsableDatagram = MaxDatagram - SafetySpace
 )
 
 // CIDR is the overlay address space. Network and broadcast addresses are never assigned.
@@ -182,7 +190,7 @@ func WriteFrame(w io.Writer, value any) error {
 	if err != nil {
 		return err
 	}
-	if len(payload) == 0 || len(payload) > MaxFrame {
+	if len(payload) == 0 || len(payload) > UsableFrame {
 		return fmt.Errorf("overlay frame size %d is out of bounds", len(payload))
 	}
 	frame := binary.BigEndian.AppendUint16(make([]byte, 0, 2+len(payload)), uint16(len(payload)))
@@ -209,7 +217,7 @@ func ReadFrame(r io.Reader, value any) error {
 
 // WriteDatagram writes one UDP payload as a 16-bit length-prefixed record.
 func WriteDatagram(w io.Writer, payload []byte) error {
-	if len(payload) > MaxDatagram {
+	if len(payload) > UsableDatagram {
 		return errors.New("overlay datagram is too large")
 	}
 	_, err := w.Write(append(binary.BigEndian.AppendUint16(make([]byte, 0, 2+len(payload)), uint16(len(payload))), payload...))

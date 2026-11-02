@@ -8,7 +8,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
 use crate::error::{Error, Result};
-use crate::protocol::{MAX_DATAGRAM, MAX_FRAME};
+use crate::protocol::{MAX_FRAME, USABLE_DATAGRAM, USABLE_FRAME};
 
 /// Deadline for one outbound frame, so a stalled peer cannot pin a task.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -45,7 +45,7 @@ where
     T: Serialize + ?Sized,
 {
     let payload = serde_json::to_vec(value)?;
-    if payload.is_empty() || payload.len() > MAX_FRAME {
+    if payload.is_empty() || payload.len() > USABLE_FRAME {
         return Err(Error::Protocol("overlay frame size is out of bounds"));
     }
     let header = u16::try_from(payload.len())
@@ -77,13 +77,13 @@ where
 /// Writes one UDP payload as a 16-bit length-prefixed record.
 ///
 /// # Errors
-/// Returns `Error::Protocol` when the payload exceeds [`MAX_DATAGRAM`] bytes,
+/// Returns `Error::Protocol` when the payload exceeds [`USABLE_DATAGRAM`] bytes,
 /// and `Error::Io` when the write fails.
 pub async fn write_datagram<W>(writer: &mut W, payload: &[u8]) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    if payload.len() > MAX_DATAGRAM {
+    if payload.len() > USABLE_DATAGRAM {
         return Err(Error::Protocol("overlay datagram is too large"));
     }
     let size = u16::try_from(payload.len())

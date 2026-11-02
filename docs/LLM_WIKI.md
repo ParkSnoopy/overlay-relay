@@ -252,8 +252,10 @@ After admission, the first frame must arrive within `10` seconds. Otherwise the 
 | Name | Value | Owner |
 |---|---|---|
 | Overlay port | `6697` | hub listens |
-| Max frame payload | `16384` bytes | both |
-| Max datagram payload | `65535` bytes | both |
+| Max frame payload (wire) | `16384` bytes | both (readers) |
+| Usable frame payload (writers) | `16256` bytes = 16384 − `SAFETY_SPACE` (128) | both (writers) |
+| Max datagram payload (wire) | `65535` bytes | both (readers) |
+| Usable datagram payload (writers) | `65407` bytes = 65535 − 128 | both (writers) |
 | Max accounts in table | `4096` | hub |
 | Max account name | `128` bytes | hub |
 | Max peers file size | `4 MiB` | hub |

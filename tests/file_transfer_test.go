@@ -27,7 +27,7 @@ import (
 //
 // Stream flows send the header, the raw bytes and the digest.
 // Datagram flows send the header, then one chunk per overlay record, cut at
-// overlay.MaxFrame bytes. The receiver acknowledges the header and every chunk
+// overlay.UsableFrame bytes. The receiver acknowledges the header and every chunk
 // but the last, so the sender never outruns the local datagram socket.
 const (
 	ackByte     byte = 0x06
@@ -210,7 +210,7 @@ func sendDatagrams(flow net.Conn, source io.Reader, name string, size int64) (in
 		return 0, err
 	}
 	digest := sha256.New()
-	buffer := make([]byte, overlay.MaxFrame)
+	buffer := make([]byte, overlay.UsableFrame)
 	chunks := 0
 	for remaining := size; remaining > 0; {
 		n, err := io.ReadFull(source, buffer[:min(int64(len(buffer)), remaining)])
@@ -405,7 +405,7 @@ func exchangeFiles(t *testing.T, env *transferEnv, proto string, size int, text 
 	requireSameFile(t, bobSource, filepath.Join(env.aliceSink.dir, "from-bob.bin"))
 
 	if proto == overlay.ProtoUDP {
-		want := (size + overlay.MaxFrame - 1) / overlay.MaxFrame
+		want := (size + overlay.UsableFrame - 1) / overlay.UsableFrame
 		if aliceChunks != want || bobChunks != want {
 			t.Fatalf("datagram chunks alice=%d bob=%d, want %d frame-sized records each", aliceChunks, bobChunks, want)
 		}

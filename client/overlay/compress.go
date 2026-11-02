@@ -19,7 +19,7 @@ const (
 	chunkRaw     byte = 0
 	chunkDeflate byte = 1
 	// CompressedChunkSize bounds the plain bytes carried by one chunk.
-	CompressedChunkSize = 16 << 10
+	CompressedChunkSize = UsableFrame
 	// chunkMinDeflate is the smallest plain chunk worth an attempt at compression.
 	chunkMinDeflate = 512
 )
