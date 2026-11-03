@@ -27,6 +27,7 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 	}
 	a.mu.Lock()
 	_, peer := a.peerSet[ip]
+	peerID := a.peerIDLocked(ip)
 	self := ip == a.ip
 	a.mu.Unlock()
 	if self {
@@ -36,12 +37,12 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 		return nil, errors.New(overlay.ErrUnavailable)
 	}
 	wantDirect := a.directAllowed(ip)
-	flow, err := a.openFlow(ctx, proto, ip, dst.Port(), wantDirect)
+	flow, err := a.openFlow(ctx, proto, ip, dst.Port(), peerID, wantDirect)
 	if wantDirect && errors.Is(err, errDirectFailed) && ctx.Err() == nil {
 		// NAT or a firewall can refuse the direct path. The next attempt offers
 		// no endpoint, so both peers use the relay for this flow and later ones.
 		a.blockDirect(ip)
-		flow, err = a.openFlow(ctx, proto, ip, dst.Port(), false)
+		flow, err = a.openFlow(ctx, proto, ip, dst.Port(), peerID, false)
 	}
 	if err != nil {
 		return nil, err
@@ -57,8 +58,8 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 
 // openFlow asks the hub for one flow to ip and finishes it on the transport the
 // hub negotiated. wantDirect adds this agent's direct offer to the request.
-func (a *Agent) openFlow(ctx context.Context, proto string, ip netip.Addr, port uint16, wantDirect bool) (net.Conn, error) {
-	hello := &overlay.Hello{Version: overlay.Version, Kind: overlay.KindOpen, Proto: proto, Dst: ip.String(), Port: port}
+func (a *Agent) openFlow(ctx context.Context, proto string, ip netip.Addr, port uint16, peerID string, wantDirect bool) (net.Conn, error) {
+	hello := &overlay.Hello{Version: overlay.Version, Kind: overlay.KindOpen, Proto: proto, Dst: ip.String(), Port: port, PeerID: peerID}
 	a.offer(ctx, hello, wantDirect)
 	conn, err := a.cfg.Dial(ctx)
 	if err != nil {
@@ -73,7 +74,11 @@ func (a *Agent) openFlow(ctx context.Context, proto string, ip netip.Addr, port 
 		closeConn(conn)
 		return nil, errors.New(boundedReason(reply.Error))
 	}
-	return a.finishOutbound(ctx, conn, &reply)
+	flow, err := a.finishOutbound(ctx, conn, &reply)
+	if err != nil {
+		return nil, err
+	}
+	return a.trackFlow(flow, ip, peerID, reply.Direct)
 }
 
 // directAllowed reports whether a direct connection to ip may be offered: it
@@ -81,6 +86,9 @@ func (a *Agent) openFlow(ctx context.Context, proto string, ip netip.Addr, port 
 func (a *Agent) directAllowed(ip netip.Addr) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.relayOnlyLocked(a.peerIDLocked(ip)) {
+		return false
+	}
 	until, blocked := a.directBlocked[ip]
 	if blocked && time.Now().After(until) {
 		delete(a.directBlocked, ip)
@@ -126,7 +134,13 @@ func (a *Agent) accept(ctx context.Context, in *overlay.Incoming) {
 func (a *Agent) serveIncoming(ctx context.Context, in *overlay.Incoming, src netip.Addr) error {
 	// Register for a direct connection before the accept, so the requester can
 	// never reach the listener ahead of the registration.
-	exp := a.expectDirect(in)
+	var exp *expectation
+	a.mu.Lock()
+	allowed := !a.relayOnlyLocked(in.PeerID)
+	a.mu.Unlock()
+	if allowed {
+		exp = a.expectDirect(in)
+	}
 	defer exp.cancel()
 	hello := &overlay.Hello{Version: overlay.Version, Kind: overlay.KindAccept, ID: in.ID}
 	a.offer(ctx, hello, exp != nil)
@@ -144,6 +158,10 @@ func (a *Agent) serveIncoming(ctx context.Context, in *overlay.Incoming, src net
 		return errors.Join(err, errors.New("hub refused the accept stream"))
 	}
 	flow, err := a.finishIncoming(ctx, hub, &reply, in, exp)
+	if err != nil {
+		return err
+	}
+	flow, err = a.trackFlow(flow, src, in.PeerID, reply.Direct)
 	if err != nil {
 		return err
 	}

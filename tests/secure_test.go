@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"net"
 	"net/netip"
 	"os"
@@ -127,10 +128,11 @@ func (c natConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 }
 
 type secureEnv struct {
-	alice, bob         *overlayagent.Agent
-	aliceIP, bobIP     netip.Addr
-	aliceTap, bobTap   *hubTap
-	aliceSink, bobSink *fileSink
+	alice, bob             *overlayagent.Agent
+	aliceStates, bobStates chan overlay.State
+	aliceIP, bobIP         netip.Addr
+	aliceTap, bobTap       *hubTap
+	aliceSink, bobSink     *fileSink
 }
 
 func newSecureAgent(hub string, account account, side secureSide, stun string, tap *hubTap, states chan<- overlay.State, sink *fileSink) *overlayagent.Agent {
@@ -184,6 +186,7 @@ func startSecureEnv(t *testing.T, alice, bob secureSide) *secureEnv {
 	env := &secureEnv{aliceTap: &hubTap{}, bobTap: &hubTap{}, aliceSink: startSink(t, t.TempDir()), bobSink: startSink(t, t.TempDir())}
 	aliceStates := make(chan overlay.State, 64)
 	bobStates := make(chan overlay.State, 64)
+	env.aliceStates, env.bobStates = aliceStates, bobStates
 	env.alice = newSecureAgent(hub.address, aliceAccount, alice, stun, env.aliceTap, aliceStates, env.aliceSink)
 	env.bob = newSecureAgent(hub.address, bobAccount, bob, stun, env.bobTap, bobStates, env.bobSink)
 
@@ -265,6 +268,70 @@ func TestDirectFlowBypassesTheHub(t *testing.T) {
 			t.Errorf("%s: the hub connection carried plaintext", name)
 		}
 	}
+}
+
+func TestDevicePolicyClosesDirectFlowsAndRelaysBothDirections(t *testing.T) {
+	both := secureSide{direct: true}
+	env := startSecureEnv(t, both, both)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	flow, err := env.alice.Outbound(ctx, overlay.ProtoTCP, netip.AddrPortFrom(env.bobIP, 7000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = flow.Close() }()
+	aliceState := waitFor(t, env.aliceStates, func(state overlay.State) bool {
+		return len(state.Peers) == 1 && state.Peers[0].DirectFlows == 1 && state.Peers[0].RelayFlows == 0
+	})
+	bobState := waitFor(t, env.bobStates, func(state overlay.State) bool {
+		return len(state.Peers) == 1 && state.Peers[0].DirectFlows == 1
+	})
+	aliceID, bobID := bobState.Peers[0].ID, aliceState.Peers[0].ID
+	if !overlay.ValidPeerID(aliceID) || !overlay.ValidPeerID(bobID) || aliceID == bobID {
+		t.Fatal("missing distinct device identities")
+	}
+	if err := env.bob.SetRelayOnly([]string{aliceID}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, env.bobStates, func(state overlay.State) bool {
+		return len(state.Peers) == 1 && state.Peers[0].DirectFlows == 0
+	})
+	_ = flow.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := flow.Read(make([]byte, 1)); err == nil {
+		t.Fatal("denied direct flow stayed open")
+	} else {
+		var timeout net.Error
+		if errors.As(err, &timeout) && timeout.Timeout() {
+			t.Fatal("denied direct flow did not close promptly")
+		}
+	}
+	_ = flow.Close()
+	incoming, err := env.alice.Outbound(ctx, overlay.ProtoTCP, netip.AddrPortFrom(env.bobIP, 7000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = incoming.Close() }()
+	outgoing, err := env.bob.Outbound(ctx, overlay.ProtoTCP, netip.AddrPortFrom(env.aliceIP, 7000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = outgoing.Close() }()
+	waitFor(t, env.bobStates, func(state overlay.State) bool {
+		return len(state.Peers) == 1 && state.Peers[0].DirectFlows == 0 && state.Peers[0].RelayFlows == 2
+	})
+	_ = incoming.Close()
+	_ = outgoing.Close()
+	if err := env.bob.SetRelayOnly(nil); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := env.bob.Outbound(ctx, overlay.ProtoTCP, netip.AddrPortFrom(env.aliceIP, 7000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restored.Close() }()
+	waitFor(t, env.bobStates, func(state overlay.State) bool {
+		return len(state.Peers) == 1 && state.Peers[0].DirectFlows == 1
+	})
 }
 
 func TestFailedDirectConnectionFallsBackToTheEncryptedRelay(t *testing.T) {

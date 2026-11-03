@@ -55,6 +55,8 @@ type Config struct {
 	// Direct lets flows bypass the hub when both peers enable it. Nil (the
 	// default) keeps every flow on the relay.
 	Direct *DirectOptions
+	// RelayOnly lists device IDs that must never use direct transport.
+	RelayOnly []string
 }
 
 // DirectOptions configures direct connections. Two peers connect directly
@@ -107,6 +109,8 @@ type Agent struct {
 	started   bool
 	// directBlocked holds peers whose direct connection failed, until when.
 	directBlocked map[netip.Addr]time.Time
+	relayOnly     map[string]bool
+	active        map[*peerFlow]struct{}
 
 	flows    sync.WaitGroup
 	inflight chan struct{}
@@ -128,6 +132,7 @@ func New(cfg Config) *Agent {
 		ready:       make(chan netip.Addr, 1),
 		inflight:    make(chan struct{}, maxIncoming),
 	}
+	a.identityErr = errors.Join(a.identityErr, a.SetRelayOnly(cfg.RelayOnly))
 	if !cfg.DisableEncryption {
 		var err error
 		a.identity, err = newIdentity()
@@ -364,6 +369,19 @@ func (a *Agent) emit() {
 		Reason:       a.reason,
 		Name:         a.name,
 		Peers:        append([]overlay.Peer{}, a.peers...),
+	}
+	for i := range state.Peers {
+		peer := &state.Peers[i]
+		peer.DirectFlows, peer.RelayFlows = 0, 0
+		for flow := range a.active {
+			if flow.peerID == peer.ID && flow.ip.String() == peer.IP {
+				if flow.direct {
+					peer.DirectFlows++
+				} else {
+					peer.RelayFlows++
+				}
+			}
+		}
 	}
 	if a.ip.IsValid() {
 		state.IP = a.ip.String()

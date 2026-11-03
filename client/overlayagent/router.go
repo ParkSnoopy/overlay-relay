@@ -30,6 +30,17 @@ func (r *Router) Owns(address netip.Addr) bool { return overlay.CIDR.Contains(ad
 
 var errInactive = errors.New("overlay network is not active")
 
+// SetRelayOnly updates direct policy on the running agent.
+func (r *Router) SetRelayOnly(ids []string) error {
+	r.mu.RLock()
+	agent := r.agent
+	r.mu.RUnlock()
+	if agent == nil {
+		return errInactive
+	}
+	return agent.SetRelayOnly(ids)
+}
+
 // TCP relays one stack TCP flow to a broadcasting peer.
 func (r *Router) TCP(ctx context.Context, local net.Conn, destination M.Socksaddr) error {
 	upstream, err := r.open(ctx, overlay.ProtoTCP, destination)

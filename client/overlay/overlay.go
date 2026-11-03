@@ -64,6 +64,8 @@ const (
 
 // Hello is the first frame on every stream a client opens to the hub.
 type Hello struct {
+	// PeerID optionally binds an open request to its expected device identity.
+	PeerID    string `json:"peer_id,omitempty"`
 	Version   int    `json:"version"`
 	Kind      string `json:"kind"`
 	PublicKey string `json:"public_key"`
@@ -109,18 +111,50 @@ type Reply struct {
 	Endpoint string `json:"endpoint,omitempty"`
 }
 
+// ValidPeerID reports whether id is a canonical SHA-256 device identifier.
+func ValidPeerID(id string) bool {
+	if len(id) != 64 {
+		return false
+	}
+	for _, c := range id {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateRelayOnly bounds and validates a device-based direct deny list.
+func ValidateRelayOnly(ids []string) error {
+	if len(ids) > 4096 {
+		return errors.New("too many overlay peer policies")
+	}
+	for _, id := range ids {
+		if !ValidPeerID(id) {
+			return errors.New("invalid overlay peer ID")
+		}
+	}
+	return nil
+}
+
 // Peer is one other broadcasting account.
 type Peer struct {
+	// ID is the SHA-256 digest of the device's persistent public key.
+	ID   string `json:"id,omitempty"`
 	IP   string `json:"ip"`
 	Name string `json:"name"`
+	// Flow counts describe established local flows, never direct eligibility.
+	DirectFlows int `json:"directFlows"`
+	RelayFlows  int `json:"relayFlows"`
 }
 
 // Incoming asks the destination agent to open an accept stream for a flow.
 type Incoming struct {
-	ID    string `json:"id"`
-	Proto string `json:"proto"`
-	Src   string `json:"src"`
-	Port  uint16 `json:"port"`
+	PeerID string `json:"peer_id,omitempty"`
+	ID     string `json:"id"`
+	Proto  string `json:"proto"`
+	Src    string `json:"src"`
+	Port   uint16 `json:"port"`
 
 	// Fingerprint and Endpoint carry the requester's offer, when it made one.
 	Fingerprint string `json:"fingerprint,omitempty"`

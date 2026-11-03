@@ -71,6 +71,9 @@ pub struct Hello {
     pub kind: String,
     /// Hex-encoded uncompressed P-384 public key.
     pub public_key: String,
+    /// Expected destination device ID for an open; prevents address reuse races.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub peer_id: String,
     /// Protocol for an open request.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub proto: String,
@@ -201,6 +204,8 @@ impl Reply {
 /// One other broadcasting account.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Peer {
+    /// Stable SHA-256 identifier of the device's public key.
+    pub id: String,
     /// The peer's overlay `IPv4` address.
     pub ip: String,
     /// The peer's display name.
@@ -210,6 +215,8 @@ pub struct Peer {
 /// A request asking the destination agent to open an accept stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Incoming {
+    /// Stable identifier of the authenticated requesting device.
+    pub peer_id: String,
     /// Identifier to echo in the accept Hello.
     pub id: String,
     /// Transport protocol of the flow.

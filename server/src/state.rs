@@ -216,6 +216,7 @@ impl State {
             }
             if let Some(entry) = self.accounts.get(verifier) {
                 let peer = Peer {
+                    id: verifier.to_hex(),
                     ip: entry.ip.to_string(),
                     name: entry.name.clone(),
                 };

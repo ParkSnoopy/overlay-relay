@@ -69,7 +69,13 @@ pub async fn serve(
         refuse(&mut stream).await;
         return;
     };
+    if !hello.peer_id.is_empty() && hello.peer_id != destination.to_hex() {
+        shared.state.lock().await.remove_pending(&id);
+        refuse(&mut stream).await;
+        return;
+    }
     let incoming = Incoming {
+        peer_id: requester.verifier.to_hex(),
         id: id.clone(),
         proto: hello.proto.clone(),
         src: requester.ip.to_string(),
