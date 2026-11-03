@@ -43,7 +43,7 @@ func (a *Agent) offer(ctx context.Context, hello *overlay.Hello, wantDirect bool
 }
 
 // finishOutbound turns the hub's success reply into the requester's flow stream.
-// A direct flow that fails to come up is a failed flow: it never falls back to the relay.
+// A direct flow that fails to come up returns errDirectFailed; Outbound then retries on the relay.
 func (a *Agent) finishOutbound(ctx context.Context, hub net.Conn, reply *overlay.Reply) (net.Conn, error) {
 	if !reply.Direct {
 		return a.seal(ctx, hub, reply, true)

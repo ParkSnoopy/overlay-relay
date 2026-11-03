@@ -25,8 +25,11 @@ import (
 const (
 	// maxIncoming bounds concurrently handled incoming flows, including their handshakes.
 	maxIncoming = 128
-	maxPeers    = 4096
-	maxReason   = 128
+	// directRetryAfter is how long a peer whose direct connection failed is
+	// served by the relay before a direct connection is offered again.
+	directRetryAfter = 5 * time.Minute
+	maxPeers         = 4096
+	maxReason        = 128
 )
 
 // Config wires an Agent to its platform.
@@ -56,8 +59,9 @@ type Config struct {
 
 // DirectOptions configures direct connections. Two peers connect directly
 // over the internet with QUIC when both enable it, and the hub then relays
-// nothing. It needs encryption. A direct flow that fails to connect fails; it
-// never falls back to the relay.
+// nothing. It needs encryption. NAT can refuse the direct path, so a flow whose
+// direct connection fails is retried once on the relay, and that peer is not
+// offered a direct connection again for a few minutes.
 type DirectOptions struct {
 	// STUNServers lists host:port STUN servers, asked from outside the VPN to
 	// learn the public UDP endpoint. At least one is required.
@@ -101,6 +105,8 @@ type Agent struct {
 	ready     chan netip.Addr
 	readyOnce sync.Once
 	started   bool
+	// directBlocked holds peers whose direct connection failed, until when.
+	directBlocked map[netip.Addr]time.Time
 
 	flows    sync.WaitGroup
 	inflight chan struct{}

@@ -218,7 +218,7 @@ The reference agent offers a direct connection when `Config.Direct` is set and e
 4. The destination registers the `id` before it sends its accept, so the requester cannot arrive early. Both sides send a short packet toward the other's endpoint every 200 ms to open their NAT.
 5. The requester dials the destination's endpoint with QUIC. ALPN is `overlay-relay/direct-1`, the TLS server name is the flow `id`, and both sides pin the fingerprint as in section 8.6. The destination picks the pinned fingerprint by that server name and refuses an unknown name.
 6. The requester opens one bidirectional stream and writes a single byte `0x01` so the destination can accept it. After that the stream carries the flow bytes exactly as a relayed flow would (compression, if enabled, sits on top).
-7. If the connection does not come up within `DirectOptions.Timeout` (default 10 s), the flow fails. It does not fall back to the relay.
+7. If the connection does not come up within `DirectOptions.Timeout` (default 10 s), the direct attempt fails on both sides. The requester then opens the flow again without an endpoint, so the hub relays it (section 8.4), and it offers no endpoint to that peer for five minutes. The destination sees the retry as a new request.
 
 ### 8.4 Relay mode
 
@@ -428,7 +428,7 @@ The hub logs with `tracing`. It never logs private keys, identifiers, payloads o
 ## 19. Non-goals
 
 - The hub does not encrypt traffic itself and holds no private identity keys. Encryption is the agents' job (section 8.6). Hub-to-agent control frames are not encrypted by the overlay; an authenticated VPN must protect that transport.
-- No relay fallback for a failed direct connection, no certificate authority, and no STUN server in the hub.
+- No hub-side tracking of direct connections (the requester alone falls back to the relay), no certificate authority, and no STUN server in the hub.
 - The hub does not route to the internet or to addresses outside `10.77.0.0/16`.
 - The hub has no accounting or quotas beyond the flow and pending limits in section 11.
 - No version negotiation beyond `version: 2`. A new wire version requires a new `version` value and a coordinated release.

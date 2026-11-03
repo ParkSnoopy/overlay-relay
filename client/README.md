@@ -117,7 +117,7 @@ cfg.Direct = &overlayagent.DirectOptions{
 - The agent asks the STUN server, over the socket the QUIC connection will use, for its public UDP endpoint. Query it from outside the VPN, or the hub-side address you learn is not reachable.
 - Both peers hole-punch their NAT and connect. The QUIC handshake pins the same certificate fingerprints, so the connection is authenticated and encrypted.
 - If only one side enables `Direct`, or an agent cannot learn its endpoint, the flow stays on the encrypted relay.
-- A direct connection that fails to come up makes the flow fail. It does not fall back to the relay, because that would hide a network change from the caller.
+- Some NATs and firewalls refuse hole punching. When a direct connection does not come up, `Outbound` retries the flow once on the encrypted relay, and the destination serves it there. The peer is then not offered a direct connection for five minutes. The failed attempt delays the first flow by up to the timeout.
 - `DirectOptions.Timeout` bounds the connection attempt (default 10 seconds).
 
 ## Account identities
