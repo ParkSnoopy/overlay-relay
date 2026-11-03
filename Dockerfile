@@ -2,21 +2,18 @@
 
 # Build the overlay-hub server image.
 #   docker build -t overlay-relay:0.1.1 .
-# The binary is linked statically against musl, so it does not depend on the
-# runtime's C library. The image runs as a non-root user and reads its
+# The GNU binary is built on Debian 13 to match the runtime's C library.
+# The image runs as a non-root user and reads its
 # configuration from the environment.
 # Required at run time: OVERLAY_ALLOWED_HOST (see server/README.md).
 
-ARG RUST_IMAGE=docker.io/library/rust:1-slim
+ARG RUST_IMAGE=docker.io/library/rust:1-slim-trixie
 ARG RUNTIME_IMAGE=docker.io/library/debian:13-slim
-ARG TARGET=x86_64-unknown-linux-musl
+ARG TARGET=x86_64-unknown-linux-gnu
 
 FROM ${RUST_IMAGE} AS build
 ARG TARGET
-RUN apt-get update \
- && apt-get install -y --no-install-recommends musl-tools \
- && rm -rf /var/lib/apt/lists/* \
- && rustup target add "$TARGET"
+RUN rustup target add "$TARGET"
 WORKDIR /src
 COPY server/ ./server/
 RUN cargo build --release --locked --target "$TARGET" --manifest-path server/Cargo.toml --bin overlay-hub \
