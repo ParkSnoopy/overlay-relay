@@ -355,7 +355,7 @@ func startTransferEnv(t *testing.T, compression bool) *transferEnv {
 	hubBinary := buildHub(t)
 	alice := newAccount(t, "alice")
 	bob := newAccount(t, "bob")
-	hub := startHub(t, hubBinary, overlay.Peers{Version: overlay.Version, Accounts: []overlay.Account{accountEntry(t, alice), accountEntry(t, bob)}})
+	hub := startHub(t, hubBinary)
 
 	aliceSink := startSink(t, t.TempDir())
 	bobSink := startSink(t, t.TempDir())

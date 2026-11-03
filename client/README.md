@@ -2,7 +2,7 @@
 
 Go module `github.com/ParkSnoopy/overlay-relay/client`. It contains:
 
-- `overlay`: wire types, frame codec, identity keys, and peers table validation.
+- `overlay`: wire types, frame codec and identity keys.
 - `overlayagent`: a reference agent that registers with a hub, tracks peers, opens outbound flows, serves inbound flows, and probes a hub for readiness.
 
 The module has no daemon and no platform code. Your application supplies the network dialers and the local service dialer. The agent runs in your process.
@@ -125,7 +125,7 @@ cfg.Direct = &overlayagent.DirectOptions{
 ```go
 key, err := overlay.GenerateIdentity()
 encoded, err := overlay.EncodeIdentity(key) // store securely and reuse
-public, err := overlay.PublicIdentity(key) // enroll this public key with the hub
+public, err := overlay.PublicIdentity(key) // optional: show or log it; the hub needs no enrollment
 ```
 
 The client must use the same key across reconnects. Use `overlay.ParseIdentity` to load the stored PKCS#8 PEM. An authenticated VPN is required for every hub stream. The signature exchange alone does not authenticate the hub or protect against an active intermediary.
@@ -151,7 +151,7 @@ if err := overlayagent.Probe(ctx, "hub.example.net:6697"); err != nil {
 }
 ```
 
-`Probe` uses a fresh unregistered key and expects an `unauthorized` reply. It never uses a real account. Its TCP connection must also travel through the authenticated VPN.
+`Probe` sends a malformed key and expects an `unauthorized` reply, so it never creates a peer. Its TCP connection must also travel through the authenticated VPN.
 
 ## Wire helpers
 

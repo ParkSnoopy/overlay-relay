@@ -115,7 +115,7 @@ pub async fn serve(
         .state
         .lock()
         .await
-        .open_flow([requester.verifier, destination], cancel.clone());
+        .open_flow([requester.verifier, destination]);
     let Some(flow_id) = flow else {
         refuse(&mut stream).await;
         refuse(&mut acceptor).await;

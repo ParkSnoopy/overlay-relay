@@ -35,11 +35,29 @@ async fn lookup(host: &str) -> io::Result<Vec<IpAddr>> {
     Ok(addresses.map(|address| address.ip()).collect())
 }
 
-/// Reports whether `remote` matches a current address of any host in `hosts`.
-/// Empty `hosts` admits nobody; failed or slow lookups are skipped. IPv4-mapped
-/// `IPv6` addresses compare equal to their `IPv4` form.
+/// Reports whether `address` is loopback, private or link-local.
+const fn is_local(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Reports whether `remote` may connect.
+///
+/// With `hosts` it must match a current address of one of them; failed or slow
+/// lookups are skipped. Without `hosts` any loopback, private or link-local
+/// source is admitted, which is every peer on the container network.
+/// IPv4-mapped `IPv6` addresses compare equal to their `IPv4` form.
 pub async fn admitted(resolver: &dyn Resolver, hosts: &[String], remote: IpAddr) -> bool {
     let remote = remote.to_canonical();
+    if hosts.is_empty() {
+        return is_local(remote);
+    }
     for host in hosts {
         let Ok(Ok(addresses)) = timeout(LOOKUP_TIMEOUT, resolver.resolve(host)).await else {
             continue;
@@ -52,4 +70,47 @@ pub async fn admitted(resolver: &dyn Resolver, hosts: &[String], remote: IpAddr)
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+
+    use super::{SystemResolver, admitted};
+
+    async fn admitted_without_hosts(text: &str) -> bool {
+        let address: IpAddr = text.parse().unwrap_or_else(|_| IpAddr::from([0, 0, 0, 0]));
+        admitted(&SystemResolver, &[], address).await
+    }
+
+    #[tokio::test]
+    async fn without_hosts_only_local_sources_are_admitted() {
+        for local in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.18.0.5",
+            "192.168.1.9",
+            "169.254.1.1",
+            "fd00::5",
+            "fe80::1",
+            "::1",
+            "::ffff:172.18.0.5",
+        ] {
+            assert!(
+                admitted_without_hosts(local).await,
+                "{local} must be admitted"
+            );
+        }
+        for public in [
+            "8.8.8.8",
+            "93.184.216.34",
+            "2001:4860:4860::8888",
+            "::ffff:8.8.8.8",
+        ] {
+            assert!(
+                !admitted_without_hosts(public).await,
+                "{public} must be refused"
+            );
+        }
+    }
 }

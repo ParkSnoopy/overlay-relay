@@ -159,7 +159,7 @@ func startSecureEnv(t *testing.T, alice, bob secureSide) *secureEnv {
 	hubBinary := buildHub(t)
 	aliceAccount := newAccount(t, "alice")
 	bobAccount := newAccount(t, "bob")
-	hub := startHub(t, hubBinary, overlay.Peers{Version: overlay.Version, Accounts: []overlay.Account{accountEntry(t, aliceAccount), accountEntry(t, bobAccount)}})
+	hub := startHub(t, hubBinary)
 	stun := startSTUN(t)
 
 	env := &secureEnv{aliceTap: &hubTap{}, bobTap: &hubTap{}, aliceSink: startSink(t, t.TempDir()), bobSink: startSink(t, t.TempDir())}

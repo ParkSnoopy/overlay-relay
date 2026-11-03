@@ -1,4 +1,4 @@
-//! Hub state: the accounts table, live control streams, pending open requests
+//! Hub state: known identities, live control streams, pending open requests
 //! and active flows. Callers hold the state lock only for these synchronous
 //! operations and never across an await point.
 
@@ -8,13 +8,17 @@ use std::{
 };
 
 use tokio::{net::TcpStream, sync::oneshot};
-use tokio_util::sync::CancellationToken;
 
 use crate::{
+    address::{LAST_ADDRESS, assignable, lowest_free},
+    assignments::Record,
     control::ControlHandle,
-    protocol::{MAX_FLOWS_PER_ACCOUNT, MAX_PENDING_PER_ACCOUNT, Offer, Peer},
+    protocol::{MAX_ACCOUNTS, MAX_FLOWS_PER_ACCOUNT, MAX_PENDING_PER_ACCOUNT, Offer, Peer},
     verifier::Verifier,
 };
+
+/// Seconds a stored last-seen time may lag before an authentication rewrites it.
+const SEEN_GRANULARITY: u64 = 3600;
 
 /// An authenticated account, as seen by one stream.
 #[derive(Debug, Clone)]
@@ -50,24 +54,19 @@ pub struct Pending {
 #[derive(Debug)]
 struct FlowEntry {
     accounts: [Verifier; 2],
-    cancel: CancellationToken,
 }
 
 #[derive(Debug, Clone)]
 struct Entry {
     name: String,
     ip: Ipv4Addr,
+    seen: u64,
 }
 
-/// What a peers-table replacement changed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TableChange {
-    /// Accounts in the table after the change.
-    pub accounts: usize,
-    /// Control streams closed because their account was removed.
-    pub closed_controls: usize,
-    /// Flows cancelled because one of their accounts was removed.
-    pub closed_flows: usize,
+/// The display name every identity gets: a prefix of its verifier.
+fn display_name(verifier: &Verifier) -> String {
+    let hex = verifier.to_hex();
+    format!("peer-{}", hex.get(..8).unwrap_or(&hex))
 }
 
 /// The hub's mutable state.
@@ -79,78 +78,129 @@ pub struct State {
     pending: HashMap<String, Pending>,
     flows: HashMap<u64, FlowEntry>,
     serial: u64,
+    dirty: bool,
 }
 
 impl State {
+    /// Builds the state from persisted identities. Addresses that repeat or
+    /// are not assignable are dropped, so the identity receives a new one.
+    #[must_use]
+    pub fn load(records: &HashMap<Verifier, Record>) -> Self {
+        let mut state = Self::default();
+        for (verifier, record) in records {
+            if !assignable(record.ip) || state.by_ip.contains_key(&record.ip) {
+                state.dirty = true;
+                continue;
+            }
+            state.by_ip.insert(record.ip, *verifier);
+            state.accounts.insert(
+                *verifier,
+                Entry {
+                    name: display_name(verifier),
+                    ip: record.ip,
+                    seen: record.seen,
+                },
+            );
+        }
+        state
+    }
+
     /// Returns a fresh identifier for controls and flows.
     pub const fn next_serial(&mut self) -> u64 {
         self.serial += 1;
         self.serial
     }
 
-    /// Replaces the accounts table. Accounts that disappear lose their control
-    /// stream, their flows and their pending requests.
-    pub fn replace_table(&mut self, entries: Vec<(Verifier, String, Ipv4Addr)>) -> TableChange {
-        let kept: HashSet<Verifier> = entries.iter().map(|(verifier, _, _)| *verifier).collect();
-        let removed: HashSet<Verifier> = self
-            .accounts
-            .keys()
-            .filter(|verifier| !kept.contains(verifier))
-            .copied()
-            .collect();
-        let mut closed_controls = 0;
-        for verifier in &removed {
-            if let Some(control) = self.controls.remove(verifier) {
-                control.close.cancel();
-                closed_controls += 1;
-            }
+    /// Returns the persisted form when it changed since the last call.
+    pub fn take_dirty(&mut self) -> Option<HashMap<Verifier, Record>> {
+        if !self.dirty {
+            return None;
         }
-        self.pending.retain(|_, pending| {
-            !removed.contains(&pending.requester) && !removed.contains(&pending.destination)
-        });
-        let mut closed_flows = 0;
-        for flow in self.flows.values() {
-            if flow
-                .accounts
+        self.dirty = false;
+        Some(
+            self.accounts
                 .iter()
-                .any(|verifier| removed.contains(verifier))
-            {
-                flow.cancel.cancel();
-                closed_flows += 1;
+                .map(|(verifier, entry)| {
+                    (
+                        *verifier,
+                        Record {
+                            ip: entry.ip,
+                            seen: entry.seen,
+                        },
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// Marks the persisted form stale again after a failed write.
+    pub const fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Resolves an identity whose key was proven. A new identity gets the
+    /// lowest free address; at capacity the least recently seen idle identity
+    /// gives up its address. Returns `None` when no identity can be evicted.
+    pub fn identify(&mut self, verifier: Verifier, now: u64) -> Option<Requester> {
+        if let Some(entry) = self.accounts.get_mut(&verifier) {
+            if now.saturating_sub(entry.seen) >= SEEN_GRANULARITY {
+                entry.seen = now;
+                self.dirty = true;
             }
-        }
-        self.accounts.clear();
-        self.by_ip.clear();
-        for (verifier, name, ip) in entries {
+        } else {
+            if self.accounts.len() >= MAX_ACCOUNTS {
+                self.evict_idle()?;
+            }
+            let used: HashSet<Ipv4Addr> = self.by_ip.keys().copied().collect();
+            let ip = lowest_free(&used, LAST_ADDRESS).ok()?;
             self.by_ip.insert(ip, verifier);
-            self.accounts.insert(verifier, Entry { name, ip });
+            self.accounts.insert(
+                verifier,
+                Entry {
+                    name: display_name(&verifier),
+                    ip,
+                    seen: now,
+                },
+            );
+            self.dirty = true;
         }
-        self.notify_all();
-        TableChange {
-            accounts: self.accounts.len(),
-            closed_controls,
-            closed_flows,
+        let entry = self.accounts.get(&verifier)?;
+        Some(Requester {
+            verifier,
+            name: entry.name.clone(),
+            ip: entry.ip,
+        })
+    }
+
+    /// Records that `verifier` was just active, for eviction order.
+    pub fn touch(&mut self, verifier: &Verifier, now: u64) {
+        if let Some(entry) = self.accounts.get_mut(verifier) {
+            entry.seen = now;
+            self.dirty = true;
         }
     }
 
-    /// Finds the account whose verifier matches `verifier`. Every stored
-    /// verifier is compared, so lookup time does not depend on the match.
-    #[must_use]
-    pub fn authenticate(&self, verifier: &Verifier) -> Option<Requester> {
-        let mut found = None;
-        for (stored, entry) in &self.accounts {
-            if stored.matches(verifier) {
-                found = Some(Requester {
-                    verifier: *stored,
-                    name: entry.name.clone(),
-                    ip: entry.ip,
-                });
-            }
+    /// Removes the idle identity seen longest ago. Identities with a control
+    /// stream or an active flow are never removed.
+    fn evict_idle(&mut self) -> Option<()> {
+        let oldest = self
+            .accounts
+            .iter()
+            .filter(|(verifier, _)| {
+                !self.controls.contains_key(verifier) && self.flow_count(verifier) == 0
+            })
+            .min_by_key(|(_, entry)| entry.seen)
+            .map(|(verifier, _)| *verifier)?;
+        if let Some(entry) = self.accounts.remove(&oldest) {
+            self.by_ip.remove(&entry.ip);
         }
-        found
+        self.pending
+            .retain(|_, pending| pending.requester != oldest && pending.destination != oldest);
+        self.dirty = true;
+        Some(())
     }
 
-    /// The overlay address of an account in the table.
+    /// The overlay address of a known identity.
     #[must_use]
     pub fn address_of(&self, verifier: &Verifier) -> Option<Ipv4Addr> {
         self.accounts.get(verifier).map(|entry| entry.ip)
@@ -251,8 +301,8 @@ impl State {
     }
 
     /// Registers an active flow between two accounts. Returns `None` when an
-    /// account is missing from the table or already holds its flow limit.
-    pub fn open_flow(&mut self, accounts: [Verifier; 2], cancel: CancellationToken) -> Option<u64> {
+    /// account is unknown or already holds its flow limit.
+    pub fn open_flow(&mut self, accounts: [Verifier; 2]) -> Option<u64> {
         let known = accounts
             .iter()
             .all(|verifier| self.accounts.contains_key(verifier));
@@ -263,7 +313,7 @@ impl State {
             return None;
         }
         let id = self.next_serial();
-        self.flows.insert(id, FlowEntry { accounts, cancel });
+        self.flows.insert(id, FlowEntry { accounts });
         Some(id)
     }
 
@@ -291,85 +341,144 @@ impl State {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
-
-    use tokio_util::sync::CancellationToken;
+    use std::{collections::HashMap, net::Ipv4Addr};
 
     use super::State;
-    use crate::{protocol::MAX_FLOWS_PER_ACCOUNT, verifier::Verifier};
+    use crate::{
+        assignments::Record,
+        protocol::{MAX_ACCOUNTS, MAX_FLOWS_PER_ACCOUNT},
+        verifier::Verifier,
+    };
 
-    fn account(byte: u8) -> Verifier {
-        Verifier::from_digest([byte; 32])
+    fn account(index: u32) -> Verifier {
+        let mut digest = [0_u8; 32];
+        digest[..4].copy_from_slice(&index.to_be_bytes());
+        Verifier::from_digest(digest)
+    }
+
+    fn address(state: &State, verifier: &Verifier) -> Option<Ipv4Addr> {
+        state.address_of(verifier)
     }
 
     #[test]
     fn flow_limit_applies_per_account() {
         let (a, b) = (account(1), account(2));
         let mut state = State::default();
-        let change = state.replace_table(vec![
-            (
-                a,
-                "a".to_owned(),
-                "10.77.0.1"
-                    .parse::<Ipv4Addr>()
-                    .unwrap_or(Ipv4Addr::UNSPECIFIED),
-            ),
-            (
-                b,
-                "b".to_owned(),
-                "10.77.0.2"
-                    .parse::<Ipv4Addr>()
-                    .unwrap_or(Ipv4Addr::UNSPECIFIED),
-            ),
-        ]);
-        assert_eq!(change.accounts, 2);
+        assert!(state.identify(a, 0).is_some());
+        assert!(state.identify(b, 0).is_some());
         for index in 0..MAX_FLOWS_PER_ACCOUNT {
             assert!(
-                state.open_flow([a, b], CancellationToken::new()).is_some(),
+                state.open_flow([a, b]).is_some(),
                 "flow {index} must be admitted"
             );
         }
         assert!(
-            state.open_flow([a, b], CancellationToken::new()).is_none(),
+            state.open_flow([a, b]).is_none(),
             "flow above the per-account limit must be refused"
         );
     }
 
     #[test]
-    fn removed_account_cancels_its_flows_and_pending_requests() {
-        let (a, b) = (account(1), account(2));
+    fn identities_get_lowest_free_addresses_and_keep_them() {
         let mut state = State::default();
-        state.replace_table(vec![
-            (
-                a,
-                "a".to_owned(),
-                "10.77.0.1"
-                    .parse::<Ipv4Addr>()
-                    .unwrap_or(Ipv4Addr::UNSPECIFIED),
-            ),
-            (
-                b,
-                "b".to_owned(),
-                "10.77.0.2"
-                    .parse::<Ipv4Addr>()
-                    .unwrap_or(Ipv4Addr::UNSPECIFIED),
-            ),
-        ]);
-        let token = CancellationToken::new();
-        assert!(state.open_flow([a, b], token.clone()).is_some());
-        let change = state.replace_table(vec![(
-            b,
-            "b".to_owned(),
-            "10.77.0.2"
-                .parse::<Ipv4Addr>()
-                .unwrap_or(Ipv4Addr::UNSPECIFIED),
-        )]);
-        assert_eq!(change.closed_flows, 1);
+        let first = state.identify(account(1), 0).map(|found| found.ip);
+        let second = state.identify(account(2), 0).map(|found| found.ip);
+        assert_eq!(first, Some(Ipv4Addr::new(10, 77, 0, 1)));
+        assert_eq!(second, Some(Ipv4Addr::new(10, 77, 0, 2)));
+        let again = state.identify(account(1), 10).map(|found| found.ip);
+        assert_eq!(again, first, "the same identity keeps its address");
+    }
+
+    #[test]
+    fn names_derive_from_the_identity() {
+        let mut state = State::default();
+        let name = state.identify(account(1), 0).map(|found| found.name);
+        assert_eq!(name.as_deref(), Some("peer-00000001"));
+    }
+
+    #[test]
+    fn full_table_evicts_the_oldest_idle_identity() {
+        let mut state = State::default();
+        for index in 0..MAX_ACCOUNTS {
+            let seen = u64::try_from(index).unwrap_or(0) + 100;
+            assert!(
+                state
+                    .identify(account(u32::try_from(index).unwrap_or(0)), seen)
+                    .is_some()
+            );
+        }
+        let evicted = address(&state, &account(0));
+        assert!(evicted.is_some());
+        let newcomer = account(u32::MAX);
+        let granted = state.identify(newcomer, 1_000_000).map(|found| found.ip);
+        assert_eq!(granted, evicted, "the newcomer takes the oldest address");
+        assert!(address(&state, &account(0)).is_none());
+        assert!(address(&state, &account(1)).is_some());
+    }
+
+    #[test]
+    fn touched_identity_outlives_older_ones() {
+        let mut state = State::default();
+        for index in 0..MAX_ACCOUNTS {
+            let seen = u64::try_from(index).unwrap_or(0) + 100;
+            assert!(
+                state
+                    .identify(account(u32::try_from(index).unwrap_or(0)), seen)
+                    .is_some()
+            );
+        }
+        state.touch(&account(0), 9_999_999);
+        assert!(state.identify(account(u32::MAX), 10_000_000).is_some());
         assert!(
-            token.is_cancelled(),
-            "the flow of a removed account must be cancelled"
+            address(&state, &account(0)).is_some(),
+            "touched identity stays"
         );
+        assert!(
+            address(&state, &account(1)).is_none(),
+            "next oldest is evicted"
+        );
+    }
+
+    #[test]
+    fn dirty_state_exports_once() {
+        let mut state = State::default();
+        assert!(state.take_dirty().is_none());
+        assert!(state.identify(account(1), 0).is_some());
+        let exported = state.take_dirty();
+        assert_eq!(exported.map(|records| records.len()), Some(1));
+        assert!(state.take_dirty().is_none(), "export clears the flag");
+        assert!(state.identify(account(1), 10).is_some());
+        assert!(
+            state.take_dirty().is_none(),
+            "a fresh sighting does not rewrite the file"
+        );
+    }
+
+    #[test]
+    fn load_keeps_addresses_and_renumbers_duplicates() {
+        let (a, b) = (account(1), account(2));
+        let shared = Ipv4Addr::new(10, 77, 0, 5);
+        let mut records = HashMap::new();
+        records.insert(
+            a,
+            Record {
+                ip: shared,
+                seen: 1,
+            },
+        );
+        let mut state = State::load(&records);
+        assert_eq!(address(&state, &a), Some(shared));
+        records.insert(
+            b,
+            Record {
+                ip: shared,
+                seen: 1,
+            },
+        );
+        state = State::load(&records);
+        assert_eq!(state.take_dirty().map(|saved| saved.len()), Some(1));
     }
 }

@@ -16,8 +16,6 @@ pub enum Error {
     Json(serde_json::Error),
     /// A frame or datagram record violated the wire bounds.
     Protocol(&'static str),
-    /// The peers table is malformed, duplicated or oversized.
-    Peers(&'static str),
     /// The persisted address assignments cannot be parsed.
     CorruptAssignments,
     /// The overlay address space has no free address for a new account.
@@ -33,9 +31,7 @@ impl fmt::Display for Error {
         match self {
             Self::Io(error) => write!(formatter, "overlay i/o failed: {error}"),
             Self::Json(error) => write!(formatter, "overlay json is invalid: {error}"),
-            Self::Protocol(message) | Self::Peers(message) | Self::Config(message) => {
-                formatter.write_str(message)
-            }
+            Self::Protocol(message) | Self::Config(message) => formatter.write_str(message),
             Self::CorruptAssignments => {
                 formatter.write_str("overlay address assignments are corrupt")
             }

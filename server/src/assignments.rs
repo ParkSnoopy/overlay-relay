@@ -1,7 +1,8 @@
-//! Persistence of overlay address assignments in `ips.json`.
+//! Persistence of known identities in `ips.json`.
 //!
-//! The file maps verifier hex to an `IPv4` address. Writes go through a temporary
-//! file created with mode 0600, fsynced, then renamed over the old file.
+//! The file maps verifier hex to the identity's address and the Unix time it
+//! was last seen. Writes go through a temporary file created with mode 0600,
+//! fsynced, then renamed over the old file.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -10,6 +11,7 @@ use std::{
     path::Path,
 };
 
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
 use crate::{
@@ -17,42 +19,72 @@ use crate::{
     verifier::Verifier,
 };
 
-/// File name of the persisted assignments inside the data directory.
+/// File name of the persisted identities inside the data directory.
 pub const FILE_NAME: &str = "ips.json";
 
-/// Loads the persisted assignments. A missing file yields an empty map; an
+/// One persisted identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Record {
+    /// The identity's overlay address.
+    pub ip: Ipv4Addr,
+    /// Unix time in seconds when the identity last authenticated or disconnected.
+    pub seen: u64,
+}
+
+/// File form of a [`Record`]. A bare address is the older form and counts as
+/// seen at load time.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Stored {
+    Record { ip: IpAddr, seen: u64 },
+    Address(IpAddr),
+}
+
+/// Loads the persisted identities. A missing file yields an empty map; an
 /// unreadable or corrupt file is an error, never silent renumbering.
 ///
 /// # Errors
-/// Returns `Error::CorruptAssignments` when the JSON is not a verifier-to-address
+/// Returns `Error::CorruptAssignments` when the JSON is not a verifier-to-record
 /// object, and `Error::Io` when the file cannot be read.
-pub async fn load(path: &Path) -> Result<HashMap<Verifier, Ipv4Addr>> {
+pub async fn load(path: &Path, now: u64) -> Result<HashMap<Verifier, Record>> {
     let raw = match tokio::fs::read(path).await {
         Ok(raw) => raw,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(HashMap::new()),
         Err(error) => return Err(error.into()),
     };
-    let stored: Option<HashMap<String, IpAddr>> =
+    let stored: Option<HashMap<String, Stored>> =
         serde_json::from_slice(&raw).map_err(|_| Error::CorruptAssignments)?;
-    let mut assignments = HashMap::new();
+    let mut records = HashMap::new();
     for (key, value) in stored.unwrap_or_default() {
-        let (Some(verifier), IpAddr::V4(address)) = (Verifier::from_hex(&key), value) else {
+        let (ip, seen) = match value {
+            Stored::Record { ip, seen } => (ip, seen),
+            Stored::Address(ip) => (ip, now),
+        };
+        let (Some(verifier), IpAddr::V4(ip)) = (Verifier::from_hex(&key), ip) else {
             continue;
         };
-        assignments.insert(verifier, address);
+        records.insert(verifier, Record { ip, seen });
     }
-    Ok(assignments)
+    Ok(records)
 }
 
-/// Atomically replaces the persisted assignments.
+/// Atomically replaces the persisted identities.
 ///
 /// # Errors
 /// Returns an error when the temporary file cannot be created, written,
 /// synced or renamed. The temporary file is removed on failure.
-pub async fn save(path: &Path, assignments: &HashMap<Verifier, Ipv4Addr>) -> Result<()> {
-    let document: BTreeMap<String, Ipv4Addr> = assignments
+pub async fn save(path: &Path, records: &HashMap<Verifier, Record>) -> Result<()> {
+    let document: BTreeMap<String, Stored> = records
         .iter()
-        .map(|(verifier, address)| (verifier.to_hex(), *address))
+        .map(|(verifier, record)| {
+            (
+                verifier.to_hex(),
+                Stored::Record {
+                    ip: IpAddr::V4(record.ip),
+                    seen: record.seen,
+                },
+            )
+        })
         .collect();
     let raw = serde_json::to_vec(&document)?;
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
@@ -83,25 +115,28 @@ async fn write_then_rename(temporary: &Path, path: &Path, raw: &[u8]) -> Result<
 mod tests {
     use std::{collections::HashMap, net::Ipv4Addr, os::unix::fs::PermissionsExt};
 
-    use super::{FILE_NAME, load, save};
+    use super::{FILE_NAME, Record, load, save};
     use crate::{
         error::{Error, Result},
         verifier::Verifier,
     };
 
     #[tokio::test]
-    async fn saved_assignments_load_back_with_private_mode() -> Result<()> {
+    async fn saved_records_load_back_with_private_mode() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join(FILE_NAME);
         let verifier = Verifier::from_digest([9; 32]);
-        let address = Ipv4Addr::new(10, 77, 0, 7);
-        let mut assignments = HashMap::new();
-        assignments.insert(verifier, address);
-        save(&path, &assignments).await?;
+        let record = Record {
+            ip: Ipv4Addr::new(10, 77, 0, 7),
+            seen: 1_700_000_000,
+        };
+        let mut records = HashMap::new();
+        records.insert(verifier, record);
+        save(&path, &records).await?;
         ensure_eq!(
-            load(&path).await?,
-            assignments,
-            "saved assignments must load back"
+            load(&path, 0).await?,
+            records,
+            "saved records must load back"
         );
         let mode = std::fs::metadata(&path)?.permissions().mode() & 0o777;
         ensure_eq!(mode, 0o600, "ips.json must not be world-readable");
@@ -109,10 +144,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bare_address_loads_as_seen_now() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join(FILE_NAME);
+        let verifier = Verifier::from_digest([3; 32]);
+        tokio::fs::write(&path, format!(r#"{{"{}":"10.77.0.4"}}"#, verifier.to_hex())).await?;
+        let records = load(&path, 42).await?;
+        let expected = Record {
+            ip: Ipv4Addr::new(10, 77, 0, 4),
+            seen: 42,
+        };
+        ensure_eq!(
+            records.get(&verifier),
+            Some(&expected),
+            "an address-only entry must load as seen now"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn missing_file_loads_empty() -> Result<()> {
         let dir = tempfile::tempdir()?;
         ensure!(
-            load(&dir.path().join(FILE_NAME)).await?.is_empty(),
+            load(&dir.path().join(FILE_NAME), 0).await?.is_empty(),
             "missing file must load empty"
         );
         Ok(())
@@ -124,7 +178,7 @@ mod tests {
         let path = dir.path().join(FILE_NAME);
         tokio::fs::write(&path, b"garbage").await?;
         ensure!(
-            matches!(load(&path).await, Err(Error::CorruptAssignments)),
+            matches!(load(&path, 0).await, Err(Error::CorruptAssignments)),
             "garbage must be a corrupt-assignments error"
         );
         Ok(())
@@ -136,7 +190,7 @@ mod tests {
         let path = dir.path().join(FILE_NAME);
         tokio::fs::write(&path, b"null").await?;
         ensure!(
-            load(&path).await?.is_empty(),
+            load(&path, 0).await?.is_empty(),
             "null document must load empty"
         );
         Ok(())

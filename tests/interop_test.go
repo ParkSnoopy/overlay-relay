@@ -3,7 +3,6 @@ package tests
 import (
 	"context"
 	"crypto/ecdsa"
-	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -51,23 +50,13 @@ func freeAddress(t *testing.T) string {
 	return listener.Addr().String()
 }
 
-// startHub writes the peers table, starts the hub and waits until it accepts a source.
-func startHub(t *testing.T, binary string, peers overlay.Peers) hubProcess {
+// startHub starts the hub with no configuration and waits until it accepts a source.
+func startHub(t *testing.T, binary string) hubProcess {
 	t.Helper()
 	dir := t.TempDir()
-	peersPath := filepath.Join(dir, "peers.json")
-	raw, err := json.Marshal(peers)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(peersPath, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	address := freeAddress(t)
 	cmd := exec.Command(binary)
 	cmd.Env = append(os.Environ(),
-		"OVERLAY_ALLOWED_HOST=localhost",
-		"OVERLAY_PEERS_PATH="+peersPath,
 		"OVERLAY_DATA_DIR="+dir,
 		"OVERLAY_LISTEN_ADDRESS="+address,
 	)
@@ -144,20 +133,11 @@ func waitFor(t *testing.T, states <-chan overlay.State, done func(overlay.State)
 	}
 }
 
-func accountEntry(t *testing.T, account account) overlay.Account {
-	t.Helper()
-	public, err := overlay.PublicIdentity(account.key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return overlay.Account{PublicKey: public, Name: account.name}
-}
-
 func TestGoAgentAndRustHubRelayTCP(t *testing.T) {
 	binary := buildHub(t)
 	alice := newAccount(t, "alice")
 	bob := newAccount(t, "bob")
-	hub := startHub(t, binary, overlay.Peers{Version: overlay.Version, Accounts: []overlay.Account{accountEntry(t, alice), accountEntry(t, bob)}})
+	hub := startHub(t, binary)
 
 	// Bob's local service receives relayed flows at the overlay port.
 	service, err := net.Listen("tcp", "127.0.0.1:0")
@@ -231,5 +211,12 @@ func TestGoAgentAndRustHubRelayTCP(t *testing.T) {
 		if err := <-runErrs; err != nil && !errors.Is(err, context.Canceled) {
 			t.Fatalf("agent run: %v", err)
 		}
+	}
+}
+
+func TestProbeNeedsNoEnrollment(t *testing.T) {
+	hub := startHub(t, buildHub(t))
+	if err := overlayagent.Probe(context.Background(), hub.address); err != nil {
+		t.Fatal(err)
 	}
 }

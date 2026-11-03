@@ -1,4 +1,4 @@
-//! Hub inputs: files, admission hosts, the resolver and timing limits.
+//! Hub inputs: the data directory, admission hosts, the resolver and timing limits.
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -9,16 +9,13 @@ use crate::dns::{Resolver, SystemResolver};
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Config {
-    /// Path of the read-only peers table.
-    pub peers_path: PathBuf,
     /// Directory that holds `ips.json`.
     pub data_dir: PathBuf,
-    /// Host names whose current addresses may connect. Empty admits nobody.
+    /// Host names whose current addresses may connect. Empty admits only
+    /// loopback, private and link-local sources.
     pub allowed_hosts: Vec<String>,
     /// Resolver used for admission lookups.
     pub resolver: Arc<dyn Resolver>,
-    /// How often the peers table file is checked for changes. Must be nonzero.
-    pub poll_interval: Duration,
     /// Deadline for the first Hello frame on a new connection.
     pub handshake_timeout: Duration,
     /// How long an open request waits for the destination to accept.
@@ -30,15 +27,13 @@ pub struct Config {
 }
 
 impl Config {
-    /// Production defaults for the given files and admission hosts.
+    /// Production defaults for the given data directory and admission hosts.
     #[must_use]
-    pub fn new(peers_path: PathBuf, data_dir: PathBuf, allowed_hosts: Vec<String>) -> Self {
+    pub fn new(data_dir: PathBuf, allowed_hosts: Vec<String>) -> Self {
         Self {
-            peers_path,
             data_dir,
             allowed_hosts,
             resolver: Arc::new(SystemResolver),
-            poll_interval: Duration::from_secs(2),
             handshake_timeout: Duration::from_secs(10),
             accept_timeout: Duration::from_secs(10),
             control_idle: Duration::from_secs(90),

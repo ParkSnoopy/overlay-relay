@@ -20,7 +20,7 @@ use tracing::debug;
 
 use crate::{
     frame::{read_frame, send_frame},
-    hub::Shared,
+    hub::{Shared, persist, unix_now},
     protocol::{Event, Ping, Reply},
     state::Requester,
     verifier::Verifier,
@@ -94,11 +94,12 @@ pub async fn serve(
         ),
         read_pings(reader, outbound, idle, close.clone()),
     );
-    shared
-        .state
-        .lock()
-        .await
-        .unregister_control(requester.verifier, generation);
+    {
+        let mut state = shared.state.lock().await;
+        state.unregister_control(requester.verifier, generation);
+        state.touch(&requester.verifier, unix_now());
+    }
+    persist(shared).await;
 }
 
 async fn write_events(

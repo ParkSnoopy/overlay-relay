@@ -12,7 +12,9 @@ import (
 
 const errUnauthorized = "unauthorized"
 
-// Probe checks admission using a fresh, unregistered identity.
+// Probe checks that the hub admits this source and answers frames. It sends a
+// malformed public key, which the hub refuses before any challenge, so the
+// probe never registers an identity or takes an overlay address.
 func Probe(ctx context.Context, address string) error {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
@@ -24,13 +26,12 @@ func Probe(ctx context.Context, address string) error {
 	defer func() { _ = conn.Close() }()
 	deadline, _ := ctx.Deadline()
 	_ = conn.SetDeadline(deadline)
-	key, err := overlay.GenerateIdentity()
-	if err != nil {
+	hello := overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl, PublicKey: "00"}
+	if err := overlay.WriteFrame(conn, hello); err != nil {
 		return err
 	}
-	agent := New(Config{Identity: key, DisableEncryption: true})
-	answer, err := agent.handshake(ctx, conn, &overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl})
-	if err != nil {
+	var answer overlay.Reply
+	if err := overlay.ReadFrame(conn, &answer); err != nil {
 		return err
 	}
 	if answer.OK || answer.Error != errUnauthorized {

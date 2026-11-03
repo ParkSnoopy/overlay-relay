@@ -5,7 +5,6 @@ use std::{
     future::Future,
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
     time::{Duration, Instant},
@@ -108,12 +107,11 @@ impl Resolver for TestResolver {
     }
 }
 
-/// A running hub on a loopback port, with its peers table and admission setup.
+/// A running hub on a loopback port, with its data directory and admission setup.
 struct Fixture {
     hub: Hub,
     address: SocketAddr,
-    peers: PathBuf,
-    _dir: TempDir,
+    dir: TempDir,
     addresses: Arc<Mutex<Vec<IpAddr>>>,
     shutdown: CancellationToken,
     held: Vec<TcpStream>,
@@ -134,21 +132,14 @@ impl Fixture {
     }
 }
 
-async fn fixture(names: &[&str], tune: impl FnOnce(&mut Config)) -> TestResult<Fixture> {
+async fn fixture(tune: impl FnOnce(&mut Config)) -> TestResult<Fixture> {
     let dir = tempfile::tempdir()?;
-    let peers = dir.path().join("peers.json");
-    write_peers(&peers, names).await?;
     let addresses = Arc::new(Mutex::new(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]));
     let resolver: Arc<dyn Resolver> = Arc::new(TestResolver {
         addresses: Arc::clone(&addresses),
     });
-    let mut config = Config::new(
-        peers.clone(),
-        dir.path().to_path_buf(),
-        vec![ALLOWED.to_owned()],
-    );
+    let mut config = Config::new(dir.path().to_path_buf(), vec![ALLOWED.to_owned()]);
     config.resolver = resolver;
-    config.poll_interval = Duration::from_millis(20);
     config.accept_timeout = Duration::from_secs(2);
     tune(&mut config);
     let hub = Hub::new(config).await?;
@@ -161,8 +152,7 @@ async fn fixture(names: &[&str], tune: impl FnOnce(&mut Config)) -> TestResult<F
     Ok(Fixture {
         hub,
         address,
-        peers,
-        _dir: dir,
+        dir,
         addresses,
         shutdown,
         held: Vec::new(),
@@ -185,16 +175,9 @@ fn verifier_of(name: &str) -> Verifier {
     Verifier::from_public_key(&public_of(name)).unwrap_or(Verifier::from_digest([0; 32]))
 }
 
-async fn write_peers(path: &Path, names: &[&str]) -> TestResult {
-    let accounts: Vec<serde_json::Value> = names
-        .iter()
-        .map(|name| serde_json::json!({"public_key": public_of(name), "name": name}))
-        .collect();
-    let raw = serde_json::to_vec(&serde_json::json!({"version": VERSION, "accounts": accounts}))?;
-    let temporary = path.with_extension("tmp");
-    tokio::fs::write(&temporary, raw).await?;
-    tokio::fs::rename(&temporary, path).await?;
-    Ok(())
+/// The display name the hub gives the identity of test key `name`.
+fn name_of(name: &str) -> String {
+    format!("peer-{}", &verifier_of(name).to_hex()[..8])
 }
 
 fn control_hello(name: &str) -> Hello {
@@ -285,7 +268,7 @@ async fn await_peers(
     stream: &mut TcpStream,
     want: &[&str],
 ) -> TestResult<Vec<overlay_relay::Peer>> {
-    let mut expected: Vec<String> = want.iter().map(|name| (*name).to_owned()).collect();
+    let mut expected: Vec<String> = want.iter().map(|name| name_of(name)).collect();
     expected.sort();
     loop {
         if let Event::Peers(peers) = next_event(stream).await? {
@@ -354,8 +337,8 @@ async fn establish(f: &mut Fixture, proto: &str, port: u16) -> TestResult<Flow> 
 
 #[tokio::test]
 async fn bad_identities_get_unauthorized_and_are_closed() -> TestResult {
-    let f = fixture(&["alice"], |_| {}).await?;
-    for public_key in [public_of("mallory"), "not-hex".to_owned(), String::new()] {
+    let f = fixture(|_| {}).await?;
+    for public_key in ["not-hex".to_owned(), String::new(), "04".repeat(97)] {
         let hello = Hello {
             version: VERSION,
             kind: KIND_CONTROL.to_owned(),
@@ -372,8 +355,21 @@ async fn bad_identities_get_unauthorized_and_are_closed() -> TestResult {
 }
 
 #[tokio::test]
+async fn any_key_that_proves_possession_is_admitted_without_enrollment() -> TestResult {
+    let f = fixture(|_| {}).await?;
+    let (_first, reply) = register(f.address, "mallory").await?;
+    ensure_eq!(reply.ip, "10.77.0.1");
+    ensure_eq!(reply.name, name_of("mallory"));
+    let (_second, again) = register(f.address, "mallory").await?;
+    ensure_eq!(again.ip, "10.77.0.1", "the same key is the same peer");
+    let (_other, other) = register(f.address, "alice").await?;
+    ensure_eq!(other.ip, "10.77.0.2", "another key is another peer");
+    Ok(())
+}
+
+#[tokio::test]
 async fn invalid_public_key_gets_unauthorized_reply() -> TestResult {
-    let f = fixture(&["alice"], |_| {}).await?;
+    let f = fixture(|_| {}).await?;
     let hello = Hello {
         version: VERSION,
         kind: KIND_CONTROL.to_owned(),
@@ -387,7 +383,7 @@ async fn invalid_public_key_gets_unauthorized_reply() -> TestResult {
 
 #[tokio::test]
 async fn rejects_wrong_key_and_replayed_proof() -> TestResult {
-    let f = fixture(&["alice", "bob"], |_| {}).await?;
+    let f = fixture(|_| {}).await?;
     let mut saved = String::new();
     for signer in ["bob", "alice", "replay"] {
         let mut stream = TcpStream::connect(f.address).await?;
@@ -420,7 +416,7 @@ async fn rejects_wrong_key_and_replayed_proof() -> TestResult {
 
 #[tokio::test]
 async fn unknown_kind_gets_invalid_request_after_authentication() -> TestResult {
-    let f = fixture(&["alice"], |_| {}).await?;
+    let f = fixture(|_| {}).await?;
     let hello = Hello {
         version: VERSION,
         kind: "bogus".to_owned(),
@@ -434,7 +430,7 @@ async fn unknown_kind_gets_invalid_request_after_authentication() -> TestResult 
 
 #[tokio::test]
 async fn oversized_and_wrong_version_frames_are_dropped() -> TestResult {
-    let f = fixture(&["alice"], |_| {}).await?;
+    let f = fixture(|_| {}).await?;
     let mut raw = TcpStream::connect(f.address).await?;
     raw.write_all(&[0xff, 0xff]).await?;
     expect_closed(&mut raw).await?;
@@ -449,7 +445,7 @@ async fn oversized_and_wrong_version_frames_are_dropped() -> TestResult {
 
 #[tokio::test]
 async fn silent_connection_hits_the_handshake_deadline() -> TestResult {
-    let f = fixture(&["alice"], |c| {
+    let f = fixture(|c| {
         c.handshake_timeout = Duration::from_millis(100);
     })
     .await?;
@@ -459,14 +455,13 @@ async fn silent_connection_hits_the_handshake_deadline() -> TestResult {
 
 #[tokio::test]
 async fn unadmitted_source_is_closed_before_any_frame() -> TestResult {
-    let cases: [fn(&mut Config); 3] = [
-        |c| c.allowed_hosts.clear(),
+    let cases: [fn(&mut Config); 2] = [
         |c| c.allowed_hosts = vec!["missing".to_owned()],
         |c| c.allowed_hosts = vec![ALLOWED.to_owned(), "missing".to_owned()],
     ];
     for (index, tune) in cases.into_iter().enumerate() {
-        let f = fixture(&["alice"], tune).await?;
-        if index == 2 {
+        let f = fixture(tune).await?;
+        if index == 1 {
             *f.addresses.lock().await = vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9))];
         }
         let mut stream = TcpStream::connect(f.address).await?;
@@ -478,8 +473,16 @@ async fn unadmitted_source_is_closed_before_any_frame() -> TestResult {
 }
 
 #[tokio::test]
+async fn no_allowed_host_admits_private_sources() -> TestResult {
+    let f = fixture(|c| c.allowed_hosts.clear()).await?;
+    let (_stream, reply) = register(f.address, "alice").await?;
+    ensure!(reply.ok, "a loopback source needs no configured host");
+    Ok(())
+}
+
+#[tokio::test]
 async fn unlisted_source_address_is_refused() -> TestResult {
-    let f = fixture(&["alice"], |_| {}).await?;
+    let f = fixture(|_| {}).await?;
     *f.addresses.lock().await = vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9))];
     let mut stream = TcpStream::connect(f.address).await?;
     write_frame(&mut stream, &control_hello("alice")).await.ok();
@@ -488,7 +491,7 @@ async fn unlisted_source_address_is_refused() -> TestResult {
 
 #[tokio::test]
 async fn admission_follows_current_resolution() -> TestResult {
-    let f = fixture(&["alice"], |_| {}).await?;
+    let f = fixture(|_| {}).await?;
     *f.addresses.lock().await = vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9))];
     let mut refused_stream = TcpStream::connect(f.address).await?;
     expect_closed(&mut refused_stream).await?;
@@ -505,10 +508,10 @@ async fn admission_follows_current_resolution() -> TestResult {
 
 #[tokio::test]
 async fn control_registration_replies_then_sends_peers() -> TestResult {
-    let f = fixture(&["alice", "bob", "carol"], |_| {}).await?;
+    let f = fixture(|_| {}).await?;
     let (mut alice, reply) = register(f.address, "alice").await?;
     ensure_eq!(reply.ip, "10.77.0.1");
-    ensure_eq!(reply.name, "alice");
+    ensure_eq!(reply.name, name_of("alice"));
     await_peers(&mut alice, &[]).await?;
     let (mut bob, bob_reply) = register(f.address, "bob").await?;
     ensure_eq!(bob_reply.ip, "10.77.0.2");
@@ -523,7 +526,7 @@ async fn control_registration_replies_then_sends_peers() -> TestResult {
 
 #[tokio::test]
 async fn broadcast_lists_only_other_broadcasting_accounts() -> TestResult {
-    let f = fixture(&["alice", "bob", "carol", "hidden"], |_| {}).await?;
+    let f = fixture(|_| {}).await?;
     let (mut alice, _) = register(f.address, "alice").await?;
     let (_bob, _) = register(f.address, "bob").await?;
     let (mut carol, _) = register(f.address, "carol").await?;
@@ -541,9 +544,13 @@ async fn broadcast_lists_only_other_broadcasting_accounts() -> TestResult {
 
 #[tokio::test]
 async fn refused_opens_are_indistinguishable() -> TestResult {
-    let mut f = fixture(&["alice", "bob", "hidden"], |_| {}).await?;
+    let mut f = fixture(|_| {}).await?;
     let (bob_control, _) = register(f.address, "bob").await?;
     let (mut alice_control, _) = register(f.address, "alice").await?;
+    let (hidden_control, _) = register(f.address, "hidden").await?;
+    await_peers(&mut alice_control, &["bob", "hidden"]).await?;
+    // A hidden account keeps its address but has no control stream.
+    drop(hidden_control);
     await_peers(&mut alice_control, &["bob"]).await?;
     let hidden = f.ip("hidden").await?.to_string();
     let bob = f.ip("bob").await?.to_string();
@@ -580,11 +587,11 @@ async fn refused_opens_are_indistinguishable() -> TestResult {
 
 #[tokio::test]
 async fn tcp_flow_splices_both_ways_with_half_close() -> TestResult {
-    let mut f = fixture(&["alice", "bob"], |_| {}).await?;
+    let mut f = fixture(|_| {}).await?;
     let mut flow = establish(&mut f, PROTO_TCP, 2222).await?;
     ensure_eq!(flow.incoming.proto, PROTO_TCP);
     ensure_eq!(flow.incoming.port, 2222);
-    ensure_eq!(flow.incoming.src, "10.77.0.1");
+    ensure_eq!(flow.incoming.src, f.ip("alice").await?.to_string());
     ensure_eq!(flow.incoming.id.len(), 32);
 
     flow.alice.write_all(b"to-bob").await?;
@@ -646,7 +653,7 @@ async fn establish_offered(
 
 #[tokio::test]
 async fn matching_fingerprints_secure_the_relayed_flow() -> TestResult {
-    let mut f = fixture(&["alice", "bob"], |_| {}).await?;
+    let mut f = fixture(|_| {}).await?;
     let (alice_print, bob_print) = (print('a'), print('B'));
     let (mut flow, alice_reply, bob_reply) =
         establish_offered(&mut f, (&alice_print, ""), (&bob_print, "")).await?;
@@ -682,7 +689,7 @@ async fn matching_fingerprints_secure_the_relayed_flow() -> TestResult {
 
 #[tokio::test]
 async fn matching_endpoints_hand_the_flow_to_a_direct_connection() -> TestResult {
-    let mut f = fixture(&["alice", "bob"], |_| {}).await?;
+    let mut f = fixture(|_| {}).await?;
     let (alice_print, bob_print) = (print('a'), print('b'));
     let (mut flow, alice_reply, bob_reply) = establish_offered(
         &mut f,
@@ -722,7 +729,7 @@ async fn matching_endpoints_hand_the_flow_to_a_direct_connection() -> TestResult
 
 #[tokio::test]
 async fn one_sided_offers_fall_back_to_the_plain_relay() -> TestResult {
-    let mut f = fixture(&["alice", "bob"], |_| {}).await?;
+    let mut f = fixture(|_| {}).await?;
     let alice_print = print('a');
     let (mut flow, alice_reply, bob_reply) =
         establish_offered(&mut f, (&alice_print, "203.0.113.7:4001"), ("", "")).await?;
@@ -738,7 +745,7 @@ async fn one_sided_offers_fall_back_to_the_plain_relay() -> TestResult {
 
 #[tokio::test]
 async fn malformed_offers_are_refused() -> TestResult {
-    let mut f = fixture(&["alice", "bob"], |_| {}).await?;
+    let mut f = fixture(|_| {}).await?;
     let (mut bob_control, _) = register(f.address, "bob").await?;
     let (alice_control, _) = register(f.address, "alice").await?;
     let bob_ip = f.ip("bob").await?.to_string();
@@ -784,7 +791,7 @@ async fn malformed_offers_are_refused() -> TestResult {
 
 #[tokio::test]
 async fn udp_flow_preserves_datagram_framing() -> TestResult {
-    let mut f = fixture(&["alice", "bob"], |_| {}).await?;
+    let mut f = fixture(|_| {}).await?;
     let mut flow = establish(&mut f, PROTO_UDP, 5353).await?;
     ensure_eq!(flow.incoming.proto, PROTO_UDP);
     let datagrams: Vec<Vec<u8>> = vec![
@@ -813,7 +820,7 @@ async fn udp_flow_preserves_datagram_framing() -> TestResult {
 
 #[tokio::test]
 async fn udp_flow_ends_when_idle() -> TestResult {
-    let mut f = fixture(&["alice", "bob"], |c| {
+    let mut f = fixture(|c| {
         c.udp_idle = Duration::from_millis(150);
     })
     .await?;
@@ -824,7 +831,7 @@ async fn udp_flow_ends_when_idle() -> TestResult {
 
 #[tokio::test]
 async fn missing_accept_reports_unavailable_and_late_accept_fails() -> TestResult {
-    let f = fixture(&["alice", "bob"], |c| {
+    let f = fixture(|c| {
         c.accept_timeout = Duration::from_millis(150);
     })
     .await?;
@@ -851,7 +858,7 @@ async fn missing_accept_reports_unavailable_and_late_accept_fails() -> TestResul
 
 #[tokio::test]
 async fn accept_is_bound_to_destination_and_single_use() -> TestResult {
-    let f = fixture(&["alice", "bob", "carol", "hidden"], |_| {}).await?;
+    let f = fixture(|_| {}).await?;
     let (mut bob_control, _) = register(f.address, "bob").await?;
     let (_alice_control, _) = register(f.address, "alice").await?;
     let (_carol_control, _) = register(f.address, "carol").await?;
@@ -890,7 +897,7 @@ async fn accept_is_bound_to_destination_and_single_use() -> TestResult {
 
 #[tokio::test]
 async fn pending_requests_are_bounded_per_destination() -> TestResult {
-    let f = fixture(&["alice", "bob"], |c| {
+    let f = fixture(|c| {
         c.accept_timeout = Duration::from_secs(1);
     })
     .await?;
@@ -934,7 +941,7 @@ async fn pending_requests_are_bounded_per_destination() -> TestResult {
 
 #[tokio::test]
 async fn control_replacement_and_idle_close() -> TestResult {
-    let f = fixture(&["alice", "bob"], |c| {
+    let f = fixture(|c| {
         c.control_idle = Duration::from_millis(300);
     })
     .await?;
@@ -960,121 +967,38 @@ async fn control_replacement_and_idle_close() -> TestResult {
 }
 
 #[tokio::test]
-async fn removed_account_loses_control_and_flows() -> TestResult {
-    let mut f = fixture(&["alice", "bob", "carol"], |_| {}).await?;
-    let mut flow = establish(&mut f, PROTO_TCP, 22).await?;
-    let (mut carol, _) = register(f.address, "carol").await?;
-    // Re-registering alice replaces the earlier control stream.
-    let (mut alice_control, _) = register(f.address, "alice").await?;
-    await_peers(&mut carol, &["alice", "bob"]).await?;
-    write_peers(&f.peers, &["bob", "carol"]).await?;
-    expect_closed(&mut alice_control).await?;
-    expect_closed(&mut flow.alice).await?;
-    expect_closed(&mut flow.bob).await?;
-    await_peers(&mut carol, &["bob"]).await?;
-    let (_stream, reply) = dial(f.address, &control_hello("alice")).await?;
+async fn addresses_and_identities_survive_a_restart() -> TestResult {
+    let f = fixture(|_| {}).await?;
+    let (_alice, alice) = register(f.address, "alice").await?;
+    let (_bob, bob) = register(f.address, "bob").await?;
     ensure_eq!(
-        reply,
-        Reply::failed(ERR_UNAUTHORIZED),
-        "a removed account must not authenticate"
+        (alice.ip.as_str(), bob.ip.as_str()),
+        ("10.77.0.1", "10.77.0.2")
     );
-    Ok(())
-}
-
-#[tokio::test]
-async fn invalid_peers_table_keeps_last_good() -> TestResult {
-    let f = fixture(&["alice"], |_| {}).await?;
-    let invalid = [
-        "{".to_owned(),
-        r#"{"version":1,"accounts":[]}"#.to_owned(),
-        r#"{"version":2,"accounts":[{"public_key":"zz","name":"x"}]}"#.to_owned(),
-    ];
-    for content in invalid {
-        tokio::fs::write(&f.peers, content.as_bytes()).await?;
-        sleep(Duration::from_millis(80)).await;
-        let (_stream, reply) = register(f.address, "alice").await?;
-        ensure!(reply.ok, "last good table must survive invalid content");
-    }
-    write_peers(&f.peers, &["alice", "dave"]).await?;
-    sleep(Duration::from_millis(80)).await;
-    let (_stream, reply) = register(f.address, "dave").await?;
-    ensure!(reply.ok, "a new valid table must take effect");
-    Ok(())
-}
-
-async fn load_hub(peers: &Path, data: &Path, names: &[&str]) -> TestResult<Hub> {
-    write_peers(peers, names).await?;
-    let config = Config::new(peers.to_path_buf(), data.to_path_buf(), Vec::new());
-    Ok(Hub::new(config).await?)
-}
-
-async fn addresses_of(hub: &Hub, names: &[&str]) -> Vec<Option<Ipv4Addr>> {
-    let mut found = Vec::with_capacity(names.len());
-    for name in names {
-        found.push(hub.address_of(verifier_of(name)).await);
-    }
-    found
-}
-
-#[tokio::test]
-async fn addresses_are_stable_across_restart_and_reused_on_removal() -> TestResult {
-    let dir = tempfile::tempdir()?;
-    let peers = dir.path().join("peers.json");
-    let first = load_hub(&peers, dir.path(), &["a", "b", "c"]).await?;
+    let restarted = Hub::new(Config::new(f.dir.path().to_path_buf(), Vec::new())).await?;
     ensure_eq!(
-        addresses_of(&first, &["a", "b", "c"]).await,
-        vec![
-            Some("10.77.0.1".parse::<Ipv4Addr>()?),
-            Some("10.77.0.2".parse::<Ipv4Addr>()?),
-            Some("10.77.0.3".parse::<Ipv4Addr>()?)
-        ]
+        restarted.address_of(verifier_of("bob")).await,
+        Some("10.77.0.2".parse::<Ipv4Addr>()?),
+        "a known key keeps its address after a restart"
     );
-    let second = load_hub(&peers, dir.path(), &["c", "b", "a"]).await?;
     ensure_eq!(
-        addresses_of(&second, &["a", "b", "c"]).await,
-        vec![
-            Some("10.77.0.1".parse::<Ipv4Addr>()?),
-            Some("10.77.0.2".parse::<Ipv4Addr>()?),
-            Some("10.77.0.3".parse::<Ipv4Addr>()?)
-        ],
-        "reordering and restart keep addresses"
+        restarted.address_of(verifier_of("carol")).await,
+        None,
+        "an unseen key has no address yet"
     );
-    let third = load_hub(&peers, dir.path(), &["a", "c"]).await?;
-    ensure_eq!(
-        addresses_of(&third, &["a", "c"]).await,
-        vec![
-            Some("10.77.0.1".parse::<Ipv4Addr>()?),
-            Some("10.77.0.3".parse::<Ipv4Addr>()?)
-        ],
-        "survivors keep addresses"
+    let (_carol, carol) = register(f.address, "carol").await?;
+    ensure_eq!(carol.ip, "10.77.0.3", "a new key takes the next address");
+    let saved = f.dir.path().join("ips.json");
+    let raw = tokio::fs::read(&saved).await?;
+    ensure!(
+        String::from_utf8_lossy(&raw).contains("\"seen\""),
+        "identities are stored with their last-seen time"
     );
-    let fourth = load_hub(&peers, dir.path(), &["a", "c", "d"]).await?;
-    ensure_eq!(
-        addresses_of(&fourth, &["d"]).await,
-        vec![Some("10.77.0.2".parse::<Ipv4Addr>()?)],
-        "the freed address is reused"
-    );
-
-    let assignments = dir.path().join("ips.json");
-    let saved = tokio::fs::read(&assignments).await?;
-    tokio::fs::write(&peers, b"{").await?;
-    Hub::new(Config::new(
-        peers.clone(),
-        dir.path().to_path_buf(),
-        Vec::new(),
-    ))
-    .await?;
-    ensure_eq!(
-        tokio::fs::read(&assignments).await?,
-        saved,
-        "a broken table must not erase assignments"
-    );
-
-    tokio::fs::write(&assignments, b"garbage").await?;
-    let corrupt = Hub::new(Config::new(peers, dir.path().to_path_buf(), Vec::new())).await;
+    tokio::fs::write(&saved, b"garbage").await?;
+    let corrupt = Hub::new(Config::new(f.dir.path().to_path_buf(), Vec::new())).await;
     ensure!(
         corrupt.is_err(),
-        "corrupt assignments must be an error, not renumbering"
+        "corrupt identities must be an error, not renumbering"
     );
     Ok(())
 }
