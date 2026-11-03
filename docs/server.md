@@ -2,42 +2,40 @@
 
 Base: `server/` (crate `overlay-relay`, binary `overlay-hub`).
 Client counterpart: [client](client.md).
-The snoo-box server manager owns the container lifecycle and writes the peers table.
+The snoo-box server manager owns only the container lifecycle; the hub needs no configuration and no table.
 The [wire contract](../client/overlay/overlay.go) owns frames, datagram records, the address space and identity messages.
 
-The hub is an authenticated rendezvous and byte relay between VPN accounts of one managed server that chose to broadcast.
+The hub is an authenticated rendezvous and byte relay between the VPN clients of one managed server that chose to broadcast.
 `overlay-hub` runs it inside its container. The readiness probe is `server-helper overlay-probe <host:port>` in snoo-box, built on `client/overlayagent.Probe`.
-The hub enrolls public P-384 keys. A client proves possession of its private key by signing a fresh hub challenge. Each hub connection must use an authenticated VPN because the handshake does not authenticate the hub or prevent active interception.
+The hub enrolls nobody: each client generates its own P-384 key pair, and a client that signs a fresh hub challenge with the key it presented is that key's peer. The same key is always the same peer. Each hub connection must use an authenticated VPN because the handshake does not authenticate the hub or prevent active interception.
 
 ## Inputs
 
-- `OVERLAY_ALLOWED_HOST` is a comma-separated list of engine container names and is required.
-- `/etc/overlay-relay/peers.json` is the read-only `overlay.Peers` table written by the manager.
-- `/var/lib/overlay-relay` is the only writable path and holds `ips.json`.
+- `OVERLAY_ALLOWED_HOST` is an optional comma-separated list of engine container names. Without it the hub admits every loopback, private or link-local source.
+- `/var/lib/overlay-relay` is the only writable path and holds `ips.json`; it is the only state.
 
 ## Admission
 
 The hub resolves every allowed host through Docker DNS on each connection and compares the connection's source address with the result.
 A source that is not an allowed engine container is closed before any frame is read.
-With no resolvable trusted host the hub fails closed.
+With an allowed-host list and no resolvable host the hub fails closed.
 The container never publishes `6697/tcp` to the host: it is reachable only through `snoo-box-network`.
-Source admission still closes any source that is not an allowed engine container.
+Source admission with the allowed-host list still closes any source that is not an allowed engine container.
 
-## Peers table and addresses
+## Identities and addresses
 
-The table is polled every two seconds and re-read when its modification time or size changes.
-New content is validated first, and invalid content keeps the last good table.
-An account removed from the table loses its control stream and all of its relayed flows within one poll.
-Every listed account, hidden or not, receives one stable address from `overlay.CIDR`, allocated from `10.77.0.1` with `overlay.Assignable`.
-Allocations are written atomically with mode `0600` to `ips.json` keyed by verifier, are not reused while the account exists and are freed when it is removed.
+A peer is a public key. The first valid signature of a key creates the peer, and it receives one stable address from `overlay.CIDR`, the lowest free one from `10.77.0.1` with `overlay.Assignable`.
+Peers are written atomically with mode `0600` to `ips.json` keyed by verifier, together with the time they were last seen.
+The display name of a peer is `peer-` and the first 8 hex digits of its verifier.
+The table holds 4096 peers. When it is full, a new key takes the address of the peer seen longest ago that has no control stream and no flow, and when every peer is in use the new key receives `unauthorized`.
 
 ## Protocol
 
 The client sends a `Hello` within 10 seconds, and every frame it reads is bounded by `overlay.MaxFrame` (16 KiB on the wire).
 The hub validates the public key, issues a fresh challenge, verifies its signature and looks up the public-key digest. It answers an unknown identity with `unauthorized` before closing.
 
-- `control` registers the account as broadcasting and replies with its address and name.
-  A new control stream for the same account replaces and closes the old one.
+- `control` registers the peer as broadcasting and replies with its address and name.
+  A new control stream for the same peer replaces and closes the old one.
   The hub pushes a full `Peers` snapshot of the other broadcasting accounts to every control stream whenever the broadcasting set changes, and answers `Ping` with `Pong`.
   A control stream without a ping for 90 seconds is closed.
 - `open` requires that the requester has a control stream and that the destination address belongs to another broadcasting account.
@@ -57,7 +55,7 @@ The `Incoming` event repeats the requester's offer. Each success reply then foll
 
 The hub only forwards the offers. Agents authenticate each other by the fingerprint, so anyone who watches or alters the network, and a hub that only relays, sees nothing but ciphertext. The fingerprints themselves travel through the hub, so a hub that replaces them can still intercept a flow. Run a hub you trust.
 
-Hidden accounts never appear in a `Peers` event, an error or a log line, and an account without a control stream can neither open nor accept.
+Hidden peers never appear in a `Peers` event, an error or a log line, and an account without a control stream can neither open nor accept.
 
 ## Limits
 
@@ -69,4 +67,4 @@ Logs contain only counts and errors at DEBUG, never private keys, identifiers, p
 ## Verification
 
 The tests use `net.Pipe` and loopback TCP with an injected resolver and no Docker.
-They cover authentication failure, admission, broadcast listing, hidden-account probing, error identity, TCP and UDP splices, control replacement, account removal closing flows and address stability across restart.
+They cover authentication failure, admission, broadcast listing, hidden-account probing, error identity, TCP and UDP splices, control replacement, eviction and address stability across restart.

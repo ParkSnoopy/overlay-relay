@@ -110,6 +110,20 @@ func stunSuccess(transaction []byte, address netip.Addr, port uint16) []byte {
 type secureSide struct {
 	plain  bool // DisableEncryption
 	direct bool // offer a direct connection
+	nat    bool // drop UDP to everything but the STUN server, like a NAT that refuses hole punching
+}
+
+// natConn drops datagrams to any address except the STUN server.
+type natConn struct {
+	net.PacketConn
+	stun string
+}
+
+func (c natConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	if addr.String() != c.stun {
+		return len(p), nil
+	}
+	return c.PacketConn.WriteTo(p, addr)
 }
 
 type secureEnv struct {
@@ -147,8 +161,13 @@ func newSecureAgent(hub string, account account, side secureSide, stun string, t
 			STUNServers: []string{stun},
 			// Bind loopback so the endpoint the STUN server reports is reachable.
 			ListenPacket: func(context.Context) (net.PacketConn, error) {
-				return net.ListenPacket("udp", "127.0.0.1:0")
+				socket, err := net.ListenPacket("udp", "127.0.0.1:0")
+				if err != nil || !side.nat {
+					return socket, err
+				}
+				return natConn{PacketConn: socket, stun: stun}, nil
 			},
+			Timeout: 500 * time.Millisecond,
 		}
 	}
 	return overlayagent.New(config)
@@ -159,7 +178,7 @@ func startSecureEnv(t *testing.T, alice, bob secureSide) *secureEnv {
 	hubBinary := buildHub(t)
 	aliceAccount := newAccount(t, "alice")
 	bobAccount := newAccount(t, "bob")
-	hub := startHub(t, hubBinary, overlay.Peers{Version: overlay.Version, Accounts: []overlay.Account{accountEntry(t, aliceAccount), accountEntry(t, bobAccount)}})
+	hub := startHub(t, hubBinary)
 	stun := startSTUN(t)
 
 	env := &secureEnv{aliceTap: &hubTap{}, bobTap: &hubTap{}, aliceSink: startSink(t, t.TempDir()), bobSink: startSink(t, t.TempDir())}
@@ -244,6 +263,24 @@ func TestDirectFlowBypassesTheHub(t *testing.T) {
 		}
 		if bytes.Contains(seen, plainMarker) {
 			t.Errorf("%s: the hub connection carried plaintext", name)
+		}
+	}
+}
+
+func TestFailedDirectConnectionFallsBackToTheEncryptedRelay(t *testing.T) {
+	blocked := secureSide{direct: true, nat: true}
+	env := startSecureEnv(t, blocked, blocked)
+	for _, name := range []string{"first", "second"} {
+		source, err := sendFromAlice(t, env, secureFileSize)
+		if err != nil {
+			t.Fatalf("%s flow: %v", name, err)
+		}
+		requireSameFile(t, source, filepath.Join(env.bobSink.dir, "from-alice.bin"))
+	}
+	for name, tap := range map[string]*hubTap{"alice": env.aliceTap, "bob": env.bobTap} {
+		seen := tap.snapshot()
+		if len(seen) < 2*secureFileSize || bytes.Contains(seen, plainMarker) {
+			t.Errorf("%s: the hub carried %d bytes, plaintext=%t; want both files relayed and encrypted", name, len(seen), bytes.Contains(seen, plainMarker))
 		}
 	}
 }

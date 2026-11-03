@@ -157,34 +157,6 @@ type State struct {
 	Peers        []Peer `json:"peers"`
 }
 
-// Account describes one account in the hub's peers file.
-type Account struct {
-	PublicKey string `json:"public_key"`
-	Name      string `json:"name"`
-}
-
-// Peers is the hub's read-only account table, written by the server manager.
-type Peers struct {
-	Version  int       `json:"version"`
-	Accounts []Account `json:"accounts"`
-}
-
-// Validate rejects malformed, duplicate or oversized tables.
-func (p Peers) Validate() error {
-	if p.Version != Version || len(p.Accounts) > 4096 {
-		return errors.New("invalid overlay peers table")
-	}
-	seen := map[string]bool{}
-	for _, account := range p.Accounts {
-		id, err := IdentityID(account.PublicKey)
-		if err != nil || seen[id] || len(account.Name) > 128 {
-			return errors.New("invalid overlay account")
-		}
-		seen[id] = true
-	}
-	return nil
-}
-
 // WriteFrame writes one length-prefixed JSON frame.
 func WriteFrame(w io.Writer, value any) error {
 	payload, err := json.Marshal(value)

@@ -1,11 +1,12 @@
 //! `overlay-hub`: serves the overlay relay inside its container.
 //!
-//! Admitted hosts come only from the `OVERLAY_ALLOWED_HOST` environment
-//! variable, a comma-separated list. The peers table is read-only.
+//! Everything is optional. `OVERLAY_ALLOWED_HOST` is a comma-separated list
+//! of host names that may connect; without it every private-network source
+//! may. A client needs no enrollment: its own key is its identity.
 
 use std::{env, path::PathBuf, process::ExitCode};
 
-use overlay_relay::{Config, Error, Hub, LISTEN_ADDRESS, Result};
+use overlay_relay::{Config, Hub, LISTEN_ADDRESS, Result};
 use tokio::{
     net::TcpListener,
     select,
@@ -15,10 +16,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Level, error, info};
 
 const ALLOWED_HOST_ENV: &str = "OVERLAY_ALLOWED_HOST";
-const PEERS_PATH_ENV: &str = "OVERLAY_PEERS_PATH";
 const DATA_DIR_ENV: &str = "OVERLAY_DATA_DIR";
 const LISTEN_ADDRESS_ENV: &str = "OVERLAY_LISTEN_ADDRESS";
-const PEERS_PATH: &str = "/etc/overlay-relay/peers.json";
 const DATA_DIR: &str = "/var/lib/overlay-relay";
 
 #[tokio::main]
@@ -38,15 +37,10 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<()> {
     let hosts = allowed_hosts(&env::var(ALLOWED_HOST_ENV).unwrap_or_default());
-    if hosts.is_empty() {
-        return Err(Error::Config("overlay admission requires an allowed host"));
-    }
     let host_count = hosts.len();
-    let peers_path =
-        env::var(PEERS_PATH_ENV).map_or_else(|_| PathBuf::from(PEERS_PATH), PathBuf::from);
     let data_dir = env::var(DATA_DIR_ENV).map_or_else(|_| PathBuf::from(DATA_DIR), PathBuf::from);
     let listen = env::var(LISTEN_ADDRESS_ENV).unwrap_or_else(|_| LISTEN_ADDRESS.to_owned());
-    let config = Config::new(peers_path, data_dir, hosts);
+    let config = Config::new(data_dir, hosts);
     let hub = Hub::new(config).await?;
     let listener = TcpListener::bind(listen).await?;
     let shutdown = CancellationToken::new();

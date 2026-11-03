@@ -7,24 +7,23 @@ Where this document and the code disagree, the code in `server/` (hub) and `clie
 ## 1. What the system does
 
 - A **hub** (Rust binary `overlay-hub`, source in `server/`) is reachable over TCP on port `6697`.
-- Each **account** holds one stable private IPv4 address in `10.77.0.0/16`.
-- A **client** that "broadcasts" registers a **control stream** with the hub. The hub then tells it which other broadcasting accounts exist (`peers`).
+- Each **peer** holds one stable private IPv4 address in `10.77.0.0/16`. A peer is a client key pair that the client generated itself; nobody enrolls it.
+- A **client** that "broadcasts" registers a **control stream** with the hub. The hub then tells it which other broadcasting peers exist (`peers`).
 - A client opens a **flow** (TCP or UDP) to a peer's overlay address and port. The hub asks the peer to accept, pairs the two streams, and relays bytes between them.
 - The hub never inspects payload bytes after the handshake. It forwards them unchanged.
 - Agents encrypt flows end to end by default (section 8.6) and may connect directly, bypassing the hub (section 8.7). The hub only forwards the offers.
 - Agents may optionally compress flow bytes (section 8.5). The hub is unaware of it.
-- Hidden accounts (not broadcasting) hold an address but never register a control stream, so they are never listed and cannot be reached.
+- Hidden peers (not broadcasting) hold an address but never register a control stream, so they are never listed and cannot be reached.
 
 ## 2. Glossary
 
 | Term | Meaning |
 |---|---|
 | Hub | The server process. Accepts TCP connections, authenticates them, and relays. |
-| Account | One public-key identity. Has a display name and an overlay address. |
+| Peer | One client identity, identified by its public key. Has a derived display name and an overlay address. |
 | Private key | Persistent client-side P-384 identity key. Never sent to the hub. |
-| Public key | Uncompressed P-384 point enrolled in the peers table. |
-| Verifier | SHA-256 of the 97-byte public key, used internally as an account identifier. |
-| Peers table | Read-only JSON file on the hub that lists the accounts. |
+| Public key | Uncompressed P-384 point the client presents and proves it holds. |
+| Verifier | SHA-256 of the 97-byte public key, used internally as the peer identifier. |
 | Control stream | Long-lived TCP connection that registers a broadcasting account and receives events. |
 | Open stream | TCP connection that requests a flow to a peer. |
 | Accept stream | TCP connection the destination peer opens to answer an incoming request. |
@@ -36,47 +35,39 @@ Where this document and the code disagree, the code in `server/` (hub) and `clie
 ```
 server/            Rust hub crate "overlay-relay", binary "overlay-hub"
   src/main.rs      reads environment, runs the hub
-  src/lib.rs       library API (Hub, Config, Peers, Verifier, frame helpers)
+  src/lib.rs       library API (Hub, Config, Verifier, frame helpers)
   src/protocol.rs  wire constants and message types
   tests/hub.rs     integration tests over real loopback sockets
 client/            Go module github.com/ParkSnoopy/overlay-relay/client
-  overlay/         wire types, frame codec, identity helpers, Peers validation
+  overlay/         wire types, frame codec, identity helpers
   overlayagent/    reference agent: registration, peers, outbound and inbound flows, probe
 tests/             Go tests that run the Rust hub and the Go agent together
-examples/          Go programs: peers table generator, client program
+examples/          Go program: a client
 docs/              this wiki, server and client notes, release gate
 Dockerfile         builds the server image
 ```
 
 ## 4. Identity: P-384 key pairs
 
-Generate one P-384 key pair on each client. Persist the private key securely and reuse it across connections. Enroll only the public key with the hub. The Go helpers provide PKCS#8 PEM encoding and parsing. The hub identifies the account by SHA-256 of the 97 raw uncompressed public-key bytes.
+Generate one P-384 key pair on each client. Persist the private key securely and reuse it across connections. The hub needs no enrollment: the public key in the Hello, together with a valid signature of the challenge, is the identity. The Go helpers provide PKCS#8 PEM encoding and parsing. The hub identifies the peer by SHA-256 of the 97 raw uncompressed public-key bytes. The same key is always the same peer, and a client that loses its key becomes a new peer.
 
 Every hub stream must traverse an authenticated VPN. The challenge authenticates the client to the hub, not the hub to the client. It does not protect a connection from an active intermediary. The caller and deployment must enforce the VPN boundary.
 
-### Peers table (hub input)
+### Identity table (hub state)
 
-A JSON file with `version` and an `accounts` array. Each account has `public_key` and `name`. The example tool generates this file from enrolled public keys.
+The hub keeps every key it has verified in `ips.json` in its data directory: verifier hex mapped to an object with the peer's `ip` and `seen` (Unix seconds of its last authentication or disconnect). No operator writes this file. The hub rewrites it atomically with mode `0600`.
 
-Validation rules (enforced by the hub; a violation makes the whole table invalid):
-
-- `version` must equal `2`.
-- At most `4096` accounts.
-- Each `public_key` is a unique hex-encoded uncompressed valid P-384 point, 97 bytes.
-- Each `name` is at most `128` bytes.
-- The file is at most `4 MiB` (4194304 bytes).
-
-The file is read-only to the hub. A writer should replace it atomically (write a temporary file, then rename over the target).
+- At most `4096` peers. When the table is full, a new key takes over the address of the peer with the oldest `seen` that has no control stream and no flow. When every peer is in use, the new key is refused with `unauthorized`.
+- The display name of a peer is `peer-` followed by the first 8 hex digits of its verifier.
+- A file written by an older hub (verifier hex mapped to a bare address) loads, and each entry counts as seen at load time. A corrupt file stops the hub rather than renumbering peers.
 
 ## 5. Addresses
 
 - Overlay CIDR: `10.77.0.0/16`.
 - Assignable addresses: `10.77.0.1` through `10.77.255.255`, excluding `10.77.0.0` and `10.77.255.255`. Helper: `overlay.Assignable` and `overlay_relay::assignable`.
-- The hub assigns each account an address. Assignments persist in `ips.json` in the data directory (JSON object: verifier hex to IPv4 text).
-- When the table reloads:
-  - Accounts that keep their stored, still-assignable, unclaimed address keep it.
-  - Every other account receives the lowest free assignable address, starting at `10.77.0.1`.
-  - An account removed from the table loses its address, its control stream is closed, and its flows and pending requests are dropped.
+- The hub assigns each peer an address when its key first proves possession. Assignments persist in `ips.json` in the data directory (JSON object: verifier hex to `{ip, seen}`).
+- A known peer keeps its address. A new peer receives the lowest free assignable address, starting at `10.77.0.1`.
+- A peer loses its address only by eviction from a full table (section 4).
 - A client learns its own address from the registration reply. Do not compute it.
 
 ## 6. Transport and framing
@@ -111,7 +102,7 @@ A malformed or inconsistent offer (bad fingerprint, bad endpoint, endpoint witho
 
 Optional fields that do not apply to a kind may be omitted. The hub ignores unrelated fields.
 
-After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The client signs the UTF-8 bytes `overlay-relay/auth/v2:` followed by the raw nonce using ECDSA P-384 with SHA-384. It sends `{"signature":"<hex>"}` with the ASN.1 DER signature. The hub verifies the proof and enrollment before issuing the reply. A malformed public key can receive an unauthorized reply without a challenge.
+After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The client signs the UTF-8 bytes `overlay-relay/auth/v2:` followed by the raw nonce using ECDSA P-384 with SHA-384. It sends `{"signature":"<hex>"}` with the ASN.1 DER signature. The hub verifies the proof before issuing the reply; a valid proof of any key is accepted, and a key seen for the first time receives an address. A malformed public key can receive an unauthorized reply without a challenge.
 
 ### 7.2 Reply (hub to client)
 
@@ -120,7 +111,7 @@ After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The
 | `ok` | bool | `true` on success. |
 | `error` | string | Present when `ok` is `false`. One of the error values in section 9. |
 | `ip` | string | Control only. This account's overlay address. |
-| `name` | string | Control only. This account's display name from the table. |
+| `name` | string | Control only. This peer's display name, derived from its key. |
 | `secure` | bool | Open and accept only. Both sides offered a fingerprint (section 8.6). |
 | `fingerprint` | string | Secure only. The other side's flow certificate fingerprint, lowercase. |
 | `direct` | bool | Open and accept only. Both sides also offered an endpoint (section 8.7). |
@@ -227,7 +218,7 @@ The reference agent offers a direct connection when `Config.Direct` is set and e
 4. The destination registers the `id` before it sends its accept, so the requester cannot arrive early. Both sides send a short packet toward the other's endpoint every 200 ms to open their NAT.
 5. The requester dials the destination's endpoint with QUIC. ALPN is `overlay-relay/direct-1`, the TLS server name is the flow `id`, and both sides pin the fingerprint as in section 8.6. The destination picks the pinned fingerprint by that server name and refuses an unknown name.
 6. The requester opens one bidirectional stream and writes a single byte `0x01` so the destination can accept it. After that the stream carries the flow bytes exactly as a relayed flow would (compression, if enabled, sits on top).
-7. If the connection does not come up within `DirectOptions.Timeout` (default 10 s), the flow fails. It does not fall back to the relay.
+7. If the connection does not come up within `DirectOptions.Timeout` (default 10 s), the direct attempt fails on both sides. The requester then opens the flow again without an endpoint, so the hub relays it (section 8.4), and it offers no endpoint to that peer for five minutes. The destination sees the retry as a new request.
 
 ### 8.4 Relay mode
 
@@ -240,7 +231,7 @@ Exact error strings in `Reply.error`:
 
 | Value | When |
 |---|---|
-| `unauthorized` | Public key or proof is malformed, invalid, or unknown. Accept answers this also when the id is unknown, expired, already used, or addressed to another account. |
+| `unauthorized` | Public key or proof is malformed or invalid, or the identity table is full of active peers. Accept answers this also when the id is unknown, expired, already used, or addressed to another account. |
 | `peer unavailable` | Open request is invalid, destination is missing or hidden, a precondition fails, or the destination did not accept in time. |
 | `invalid request` | Authenticated identity, but `kind` is not `control`, `open` or `accept`. |
 
@@ -252,7 +243,7 @@ Before reading any frame, the hub checks the **source address** of every new TCP
 
 - The hub resolves each name in its `OVERLAY_ALLOWED_HOST` list at connection time (lookup timeout `2` seconds per name). The connection is admitted only if its remote IP equals one of the resolved addresses. IPv4-mapped IPv6 addresses compare equal to their IPv4 form.
 - Unresolvable names are skipped. If no name matches, the connection is closed without any reply.
-- An empty allowed list admits nobody.
+- An empty allowed list (`OVERLAY_ALLOWED_HOST` unset) admits every source whose address is loopback, private (`10/8`, `172.16/12`, `192.168/16`), link-local or unique-local, and closes any other source.
 
 The client must reach the hub from an allowed source address over an authenticated VPN. Source-address admission alone does not authenticate the transport.
 
@@ -267,16 +258,13 @@ After admission, the first frame must arrive within `10` seconds. Otherwise the 
 | Usable frame payload (writers) | `16256` bytes = 16384 − `SAFETY_SPACE` (128) | both (writers) |
 | Max datagram payload (wire) | `65535` bytes | both (readers) |
 | Usable datagram payload (writers) | `65407` bytes = 65535 − 128 | both (writers) |
-| Max accounts in table | `4096` | hub |
-| Max account name | `128` bytes | hub |
-| Max peers file size | `4 MiB` | hub |
+| Max peers (identities) | `4096` | hub |
 | Max active flows per account | `256` | hub |
 | Max pending requests per destination | `4` | hub |
 | Handshake deadline (first frame) | `10` s | hub |
 | Accept timeout | `10` s | hub |
 | Control stream idle (no ping) | `90` s | hub |
 | UDP flow idle | `120` s | hub |
-| Peers file poll interval | `2` s | hub |
 | Frame write deadline | `10` s | hub |
 | Admission DNS lookup | `2` s per name | hub |
 | Client ping interval | `30` s | reference client |
@@ -286,13 +274,11 @@ After admission, the first frame must arrive within `10` seconds. Otherwise the 
 | Client concurrent incoming flows | `128` | reference client |
 | Client UDP idle | `120` s | reference client |
 
-## 12. Peers table reload and hub state
+## 12. Hub state
 
-- The hub reads the table at startup. A missing file or an invalid table at startup means an empty table, which admits no accounts.
-- The hub polls the file every `2` seconds and reloads when the file's identity, modification time or size changes.
-- A missing file at reload empties the table (all controls and flows close).
-- An invalid file at reload keeps the last good table.
-- A table change sends a fresh `peers` event to every affected control stream.
+- The hub loads `ips.json` at startup. A missing file means no peers yet.
+- A peer is created, or its `seen` time refreshed, when a connection proves possession of its key. The file is rewritten when it changes.
+- A peer connecting or disconnecting sends a fresh `peers` event to every control stream.
 
 ## 13. Reference client behavior (overlayagent)
 
@@ -353,10 +339,10 @@ Then: dial the hub, send the open Hello, read the reply. On `ok:true` the stream
 
 ### 13.6 Readiness probe
 
-`overlayagent.Probe(ctx, address)` proves that a hub admits this source and parses frames without any real account:
+`overlayagent.Probe(ctx, address)` proves that a hub admits this source and parses frames without registering a peer:
 
 1. Dial the hub.
-2. Generate a fresh identity, send its version 2 control Hello and answer the challenge.
+2. Send a version 2 control Hello with a malformed public key (`00`). The hub refuses it before any challenge, so no peer is created.
 3. Expect `Reply{ok:false, error:"unauthorized"}`. Route the probe through the authenticated VPN.
 
 Use it as a health check. Any other reply means a misconfigured hub or an unexpected source.
@@ -365,7 +351,7 @@ Use it as a health check. Any other reply means a misconfigured hub or an unexpe
 
 Implement, in order, and test each step against the Rust hub (section 15):
 
-1. **Identity**: Generate and securely persist a P-384 key pair. Enroll the public key.
+1. **Identity**: Generate and securely persist a P-384 key pair. Nothing is enrolled.
 2. **Authentication**: Sign the fresh challenge as specified in section 7.1 on each hub stream.
 3. **Framing**: 2-byte big-endian length plus JSON. Reject `0` and `> 16384`.
 4. **Control stream**: Hello, read Reply, store `ip` and `name`. Then loop: read events, send a ping every 30 s, drop the connection after 75 s without frames.
@@ -378,7 +364,7 @@ Implement, in order, and test each step against the Rust hub (section 15):
 
 Keep these rules in any port:
 
-- Never send or log the private key. Never log account identifiers.
+- Never send or log the private key. Never log peer identifiers.
 - Do not rely on any field beyond those listed in section 7.
 - Treat unknown events as ignorable, but treat a malformed frame as a dead stream.
 - Keep frame writes under a deadline so a stalled hub cannot pin a task.
@@ -395,35 +381,28 @@ cd tests && go test -race -count=1 ./...
 cd examples && go vet ./...
 ```
 
-- `server/tests/hub.rs` runs the hub over real loopback TCP and UDP: admission, auth, accept, pending cap, idle timeouts, peers reload, address stability.
-- `tests/` builds the hub with cargo, starts it as a process, and connects two Go agents to it. It verifies registration, peers, a TCP round trip, and refusal of an unknown address.
+- `server/tests/hub.rs` runs the hub over real loopback TCP and UDP: admission, auth, accept, pending cap, idle timeouts, address stability and eviction.
+- `tests/` builds the hub with cargo, starts it as a process with no configuration, and connects two Go agents to it. It verifies registration without enrollment, peers, a TCP round trip, and refusal of an unknown address.
 
 To run the hub by hand:
 
 ```text
-OVERLAY_ALLOWED_HOST=<name-that-resolves-to-your-client> \
-OVERLAY_PEERS_PATH=./peers.json \
 OVERLAY_DATA_DIR=./data \
 OVERLAY_LISTEN_ADDRESS=127.0.0.1:6697 \
 ./server/target/release/overlay-hub
 ```
 
-Generate a peers table from enrolled public keys:
-
-```text
-cd examples && go run ./peers 'alice=<alice-public-key>' > ./peers.json
 ```
 
 ## 16. Hub configuration
 
 | Variable | Meaning | Required |
 |---|---|---|
-| `OVERLAY_ALLOWED_HOST` | Comma-separated host names whose addresses may connect. Empty entries are dropped. | Yes; empty fails startup |
-| `OVERLAY_PEERS_PATH` | Path to the peers table. | Recommended |
-| `OVERLAY_DATA_DIR` | Directory for `ips.json`. Must be writable. | Recommended |
+| `OVERLAY_ALLOWED_HOST` | Comma-separated host names whose addresses may connect. Empty entries are dropped. | No; unset admits every private-network source |
+| `OVERLAY_DATA_DIR` | Directory for `ips.json`. Must be writable. | No; default `/var/lib/overlay-relay` |
 | `OVERLAY_LISTEN_ADDRESS` | Bind address. Default `0.0.0.0:6697`. | No |
 
-Without `OVERLAY_PEERS_PATH` and `OVERLAY_DATA_DIR`, the binary uses built-in defaults (constants in `server/src/main.rs`). Set both explicitly in any new deployment. The container image sets them (section 17).
+Every variable is optional: the hub runs with none of them set.
 
 The hub logs with `tracing`. It never logs private keys, identifiers, payloads or peer names.
 
@@ -432,16 +411,15 @@ The hub logs with `tracing`. It never logs private keys, identifiers, payloads o
 - `Dockerfile` at the repository root builds the hub from `server/` with `cargo build --release --locked`.
 - Build image: `rust:1-slim`, target `x86_64-unknown-linux-musl`, static binary.
 - Runtime image: `debian:13-slim`, user `65532`, entrypoint `/usr/local/bin/overlay-hub`.
-- Defaults set in the image: `OVERLAY_PEERS_PATH=/etc/overlay-relay/peers.json`, `OVERLAY_DATA_DIR=/var/lib/overlay-relay`, `OVERLAY_LISTEN_ADDRESS=0.0.0.0:6697`.
-- Mount the peers table as a **directory** (for example `/etc/overlay-relay`), not as a single file. The hub watches for replacement by rename, which a single-file bind mount does not see.
+- Defaults set in the image: `OVERLAY_DATA_DIR=/var/lib/overlay-relay`, `OVERLAY_LISTEN_ADDRESS=0.0.0.0:6697`.
 - The data directory must be writable by uid `65532`.
 - Make `6697/tcp` reachable through the authenticated VPN, not directly from an untrusted network.
 
 ## 18. Security properties
 
-- Authentication verifies a fresh P-384 signature and matches the public-key digest to an enrolled account.
+- Authentication verifies a fresh P-384 signature of the presented public key. It proves possession only; whoever reaches the hub through the VPN can join with a new key.
 - Admission by source address is a first gate; the signed challenge is the second. An authenticated VPN is required independently.
-- The hub returns the same `peer unavailable` for missing, hidden, self, and refused destinations. A requester cannot enumerate accounts.
+- The hub returns the same `peer unavailable` for missing, hidden, self, and refused destinations. A requester cannot enumerate peers.
 - The hub does not interpret relayed payloads.
 - Flows are end-to-end encrypted by default (section 8.6). A relaying hub and a network observer see only ciphertext. Fingerprints travel through the hub, so a hub that substitutes them can intercept a flow; the hub is a trusted party for fingerprints, not for payloads it relays honestly.
 - A direct connection leaves the VPN. Its QUIC handshake pins the same fingerprints, so it is authenticated and encrypted. It exposes the agent's public UDP address to the peer and the STUN server.
@@ -450,7 +428,7 @@ The hub logs with `tracing`. It never logs private keys, identifiers, payloads o
 ## 19. Non-goals
 
 - The hub does not encrypt traffic itself and holds no private identity keys. Encryption is the agents' job (section 8.6). Hub-to-agent control frames are not encrypted by the overlay; an authenticated VPN must protect that transport.
-- No relay fallback for a failed direct connection, no certificate authority, and no STUN server in the hub.
+- No hub-side tracking of direct connections (the requester alone falls back to the relay), no certificate authority, and no STUN server in the hub.
 - The hub does not route to the internet or to addresses outside `10.77.0.0/16`.
 - The hub has no accounting or quotas beyond the flow and pending limits in section 11.
 - No version negotiation beyond `version: 2`. A new wire version requires a new `version` value and a coordinated release.

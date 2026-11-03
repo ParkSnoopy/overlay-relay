@@ -1,13 +1,11 @@
-//! The hub: startup, peers-table reloads, the accept loop, source admission and
-//! dispatch of each connection to its stream kind.
+//! The hub: startup, identity persistence, the accept loop, source admission
+//! and dispatch of each connection to its stream kind.
 
 use std::{
-    collections::HashMap,
     fmt,
-    io::ErrorKind,
     net::Ipv4Addr,
-    os::unix::fs::MetadataExt,
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use ring::{
@@ -18,22 +16,20 @@ use tokio::{
     net::{TcpListener, TcpStream},
     select,
     sync::Mutex,
-    time::{interval, timeout},
+    time::timeout,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::{
     accept,
-    address::{LAST_ADDRESS, assign},
     assignments,
     config::Config,
     control,
     dns::admitted,
-    error::{Error, Result},
+    error::Result,
     frame::{read_frame, send_frame},
     open,
-    peers::{Account, MAX_PEERS_FILE, Peers},
     protocol::{
         Challenge,
         ERR_INVALID_REQUEST,
@@ -55,38 +51,31 @@ use crate::{
 pub struct Shared {
     /// Immutable configuration.
     pub config: Config,
-    /// Accounts, controls, pending requests and flows.
+    /// Identities, controls, pending requests and flows.
     pub state: Mutex<State>,
-    /// Serializes table reloads and owns the persisted address assignments.
-    pub gate: Mutex<Gate>,
+    /// Serializes writes of the persisted identities.
+    pub store: Mutex<()>,
 }
 
-/// Reload bookkeeping, guarded by [`Shared::gate`].
-#[derive(Debug, Default)]
-pub struct Gate {
-    fingerprint: Option<Fingerprint>,
-    assignments: HashMap<Verifier, Ipv4Addr>,
+/// Seconds since the Unix epoch.
+#[must_use]
+pub fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// File identity of the peers table. A change in any field triggers a re-read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Fingerprint {
-    device: u64,
-    inode: u64,
-    modified_secs: i64,
-    modified_nanos: i64,
-    length: u64,
-}
-
-impl Fingerprint {
-    fn of(metadata: &std::fs::Metadata) -> Self {
-        Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            modified_secs: metadata.mtime(),
-            modified_nanos: metadata.mtime_nsec(),
-            length: metadata.len(),
-        }
+/// Writes the identities to disk when they changed. A failed write keeps them
+/// marked changed, so the next call retries.
+pub async fn persist(shared: &Shared) {
+    let _writer = shared.store.lock().await;
+    let Some(records) = shared.state.lock().await.take_dirty() else {
+        return;
+    };
+    let path = shared.config.data_dir.join(assignments::FILE_NAME);
+    if let Err(error) = assignments::save(&path, &records).await {
+        warn!(error = %error, "overlay identities could not be saved");
+        shared.state.lock().await.mark_dirty();
     }
 }
 
@@ -103,84 +92,39 @@ impl fmt::Debug for Hub {
 }
 
 impl Hub {
-    /// Loads the persisted address assignments and the current peers table.
-    /// A missing or invalid peers table yields an empty table (fail closed)
-    /// and leaves the persisted assignments untouched.
+    /// Loads the persisted identities and their addresses.
     ///
     /// # Errors
-    /// Returns `Error::Config` for a zero poll interval and an error when the
-    /// assignments file is corrupt or unreadable.
+    /// Returns an error when the identities file is corrupt or unreadable.
     pub async fn new(config: Config) -> Result<Self> {
-        if config.poll_interval.is_zero() {
-            return Err(Error::Config("overlay poll interval must be positive"));
-        }
-        let loaded = assignments::load(&config.data_dir.join(assignments::FILE_NAME)).await?;
-        let shared = Shared {
-            config,
-            state: Mutex::new(State::default()),
-            gate: Mutex::new(Gate {
-                fingerprint: None,
-                assignments: loaded,
+        let records =
+            assignments::load(&config.data_dir.join(assignments::FILE_NAME), unix_now()).await?;
+        let state = State::load(&records);
+        info!(identities = records.len(), "overlay identities loaded");
+        let hub = Self {
+            shared: Arc::new(Shared {
+                config,
+                state: Mutex::new(state),
+                store: Mutex::new(()),
             }),
         };
-        let hub = Self {
-            shared: Arc::new(shared),
-        };
-        if let Err(error) = hub.reload().await {
-            warn!(error = %error, "overlay peers table is unavailable");
-        }
+        persist(&hub.shared).await;
         Ok(hub)
     }
 
-    /// Re-reads the peers table when its file identity, timestamp or size has
-    /// changed. A missing file empties the table. Invalid content keeps the
-    /// last good table.
-    ///
-    /// # Errors
-    /// Returns an error when the file cannot be inspected, is too large or
-    /// invalid, or when the new address assignments cannot be persisted.
-    pub async fn reload(&self) -> Result<()> {
-        let mut gate = self.shared.gate.lock().await;
-        self.reload_locked(&mut gate).await
-    }
-
-    async fn reload_locked(&self, gate: &mut Gate) -> Result<()> {
-        let path = &self.shared.config.peers_path;
-        let metadata = match tokio::fs::metadata(path).await {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                return self.clear_table(gate).await;
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let fingerprint = Fingerprint::of(&metadata);
-        if gate.fingerprint == Some(fingerprint) {
-            return Ok(());
-        }
-        gate.fingerprint = Some(fingerprint);
-        if metadata.len() > MAX_PEERS_FILE {
-            return Err(Error::Peers("overlay peers table is too large"));
-        }
-        let raw = tokio::fs::read(path).await?;
-        let peers = Peers::parse(&raw)?;
-        self.apply(gate, &peers).await
-    }
-
-    /// Returns the overlay address assigned to `verifier`, if it is in the table.
+    /// Returns the overlay address assigned to `verifier`, if it is known.
     #[must_use]
     pub async fn address_of(&self, verifier: Verifier) -> Option<Ipv4Addr> {
         self.shared.state.lock().await.address_of(&verifier)
     }
 
     /// Serves admitted connections until `shutdown` fires or the listener fails.
-    /// Also polls the peers table in the background.
     ///
     /// # Errors
     /// Returns `Error::Io` when accepting a connection fails.
     pub async fn serve(&self, listener: TcpListener, shutdown: CancellationToken) -> Result<()> {
         let session = shutdown.child_token();
         let _stop_on_return = session.clone().drop_guard();
-        tokio::spawn(poll(self.clone(), session.clone()));
         loop {
             let accepted = select! {
                 biased;
@@ -236,6 +180,8 @@ impl Hub {
         }
     }
 
+    /// Challenges the peer to sign a fresh nonce with the key it presented.
+    /// The same key with a valid signature is always the same identity.
     async fn authenticate(&self, stream: &mut TcpStream, public_key: &str) -> Option<Requester> {
         let verifier = Verifier::from_public_key(public_key)?;
         let public = hex::decode(public_key).ok()?;
@@ -256,56 +202,13 @@ impl Hub {
         UnparsedPublicKey::new(&ECDSA_P384_SHA384_ASN1, public)
             .verify(&message, &signature)
             .ok()?;
-        self.shared.state.lock().await.authenticate(&verifier)
-    }
-
-    async fn clear_table(&self, gate: &mut Gate) -> Result<()> {
-        let was_loaded = gate.fingerprint.take().is_some();
-        let change = self.shared.state.lock().await.replace_table(Vec::new());
-        if was_loaded {
-            info!(
-                accounts = change.accounts,
-                closed_controls = change.closed_controls,
-                closed_flows = change.closed_flows,
-                "overlay peers table is missing; admitting no accounts"
-            );
-        }
-        Ok(())
-    }
-
-    async fn apply(&self, gate: &mut Gate, peers: &Peers) -> Result<()> {
-        let verifiers: Vec<Verifier> = peers.accounts().iter().map(Account::verifier).collect();
-        let assigned = assign(&verifiers, &gate.assignments, LAST_ADDRESS)?;
-        let path = self.shared.config.data_dir.join(assignments::FILE_NAME);
-        assignments::save(&path, &assigned).await?;
-        let mut entries = Vec::with_capacity(verifiers.len());
-        for account in peers.accounts() {
-            if let Some(ip) = assigned.get(&account.verifier()) {
-                entries.push((account.verifier(), account.name().to_owned(), *ip));
-            }
-        }
-        gate.assignments = assigned;
-        let change = self.shared.state.lock().await.replace_table(entries);
-        info!(
-            accounts = change.accounts,
-            closed_controls = change.closed_controls,
-            closed_flows = change.closed_flows,
-            "overlay peers table applied"
-        );
-        Ok(())
-    }
-}
-
-async fn poll(hub: Hub, session: CancellationToken) {
-    let mut ticker = interval(hub.shared.config.poll_interval);
-    loop {
-        select! {
-            biased;
-            () = session.cancelled() => return,
-            _ = ticker.tick() => {}
-        }
-        if let Err(error) = hub.reload().await {
-            debug!(error = %error, "overlay peers reload kept the last good table");
-        }
+        let requester = self
+            .shared
+            .state
+            .lock()
+            .await
+            .identify(verifier, unix_now())?;
+        persist(&self.shared).await;
+        Some(requester)
     }
 }

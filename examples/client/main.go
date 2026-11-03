@@ -3,7 +3,7 @@
 // Environment:
 //
 //	OVERLAY_HUB     hub address, host:port (default 127.0.0.1:6697)
-//	OVERLAY_IDENTITY  path to the enrolled private key in PKCS#8 PEM format
+//	OVERLAY_IDENTITY  path to the private key in PKCS#8 PEM format; created when missing
 //	OVERLAY_LOCAL   host that serves incoming flows (default 127.0.0.1); the port is the one the peer requested
 //	OVERLAY_CONNECT optional peer address, ip:port, to send one line to
 //
@@ -13,6 +13,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,16 +49,33 @@ func execute() int {
 	return 0
 }
 
+// loadOrCreateIdentity returns the key stored at path. A missing file gets a
+// new key, so a first run needs no enrollment: the key is the identity.
+func loadOrCreateIdentity(path string) (*ecdsa.PrivateKey, error) {
+	stored, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		key, generateErr := overlay.GenerateIdentity()
+		if generateErr != nil {
+			return nil, generateErr
+		}
+		encoded, encodeErr := overlay.EncodeIdentity(key)
+		if encodeErr != nil {
+			return nil, encodeErr
+		}
+		return key, os.WriteFile(path, encoded, 0o600)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return overlay.ParseIdentity(stored)
+}
+
 func run(ctx context.Context) error {
 	identityPath := os.Getenv("OVERLAY_IDENTITY")
 	if identityPath == "" {
 		return errors.New("OVERLAY_IDENTITY is required")
 	}
-	identityBytes, err := os.ReadFile(identityPath)
-	if err != nil {
-		return err
-	}
-	identity, err := overlay.ParseIdentity(identityBytes)
+	identity, err := loadOrCreateIdentity(identityPath)
 	if err != nil {
 		return err
 	}

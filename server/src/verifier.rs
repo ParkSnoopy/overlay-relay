@@ -27,7 +27,7 @@ impl Verifier {
         Some(Self(digest))
     }
 
-    /// Parses a verifier stored as 64 hex digits in the peers table.
+    /// Parses a verifier stored as 64 hex digits in `ips.json`.
     #[must_use]
     pub fn from_hex(text: &str) -> Option<Self> {
         let digest: [u8; 32] = hex::decode(text).ok()?.try_into().ok()?;
@@ -38,19 +38,6 @@ impl Verifier {
     #[must_use]
     pub fn to_hex(self) -> String {
         hex::encode(self.0)
-    }
-
-    /// Compares two verifiers in time independent of where they differ.
-    #[must_use]
-    pub fn matches(&self, other: &Self) -> bool {
-        let difference = self
-            .0
-            .iter()
-            .zip(other.0.iter())
-            .fold(0_u8, |accumulated, (left, right)| {
-                accumulated | (left ^ right)
-            });
-        difference == 0
     }
 }
 
@@ -100,18 +87,6 @@ mod tests {
         assert!(
             Verifier::from_hex(&token_hex('z')).is_none(),
             "non-hex verifier"
-        );
-    }
-
-    #[test]
-    fn matching_is_exact() {
-        let first = Verifier::from_digest([7; 32]);
-        let mut other = [7_u8; 32];
-        assert!(first.matches(&Verifier::from_digest(other)));
-        other[31] = 8;
-        assert!(
-            !first.matches(&Verifier::from_digest(other)),
-            "one differing byte"
         );
     }
 

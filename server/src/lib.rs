@@ -1,7 +1,7 @@
 //! Authenticated rendezvous and byte relay for overlay accounts.
 //!
-//! A [`Hub`] accepts connections only from admitted source addresses, looks up
-//! each enrolled public key, and relays flows between accounts that
+//! A [`Hub`] accepts connections only from admitted source addresses, challenges
+//! each presented public key to prove possession, and relays flows between accounts that
 //! chose to broadcast. Each account keeps one stable overlay address. The hub
 //! never logs credentials, tokens, verifiers, payloads or peer names.
 //!
@@ -23,19 +23,17 @@ mod error;
 mod frame;
 mod hub;
 mod open;
-mod peers;
 mod protocol;
 mod splice;
 mod state;
 mod verifier;
 
-pub use address::{FIRST_ADDRESS, LAST_ADDRESS, assign, assignable};
+pub use address::{FIRST_ADDRESS, LAST_ADDRESS, assignable, lowest_free};
 pub use config::Config;
 pub use dns::{Resolver, SystemResolver, admitted};
 pub use error::{Error, Result};
 pub use frame::{read_datagram, read_frame, send_frame, write_datagram, write_frame};
-pub use hub::{Gate, Hub, Shared};
-pub use peers::{Account, MAX_NAME_LEN, MAX_PEERS_FILE, Peers};
+pub use hub::{Hub, Shared, persist, unix_now};
 pub use protocol::{
     Challenge,
     ERR_INVALID_REQUEST,
@@ -62,5 +60,4 @@ pub use protocol::{
     Reply,
     VERSION,
 };
-pub use state::TableChange;
 pub use verifier::Verifier;

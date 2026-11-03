@@ -5,7 +5,7 @@
 # The GNU binary is built on Debian 13 to match the runtime's C library.
 # The image runs as a non-root user and reads its
 # configuration from the environment.
-# Required at run time: OVERLAY_ALLOWED_HOST (see server/README.md).
+# Nothing is required at run time (see server/README.md).
 
 ARG RUST_IMAGE=docker.io/library/rust:1-slim-trixie
 ARG RUNTIME_IMAGE=docker.io/library/debian:13-slim
@@ -21,11 +21,10 @@ RUN cargo build --release --locked --target "$TARGET" --manifest-path server/Car
 
 FROM ${RUNTIME_IMAGE}
 COPY --from=build /out/overlay-hub /usr/local/bin/overlay-hub
-RUN mkdir -p /etc/overlay-relay /var/lib/overlay-relay \
+RUN mkdir -p /var/lib/overlay-relay \
  && chown 65532:65532 /var/lib/overlay-relay \
  && chmod 0700 /var/lib/overlay-relay
-ENV OVERLAY_PEERS_PATH=/etc/overlay-relay/peers.json \
-    OVERLAY_DATA_DIR=/var/lib/overlay-relay \
+ENV OVERLAY_DATA_DIR=/var/lib/overlay-relay \
     OVERLAY_LISTEN_ADDRESS=0.0.0.0:6697
 EXPOSE 6697
 USER 65532:65532

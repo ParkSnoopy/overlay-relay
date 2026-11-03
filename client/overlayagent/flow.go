@@ -35,8 +35,31 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 	if !peer {
 		return nil, errors.New(overlay.ErrUnavailable)
 	}
-	hello := &overlay.Hello{Version: overlay.Version, Kind: overlay.KindOpen, Proto: proto, Dst: ip.String(), Port: dst.Port()}
-	a.offer(ctx, hello, true)
+	wantDirect := a.directAllowed(ip)
+	flow, err := a.openFlow(ctx, proto, ip, dst.Port(), wantDirect)
+	if wantDirect && errors.Is(err, errDirectFailed) && ctx.Err() == nil {
+		// NAT or a firewall can refuse the direct path. The next attempt offers
+		// no endpoint, so both peers use the relay for this flow and later ones.
+		a.blockDirect(ip)
+		flow, err = a.openFlow(ctx, proto, ip, dst.Port(), false)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if a.cfg.Compression {
+		flow = overlay.Compressed(flow)
+	}
+	if proto == overlay.ProtoUDP {
+		return &datagramConn{Conn: flow, buffer: make([]byte, 2+overlay.MaxDatagram)}, nil
+	}
+	return flow, nil
+}
+
+// openFlow asks the hub for one flow to ip and finishes it on the transport the
+// hub negotiated. wantDirect adds this agent's direct offer to the request.
+func (a *Agent) openFlow(ctx context.Context, proto string, ip netip.Addr, port uint16, wantDirect bool) (net.Conn, error) {
+	hello := &overlay.Hello{Version: overlay.Version, Kind: overlay.KindOpen, Proto: proto, Dst: ip.String(), Port: port}
+	a.offer(ctx, hello, wantDirect)
 	conn, err := a.cfg.Dial(ctx)
 	if err != nil {
 		return nil, errors.New("overlay hub is unreachable")
@@ -50,17 +73,30 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 		closeConn(conn)
 		return nil, errors.New(boundedReason(reply.Error))
 	}
-	flow, err := a.finishOutbound(ctx, conn, &reply)
-	if err != nil {
-		return nil, err
+	return a.finishOutbound(ctx, conn, &reply)
+}
+
+// directAllowed reports whether a direct connection to ip may be offered: it
+// is not when one failed recently.
+func (a *Agent) directAllowed(ip netip.Addr) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	until, blocked := a.directBlocked[ip]
+	if blocked && time.Now().After(until) {
+		delete(a.directBlocked, ip)
+		return true
 	}
-	if a.cfg.Compression {
-		flow = overlay.Compressed(flow)
+	return !blocked
+}
+
+// blockDirect stops offering direct connections to ip for directRetryAfter.
+func (a *Agent) blockDirect(ip netip.Addr) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.directBlocked == nil {
+		a.directBlocked = map[netip.Addr]time.Time{}
 	}
-	if proto == overlay.ProtoUDP {
-		return &datagramConn{Conn: flow, buffer: make([]byte, 2+overlay.MaxDatagram)}, nil
-	}
-	return flow, nil
+	a.directBlocked[ip] = time.Now().Add(directRetryAfter)
 }
 
 // accept starts handling one Incoming request unless the concurrency bound is reached.

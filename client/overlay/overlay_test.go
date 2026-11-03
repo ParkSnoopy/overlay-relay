@@ -80,20 +80,3 @@ func TestAssignable(t *testing.T) {
 		}
 	}
 }
-
-func TestPeersValidate(t *testing.T) {
-	key, err := GenerateIdentity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	public, err := PublicIdentity(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := (Peers{Version: Version, Accounts: []Account{{PublicKey: public}}}).Validate(); err != nil {
-		t.Fatal(err)
-	}
-	if err := (Peers{Version: Version, Accounts: []Account{{PublicKey: public}, {PublicKey: public}}}).Validate(); err == nil {
-		t.Fatal("duplicate account accepted")
-	}
-}

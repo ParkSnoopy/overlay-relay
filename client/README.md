@@ -2,7 +2,7 @@
 
 Go module `github.com/ParkSnoopy/overlay-relay/client`. It contains:
 
-- `overlay`: wire types, frame codec, identity keys, and peers table validation.
+- `overlay`: wire types, frame codec and identity keys.
 - `overlayagent`: a reference agent that registers with a hub, tracks peers, opens outbound flows, serves inbound flows, and probes a hub for readiness.
 
 The module has no daemon and no platform code. Your application supplies the network dialers and the local service dialer. The agent runs in your process.
@@ -117,7 +117,7 @@ cfg.Direct = &overlayagent.DirectOptions{
 - The agent asks the STUN server, over the socket the QUIC connection will use, for its public UDP endpoint. Query it from outside the VPN, or the hub-side address you learn is not reachable.
 - Both peers hole-punch their NAT and connect. The QUIC handshake pins the same certificate fingerprints, so the connection is authenticated and encrypted.
 - If only one side enables `Direct`, or an agent cannot learn its endpoint, the flow stays on the encrypted relay.
-- A direct connection that fails to come up makes the flow fail. It does not fall back to the relay, because that would hide a network change from the caller.
+- Some NATs and firewalls refuse hole punching. When a direct connection does not come up, `Outbound` retries the flow once on the encrypted relay, and the destination serves it there. The peer is then not offered a direct connection for five minutes. The failed attempt delays the first flow by up to the timeout.
 - `DirectOptions.Timeout` bounds the connection attempt (default 10 seconds).
 
 ## Account identities
@@ -125,7 +125,7 @@ cfg.Direct = &overlayagent.DirectOptions{
 ```go
 key, err := overlay.GenerateIdentity()
 encoded, err := overlay.EncodeIdentity(key) // store securely and reuse
-public, err := overlay.PublicIdentity(key) // enroll this public key with the hub
+public, err := overlay.PublicIdentity(key) // optional: show or log it; the hub needs no enrollment
 ```
 
 The client must use the same key across reconnects. Use `overlay.ParseIdentity` to load the stored PKCS#8 PEM. An authenticated VPN is required for every hub stream. The signature exchange alone does not authenticate the hub or protect against an active intermediary.
@@ -151,7 +151,7 @@ if err := overlayagent.Probe(ctx, "hub.example.net:6697"); err != nil {
 }
 ```
 
-`Probe` uses a fresh unregistered key and expects an `unauthorized` reply. It never uses a real account. Its TCP connection must also travel through the authenticated VPN.
+`Probe` sends a malformed key and expects an `unauthorized` reply, so it never creates a peer. Its TCP connection must also travel through the authenticated VPN.
 
 ## Wire helpers
 
