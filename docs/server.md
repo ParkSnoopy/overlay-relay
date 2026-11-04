@@ -26,7 +26,10 @@ Source admission with the allowed-host list still closes any source that is not 
 
 A peer is a public key. The first valid signature of a key creates the peer, and it receives one stable address from `overlay.CIDR`, the lowest free one from `10.77.0.1` with `overlay.Assignable`.
 Peers are written atomically with mode `0600` to `ips.json` keyed by verifier, together with the time they were last seen.
-The display name of a peer is `peer-` and the first 8 hex digits of its verifier.
+The default display name of a peer is `peer-` and the first 8 hex digits of its verifier.
+A control Hello may supply `name`, applied only after proof of possession of that peer's key.
+The hub validates a maximum of 128 Unicode characters with no control characters or surrounding whitespace, updates only that authenticated peer and publishes fresh peer snapshots.
+Names are transient and are not written to `ips.json`; an empty or absent name restores the default on registration without changing the address.
 The table holds 4096 peers. When it is full, a new key takes the address of the peer seen longest ago that has no control stream and no flow, and when every peer is in use the new key receives `unauthorized`.
 
 ## Protocol

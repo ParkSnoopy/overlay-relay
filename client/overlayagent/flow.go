@@ -36,7 +36,7 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 	if !peer {
 		return nil, errors.New(overlay.ErrUnavailable)
 	}
-	wantDirect := a.directAllowed(ip)
+	wantDirect := a.cfg.Direct != nil && a.directAllowed(ip)
 	flow, err := a.openFlow(ctx, proto, ip, dst.Port(), peerID, wantDirect)
 	if wantDirect && errors.Is(err, errDirectFailed) && ctx.Err() == nil {
 		// NAT or a firewall can refuse the direct path. The next attempt offers
@@ -74,8 +74,20 @@ func (a *Agent) openFlow(ctx context.Context, proto string, ip netip.Addr, port 
 		closeConn(conn)
 		return nil, errors.New(boundedReason(reply.Error))
 	}
+	if reply.Direct {
+		a.recordDirect(ip, peerID, overlay.DirectConnecting)
+	} else if wantDirect {
+		a.recordDirect(ip, peerID, overlay.DirectUnavailable)
+	}
 	flow, err := a.finishOutbound(ctx, conn, &reply)
 	if err != nil {
+		if reply.Direct {
+			status := overlay.DirectFailed
+			if ctx.Err() != nil {
+				status = overlay.DirectCanceled
+			}
+			a.recordDirect(ip, peerID, status)
+		}
 		return nil, err
 	}
 	return a.trackFlow(flow, ip, peerID, reply.Direct)
@@ -157,8 +169,21 @@ func (a *Agent) serveIncoming(ctx context.Context, in *overlay.Incoming, src net
 		closeConn(hub)
 		return errors.Join(err, errors.New("hub refused the accept stream"))
 	}
+	if reply.Direct {
+		a.recordDirect(src, in.PeerID, overlay.DirectConnecting)
+	} else if allowed && a.cfg.Direct != nil {
+		a.mu.Lock()
+		previous := a.observations[src].status
+		a.mu.Unlock()
+		if previous != overlay.DirectFailed {
+			a.recordDirect(src, in.PeerID, overlay.DirectUnavailable)
+		}
+	}
 	flow, err := a.finishIncoming(ctx, hub, &reply, in, exp)
 	if err != nil {
+		if reply.Direct && ctx.Err() == nil {
+			a.recordDirect(src, in.PeerID, overlay.DirectFailed)
+		}
 		return err
 	}
 	flow, err = a.trackFlow(flow, src, in.PeerID, reply.Direct)

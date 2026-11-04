@@ -167,7 +167,9 @@ impl Hub {
             return;
         };
         match hello.kind.as_str() {
-            KIND_CONTROL => control::serve(&self.shared, stream, requester, session).await,
+            KIND_CONTROL => {
+                control::serve(&self.shared, stream, requester, &hello.name, session).await;
+            }
             KIND_OPEN => open::serve(&self.shared, stream, requester, &hello, session).await,
             KIND_ACCEPT => {
                 accept::serve(&self.shared, stream, requester.verifier, &hello).await;

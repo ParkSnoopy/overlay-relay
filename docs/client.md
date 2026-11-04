@@ -8,6 +8,9 @@ The snoo-box client glue (tunnel start, route exclusion, Xray routing and connec
 [agent.go](../client/overlayagent/agent.go) and [flow.go](../client/overlayagent/flow.go) hold the platform-independent agent.
 The platform supplies `Dial` (one hub stream through the VPN session), `DialLocal` (where an incoming flow ends) and `OnState`.
 `Run` sends `Hello{control}` with the public identity, signs the hub's challenge, and tracks the reply, peer snapshots, incoming requests and pongs.
+`Config.Name` optionally advertises this device's name during authenticated registration.
+Empty uses the identity-derived default; nonempty names have at most 128 Unicode characters, no control characters and no surrounding whitespace.
+The name is session metadata, not an identity or address change.
 The caller must route each hub connection through an authenticated VPN. The challenge alone does not authenticate the hub or prevent active interception.
 It pings every 30 seconds, treats 75 seconds without any frame as a dead hub, and reconnects with capped exponential backoff from 1 to 30 seconds while its context lives.
 Every change calls `OnState` with `Available`, `Broadcasting` and `Connected`; a rejected account carries the hub's short reason.
@@ -23,6 +26,12 @@ At most 128 incoming flows run at once, and malformed requests are dropped witho
 A UDP flow exposes one datagram per Read and Write and keeps partial records across read deadlines.
 It refuses addresses outside `overlay.CIDR`, the agent's own address and addresses missing from the last peer snapshot before touching the hub, which stays the authority.
 Private keys and payloads never enter logs.
+
+Local peer state separates direct policy (`DirectAllowed`) from the latest real attempt (`DirectStatus`) and established transport (`LastPath`).
+Attempt statuses are `connecting`, `succeeded`, `failed`, `unavailable` and `canceled`; no status is emitted before an attempt.
+Current flow counts take precedence over historical paths when presenting activity.
+Failed attempts remain visible through encrypted relay fallback and after flow closure, but observations clear on peer departure, identity replacement or disconnection.
+These fields are local observations, not hub-supplied reachability guarantees.
 
 ## Checks
 

@@ -21,6 +21,7 @@ func (a *Agent) SetRelayOnly(ids []string) error {
 	}
 	a.mu.Lock()
 	a.relayOnly = policy
+	started := a.started
 	var closing []*peerFlow
 	for flow := range a.active {
 		if flow.direct && a.relayOnlyLocked(flow.peerID) {
@@ -30,6 +31,9 @@ func (a *Agent) SetRelayOnly(ids []string) error {
 	a.mu.Unlock()
 	for _, flow := range closing {
 		closeConn(flow)
+	}
+	if started {
+		a.emit()
 	}
 	return nil
 }
@@ -49,18 +53,56 @@ func (a *Agent) peerIDLocked(ip netip.Addr) string {
 	return ""
 }
 
+type peerObservation struct {
+	id     string
+	status overlay.DirectStatus
+	path   overlay.FlowPath
+}
+
+func (a *Agent) recordDirect(ip netip.Addr, id string, status overlay.DirectStatus) {
+	a.mu.Lock()
+	if a.connected && a.peerIDLocked(ip) == id {
+		if a.observations == nil {
+			a.observations = make(map[netip.Addr]peerObservation)
+		}
+		observation := a.observations[ip]
+		if observation.id != id {
+			observation = peerObservation{id: id}
+		}
+		observation.status = status
+		a.observations[ip] = observation
+	}
+	a.mu.Unlock()
+	a.emit()
+}
+
 func (a *Agent) trackFlow(conn net.Conn, ip netip.Addr, id string, direct bool) (net.Conn, error) {
 	flow := &peerFlow{Conn: conn, agent: a, ip: ip, peerID: id, direct: direct}
 	a.mu.Lock()
 	if direct && a.relayOnlyLocked(id) {
 		a.mu.Unlock()
 		closeConn(conn)
+		a.recordDirect(ip, id, overlay.DirectCanceled)
 		return nil, errDirectFailed
 	}
 	if a.active == nil {
 		a.active = make(map[*peerFlow]struct{})
 	}
 	a.active[flow] = struct{}{}
+	if a.connected && a.peerIDLocked(ip) == id {
+		if a.observations == nil {
+			a.observations = make(map[netip.Addr]peerObservation)
+		}
+		observation := a.observations[ip]
+		if observation.id != id {
+			observation = peerObservation{id: id}
+		}
+		observation.path = overlay.PathRelay
+		if direct {
+			observation.path, observation.status = overlay.PathDirect, overlay.DirectSucceeded
+		}
+		a.observations[ip] = observation
+	}
 	a.mu.Unlock()
 	a.emit()
 	return flow, nil

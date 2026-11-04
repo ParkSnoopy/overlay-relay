@@ -109,6 +109,7 @@ func stunSuccess(transaction []byte, address netip.Addr, port uint16) []byte {
 
 // secureSide configures one agent of a secureEnv.
 type secureSide struct {
+	name   string
 	plain  bool // DisableEncryption
 	direct bool // offer a direct connection
 	nat    bool // drop UDP to everything but the STUN server, like a NAT that refuses hole punching
@@ -137,6 +138,7 @@ type secureEnv struct {
 
 func newSecureAgent(hub string, account account, side secureSide, stun string, tap *hubTap, states chan<- overlay.State, sink *fileSink) *overlayagent.Agent {
 	config := overlayagent.Config{
+		Name:              side.name,
 		Identity:          account.key,
 		DisableEncryption: side.plain,
 		Dial: func(ctx context.Context) (net.Conn, error) {
@@ -249,8 +251,7 @@ func TestRelayedFlowIsEncryptedByDefault(t *testing.T) {
 }
 
 func TestDirectFlowBypassesTheHub(t *testing.T) {
-	both := secureSide{direct: true}
-	env := startSecureEnv(t, both, both)
+	env := startSecureEnv(t, secureSide{direct: true, name: "DUMMY Alice laptop"}, secureSide{direct: true, name: "DUMMY Bob 기기"})
 	source, err := sendFromAlice(t, env, 2*secureFileSize)
 	if err != nil {
 		t.Fatal(err)
@@ -258,6 +259,22 @@ func TestDirectFlowBypassesTheHub(t *testing.T) {
 	requireSameFile(t, source, filepath.Join(env.bobSink.dir, "from-alice.bin"))
 	// Control traffic (hello, pings, the hand-off replies) is small. A relayed
 	// 2 MiB file would be far larger.
+	for _, side := range []struct {
+		states    <-chan overlay.State
+		own, peer string
+	}{
+		{env.aliceStates, "DUMMY Alice laptop", "DUMMY Bob 기기"}, {env.bobStates, "DUMMY Bob 기기", "DUMMY Alice laptop"},
+	} {
+		state := waitFor(t, side.states, func(state overlay.State) bool {
+			return len(state.Peers) == 1 && state.Peers[0].LastPath == overlay.PathDirect && state.Peers[0].DirectStatus == overlay.DirectSucceeded
+		})
+		if state.Name != side.own || state.Peers[0].Name != side.peer || !state.Peers[0].DirectAllowed {
+			t.Fatal("device name or direct eligibility lost", state)
+		}
+		waitFor(t, side.states, func(state overlay.State) bool {
+			return len(state.Peers) == 1 && state.Peers[0].DirectFlows == 0 && state.Peers[0].LastPath == overlay.PathDirect
+		})
+	}
 	const hubBudget = 32 << 10
 	for name, tap := range map[string]*hubTap{"alice": env.aliceTap, "bob": env.bobTap} {
 		seen := tap.snapshot()
@@ -294,7 +311,7 @@ func TestDevicePolicyClosesDirectFlowsAndRelaysBothDirections(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, env.bobStates, func(state overlay.State) bool {
-		return len(state.Peers) == 1 && state.Peers[0].DirectFlows == 0
+		return len(state.Peers) == 1 && state.Peers[0].DirectFlows == 0 && !state.Peers[0].DirectAllowed
 	})
 	_ = flow.SetReadDeadline(time.Now().Add(time.Second))
 	if _, err := flow.Read(make([]byte, 1)); err == nil {
@@ -352,6 +369,21 @@ func TestFailedDirectConnectionFallsBackToTheEncryptedRelay(t *testing.T) {
 	}
 }
 
+func TestFailedDirectStatusSurvivesRelayFlowClosure(t *testing.T) {
+	blocked := secureSide{direct: true, nat: true}
+	env := startSecureEnv(t, blocked, blocked)
+	for range 2 {
+		if _, err := sendFromAlice(t, env, 4096); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, states := range []<-chan overlay.State{env.aliceStates, env.bobStates} {
+		waitFor(t, states, func(state overlay.State) bool {
+			return len(state.Peers) == 1 && state.Peers[0].DirectAllowed && state.Peers[0].DirectStatus == overlay.DirectFailed && state.Peers[0].LastPath == overlay.PathRelay && state.Peers[0].DirectFlows == 0 && state.Peers[0].RelayFlows == 0
+		})
+	}
+}
+
 func TestOneSidedDirectOfferStaysOnTheEncryptedRelay(t *testing.T) {
 	env := startSecureEnv(t, secureSide{direct: true}, secureSide{})
 	source, err := sendFromAlice(t, env, secureFileSize)
@@ -359,6 +391,9 @@ func TestOneSidedDirectOfferStaysOnTheEncryptedRelay(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireSameFile(t, source, filepath.Join(env.bobSink.dir, "from-alice.bin"))
+	waitFor(t, env.aliceStates, func(state overlay.State) bool {
+		return len(state.Peers) == 1 && state.Peers[0].DirectAllowed && state.Peers[0].DirectStatus == overlay.DirectUnavailable && state.Peers[0].LastPath == overlay.PathRelay
+	})
 	seen := env.aliceTap.snapshot()
 	if len(seen) < secureFileSize || bytes.Contains(seen, plainMarker) {
 		t.Fatalf("the flow must be relayed and encrypted: hub carried %d bytes, plaintext=%t", len(seen), bytes.Contains(seen, plainMarker))

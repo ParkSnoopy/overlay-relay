@@ -61,6 +61,12 @@ pub const ERR_UNAUTHORIZED: &str = "unauthorized";
 /// Reason given for an unknown Hello kind.
 pub const ERR_INVALID_REQUEST: &str = "invalid request";
 
+/// Accepts an optional, single-line device name of at most 128 characters.
+#[must_use]
+pub fn valid_name(name: &str) -> bool {
+    name.trim() == name && name.chars().count() <= 128 && !name.chars().any(char::is_control)
+}
+
 /// First frame on every stream a client opens to the hub.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -71,6 +77,9 @@ pub struct Hello {
     pub kind: String,
     /// Hex-encoded uncompressed P-384 public key.
     pub public_key: String,
+    /// Control only: optional advertised device name. Empty uses the default.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub name: String,
     /// Expected destination device ID for an open; prevents address reuse races.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub peer_id: String,

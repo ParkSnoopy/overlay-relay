@@ -967,6 +967,60 @@ async fn control_replacement_and_idle_close() -> TestResult {
 }
 
 #[tokio::test]
+async fn advertised_names_are_authenticated_validated_and_resettable() -> TestResult {
+    let f = fixture(|_| {}).await?;
+    let (mut bob, original_bob) = register(f.address, "bob").await?;
+    await_peers(&mut bob, &[]).await?;
+    let mut hello = control_hello("alice");
+    hello.name = "DUMMY 내 노트북".to_owned();
+    let (mut alice, registered) = dial(f.address, &hello).await?;
+    ensure!(registered.ok, "custom-name registration failed");
+    ensure_eq!(registered.name, hello.name);
+    loop {
+        if let Event::Peers(peers) = next_event(&mut bob).await?
+            && peers.len() == 1
+            && peers[0].name == hello.name
+        {
+            ensure_eq!(peers[0].ip.as_str(), registered.ip.as_str());
+            ensure_eq!(peers[0].id.clone(), verifier_of("alice").to_hex());
+            break;
+        }
+    }
+    let too_long = "😀".repeat(129);
+    for invalid in [
+        " leading",
+        "trailing ",
+        "DUMMY\nspoof",
+        "DUMMY\u{85}spoof",
+        too_long.as_str(),
+    ] {
+        hello.name = invalid.to_owned();
+        let (_, rejected) = dial(f.address, &hello).await?;
+        ensure_eq!(rejected, Reply::failed(ERR_INVALID_REQUEST));
+    }
+    // An invalid registration must not replace the existing authenticated control.
+    write_frame(&mut alice, &Ping { ping: true }).await?;
+    while next_event(&mut alice).await? != Event::Pong(true) {}
+    hello.name = "😀".repeat(128);
+    let (mut renamed, renamed_reply) = dial(f.address, &hello).await?;
+    ensure_eq!(renamed_reply.name, hello.name);
+    ensure_eq!(renamed_reply.ip, registered.ip);
+    expect_closed(&mut alice).await?;
+    let (_reset, reset_reply) = register(f.address, "alice").await?;
+    ensure_eq!(reset_reply.name, name_of("alice"));
+    ensure_eq!(reset_reply.ip, registered.ip);
+    expect_closed(&mut renamed).await?;
+    let (_bob, bob_reply) = register(f.address, "bob").await?;
+    ensure_eq!(
+        bob_reply.name,
+        original_bob.name,
+        "another device's name is unchanged"
+    );
+    ensure_eq!(bob_reply.ip, original_bob.ip);
+    Ok(())
+}
+
+#[tokio::test]
 async fn addresses_and_identities_survive_a_restart() -> TestResult {
     let f = fixture(|_| {}).await?;
     let (_alice, alice) = register(f.address, "alice").await?;

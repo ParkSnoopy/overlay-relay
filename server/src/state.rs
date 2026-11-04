@@ -206,6 +206,17 @@ impl State {
         self.accounts.get(verifier).map(|entry| entry.ip)
     }
 
+    /// Updates only the authenticated device's transient advertised name.
+    pub fn set_name(&mut self, verifier: &Verifier, name: &str) -> Option<String> {
+        let entry = self.accounts.get_mut(verifier)?;
+        entry.name = if name.is_empty() {
+            display_name(verifier)
+        } else {
+            name.to_owned()
+        };
+        Some(entry.name.clone())
+    }
+
     /// Lists every other broadcasting account, sorted by overlay address.
     #[must_use]
     pub fn snapshot(&self, self_verifier: Verifier) -> Vec<Peer> {

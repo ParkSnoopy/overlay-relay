@@ -21,7 +21,7 @@ use tracing::debug;
 use crate::{
     frame::{read_frame, send_frame},
     hub::{Shared, persist, unix_now},
-    protocol::{Event, Ping, Reply},
+    protocol::{ERR_INVALID_REQUEST, Event, Ping, Reply, valid_name},
     state::Requester,
     verifier::Verifier,
 };
@@ -45,16 +45,27 @@ pub struct ControlHandle {
 /// Serves one registered control stream until it ends.
 pub async fn serve(
     shared: &Shared,
-    stream: TcpStream,
-    requester: Requester,
+    mut stream: TcpStream,
+    mut requester: Requester,
+    name: &str,
     session: CancellationToken,
 ) {
+    if !valid_name(name) {
+        send_frame(&mut stream, &Reply::failed(ERR_INVALID_REQUEST))
+            .await
+            .ok();
+        return;
+    }
     let (reader, mut writer) = stream.into_split();
     let (outbound, events) = mpsc::channel(EVENT_QUEUE);
     let close = session.child_token();
     let dirty = Arc::new(Notify::new());
     let (generation, replaced) = {
         let mut state = shared.state.lock().await;
+        let Some(name) = state.set_name(&requester.verifier, name) else {
+            return;
+        };
+        requester.name = name;
         let generation = state.next_serial();
         let handle = ControlHandle {
             generation,

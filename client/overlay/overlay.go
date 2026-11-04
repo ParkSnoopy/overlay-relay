@@ -19,6 +19,9 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -69,6 +72,7 @@ type Hello struct {
 	Version   int    `json:"version"`
 	Kind      string `json:"kind"`
 	PublicKey string `json:"public_key"`
+	Name      string `json:"name,omitempty"`  // control: advertised device name
 	Proto     string `json:"proto,omitempty"` // open
 	Dst       string `json:"dst,omitempty"`   // open: destination overlay IP
 	Port      uint16 `json:"port,omitempty"`  // open: destination port
@@ -137,6 +141,34 @@ func ValidateRelayOnly(ids []string) error {
 	return nil
 }
 
+// ValidateName accepts an optional, single-line advertised device name.
+// Empty selects the hub's identity-derived default.
+func ValidateName(name string) error {
+	if !utf8.ValidString(name) || utf8.RuneCountInString(name) > 128 || strings.TrimSpace(name) != name || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return errors.New("device name must be at most 128 characters without control characters or surrounding whitespace")
+	}
+	return nil
+}
+
+// DirectStatus describes the latest local direct connection attempt, not policy.
+type DirectStatus string
+
+const (
+	DirectConnecting  DirectStatus = "connecting"
+	DirectSucceeded   DirectStatus = "succeeded"
+	DirectFailed      DirectStatus = "failed"
+	DirectUnavailable DirectStatus = "unavailable"
+	DirectCanceled    DirectStatus = "canceled"
+)
+
+// FlowPath is the transport of the last established flow.
+type FlowPath string
+
+const (
+	PathDirect FlowPath = "direct"
+	PathRelay  FlowPath = "relay"
+)
+
 // Peer is one other broadcasting account.
 type Peer struct {
 	// ID is the SHA-256 digest of the device's persistent public key.
@@ -146,6 +178,10 @@ type Peer struct {
 	// Flow counts describe established local flows, never direct eligibility.
 	DirectFlows int `json:"directFlows"`
 	RelayFlows  int `json:"relayFlows"`
+	// These are local observations. The hub's peer table is not their authority.
+	DirectAllowed bool         `json:"directAllowed"`
+	DirectStatus  DirectStatus `json:"directStatus,omitempty"`
+	LastPath      FlowPath     `json:"lastPath,omitempty"`
 }
 
 // Incoming asks the destination agent to open an accept stream for a flow.

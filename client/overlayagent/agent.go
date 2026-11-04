@@ -34,6 +34,8 @@ const (
 
 // Config wires an Agent to its platform.
 type Config struct {
+	// Name is this device's advertised name. Empty uses the hub's default.
+	Name string
 	// Identity is the persistent private key enrolled with the hub.
 	Identity *ecdsa.PrivateKey
 	// Dial opens one stream to the hub through an authenticated VPN session.
@@ -111,6 +113,7 @@ type Agent struct {
 	directBlocked map[netip.Addr]time.Time
 	relayOnly     map[string]bool
 	active        map[*peerFlow]struct{}
+	observations  map[netip.Addr]peerObservation
 
 	flows    sync.WaitGroup
 	inflight chan struct{}
@@ -132,7 +135,7 @@ func New(cfg Config) *Agent {
 		ready:       make(chan netip.Addr, 1),
 		inflight:    make(chan struct{}, maxIncoming),
 	}
-	a.identityErr = errors.Join(a.identityErr, a.SetRelayOnly(cfg.RelayOnly))
+	a.identityErr = errors.Join(a.identityErr, a.SetRelayOnly(cfg.RelayOnly), overlay.ValidateName(cfg.Name))
 	if !cfg.DisableEncryption {
 		var err error
 		a.identity, err = newIdentity()
@@ -206,7 +209,7 @@ func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
 		return false, "overlay hub is unreachable"
 	}
 	defer closeConn(conn)
-	reply, err := a.handshake(ctx, conn, &overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl})
+	reply, err := a.handshake(ctx, conn, &overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl, Name: a.cfg.Name})
 	if err != nil {
 		slog.Debug("Overlay control handshake failed")
 		return false, "overlay hub is unreachable"
@@ -329,6 +332,7 @@ func (a *Agent) disconnected(reason string) {
 	a.mu.Lock()
 	a.connected, a.reason = false, reason
 	a.peers, a.peerSet = nil, map[netip.Addr]struct{}{}
+	a.observations, a.directBlocked = nil, nil
 	a.mu.Unlock()
 	a.emit()
 }
@@ -349,6 +353,12 @@ func (a *Agent) setPeers(peers []overlay.Peer) {
 	}
 	a.mu.Lock()
 	a.peers, a.peerSet = kept, set
+	for ip, observation := range a.observations {
+		if _, exists := set[ip]; !exists || a.peerIDLocked(ip) != observation.id {
+			delete(a.observations, ip)
+			delete(a.directBlocked, ip)
+		}
+	}
 	a.mu.Unlock()
 	a.emit()
 }
@@ -373,6 +383,13 @@ func (a *Agent) emit() {
 	for i := range state.Peers {
 		peer := &state.Peers[i]
 		peer.DirectFlows, peer.RelayFlows = 0, 0
+		peer.DirectAllowed = a.cfg.Direct != nil && overlay.ValidPeerID(peer.ID) && !a.relayOnlyLocked(peer.ID)
+		peer.DirectStatus, peer.LastPath = "", ""
+		if ip, err := netip.ParseAddr(peer.IP); err == nil {
+			if observation := a.observations[ip]; observation.id == peer.ID {
+				peer.DirectStatus, peer.LastPath = observation.status, observation.path
+			}
+		}
 		for flow := range a.active {
 			if flow.peerID == peer.ID && flow.ip.String() == peer.IP {
 				if flow.direct {

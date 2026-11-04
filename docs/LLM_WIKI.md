@@ -58,7 +58,7 @@ Every hub stream must traverse an authenticated VPN. The challenge authenticates
 The hub keeps every key it has verified in `ips.json` in its data directory: verifier hex mapped to an object with the peer's `ip` and `seen` (Unix seconds of its last authentication or disconnect). No operator writes this file. The hub rewrites it atomically with mode `0600`.
 
 - At most `4096` peers. When the table is full, a new key takes over the address of the peer with the oldest `seen` that has no control stream and no flow. When every peer is in use, the new key is refused with `unauthorized`.
-- The display name of a peer is `peer-` followed by the first 8 hex digits of its verifier.
+- The default display name of a peer is `peer-` followed by the first 8 hex digits of its verifier. An authenticated control Hello may advertise its own name, up to 128 Unicode characters without control characters or surrounding whitespace. Empty or absent restores the default. Names are transient, never written to `ips.json`, and do not change identity or address.
 - A file written by an older hub (verifier hex mapped to a bare address) loads, and each entry counts as seen at load time. A corrupt file stops the hub rather than renumbering peers.
 
 ## 5. Addresses
@@ -91,6 +91,7 @@ All field names are lowercase JSON keys.
 | `version` | integer | all | Must be `2`. Otherwise the hub closes the stream silently. |
 | `kind` | string | all | `"control"`, `"open"` or `"accept"`. Anything else gets reply `invalid request`. |
 | `public_key` | string | all | Hex-encoded uncompressed P-384 public key (section 4). |
+| `name` | string | control | Optional advertised name for the authenticated device. Empty uses the identity-derived default; invalid names receive `invalid request` without replacing an existing control. |
 | `proto` | string | open | `"tcp"` or `"udp"`. |
 | `dst` | string | open | Destination overlay IPv4 text, for example `"10.77.0.2"`. |
 | `port` | integer | open | Destination port, `1..65535`. `0` or absent is refused. |
@@ -346,6 +347,14 @@ Then: dial the hub, send the open Hello, read the reply. On `ok:true` the stream
 3. Expect `Reply{ok:false, error:"unauthorized"}`. Route the probe through the authenticated VPN.
 
 Use it as a health check. Any other reply means a misconfigured hub or an unexpected source.
+
+### 13.7 Local path observations
+
+The reference agent projects `DirectAllowed` from this session's global direct setting and per-device deny list, not from reachability probes.
+`DirectStatus` describes the latest actual direct attempt: `connecting`, `succeeded`, `failed`, `unavailable` or `canceled`.
+`LastPath` records only an established `direct` or `relay` transport; live `DirectFlows` and `RelayFlows` remain separate current-flow counts.
+Retain failed-attempt evidence through relay fallback and flow closure, but clear observations on peer departure, identity replacement and control disconnection.
+These are local fields, not part of hub peer snapshots or evidence that a remote device permits direct connections.
 
 ## 14. Building a client in another language
 
