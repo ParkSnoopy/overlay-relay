@@ -60,12 +60,14 @@ type direct struct {
 	probes   map[stunTransaction]chan netip.AddrPort
 }
 
-// expectation is a flow whose QUIC connection the destination waits for.
+// expectation owns a flow's hole punching and, for incoming flows, its QUIC accept.
 type expectation struct {
 	owner       *direct
 	id          string
 	fingerprint string
 	arrived     chan *quic.Conn
+	endpoint    netip.AddrPort // protected by owner.mu; may learn a peer-facing NAT port
+	observed    chan struct{}
 }
 
 // startDirect opens the socket and starts serving direct connections until ctx ends.
@@ -134,7 +136,7 @@ func (d *direct) fingerprintFor(id string) (string, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	exp, ok := d.expected[id]
-	if !ok {
+	if !ok || exp.fingerprint == "" {
 		return "", false
 	}
 	return exp.fingerprint, true
@@ -166,9 +168,12 @@ func (d *direct) acceptLoop(ctx context.Context) {
 func (d *direct) readNonQUIC(ctx context.Context) {
 	buffer := make([]byte, 1500)
 	for {
-		n, _, err := d.transport.ReadNonQUICPacket(ctx, buffer)
+		n, from, err := d.transport.ReadNonQUICPacket(ctx, buffer)
 		if err != nil {
 			return
+		}
+		if d.observePunch(buffer[:n], from) {
+			continue
 		}
 		tx, endpoint, err := parseSTUN(buffer[:n])
 		if err != nil {
@@ -238,25 +243,15 @@ func unmap(endpoint netip.AddrPort) netip.AddrPort {
 	return netip.AddrPortFrom(endpoint.Addr().Unmap(), endpoint.Port())
 }
 
-// punch sends packets toward the peer until ctx ends, so the local NAT lets the
-// peer's packets in.
-func (d *direct) punch(ctx context.Context, remote net.Addr) {
-	ticker := time.NewTicker(punchEvery)
-	defer ticker.Stop()
-	for {
-		_, _ = d.transport.WriteTo(punchPacket, remote)
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
 // expect registers the flow id before the accept is sent, so the requester
 // can never reach the listener ahead of the registration.
-func (d *direct) expect(id, fingerprint string) *expectation {
-	exp := &expectation{owner: d, id: id, fingerprint: fingerprint, arrived: make(chan *quic.Conn, 1)}
+func (d *direct) expect(id, fingerprint, endpoint string) *expectation {
+	address, err := netip.ParseAddrPort(endpoint)
+	if err != nil {
+		return nil
+	}
+	exp := &expectation{owner: d, id: id, fingerprint: fingerprint, arrived: make(chan *quic.Conn, 1),
+		endpoint: unmap(address), observed: make(chan struct{}, 1)}
 	d.mu.Lock()
 	d.expected[id] = exp
 	d.mu.Unlock()
@@ -281,13 +276,12 @@ func (e *expectation) cancel() {
 // await waits for the requester's QUIC connection and its first stream.
 func (e *expectation) await(ctx context.Context, reply *overlay.Reply) (net.Conn, error) {
 	d := e.owner
-	remote, err := udpAddress(reply.Endpoint)
-	if err != nil {
+	if _, err := udpAddress(reply.Endpoint); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
-	go d.punch(ctx, remote)
+	go e.punch(ctx)
 	select {
 	case conn := <-e.arrived:
 		stream, err := conn.AcceptStream(ctx)
@@ -308,13 +302,16 @@ func (e *expectation) await(ctx context.Context, reply *overlay.Reply) (net.Conn
 
 // dial connects to the destination's endpoint and opens the flow's stream.
 func (d *direct) dial(ctx context.Context, reply *overlay.Reply) (net.Conn, error) {
-	remote, err := udpAddress(reply.Endpoint)
-	if err != nil {
-		return nil, err
+	// An outbound discovery must not authorize an incoming QUIC handshake.
+	exp := d.expect(reply.ID, "", reply.Endpoint)
+	if exp == nil {
+		return nil, errNoEndpoint
 	}
+	defer exp.cancel()
 	ctx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
-	go d.punch(ctx, remote)
+	go exp.punch(ctx)
+	remote := exp.peerEndpoint(ctx)
 	clientConfig := d.identity.clientConfig(reply.Fingerprint, reply.ID, directALPN)
 	conn, err := d.transport.Dial(ctx, remote, clientConfig, d.config)
 	if err != nil {

@@ -127,5 +127,5 @@ func (a *Agent) expectDirect(in *overlay.Incoming) *expectation {
 	if d == nil || !a.encrypted() || in.Fingerprint == "" || in.Endpoint == "" {
 		return nil
 	}
-	return d.expect(in.ID, in.Fingerprint)
+	return d.expect(in.ID, in.Fingerprint, in.Endpoint)
 }

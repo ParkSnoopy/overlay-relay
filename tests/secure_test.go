@@ -64,6 +64,11 @@ func startSTUN(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return serveSTUN(t, socket)
+}
+
+func serveSTUN(t *testing.T, socket net.PacketConn) string {
+	t.Helper()
 	t.Cleanup(func() { _ = socket.Close() })
 	go func() {
 		buffer := make([]byte, 1500)
@@ -109,10 +114,11 @@ func stunSuccess(transaction []byte, address netip.Addr, port uint16) []byte {
 
 // secureSide configures one agent of a secureEnv.
 type secureSide struct {
-	name   string
-	plain  bool // DisableEncryption
-	direct bool // offer a direct connection
-	nat    bool // drop UDP to everything but the STUN server, like a NAT that refuses hole punching
+	name      string
+	plain     bool // DisableEncryption
+	direct    bool // offer a direct connection
+	nat       bool // drop UDP to everything but the STUN server, like a NAT that refuses hole punching
+	transport *overlayagent.DirectOptions
 }
 
 // natConn drops datagrams to any address except the STUN server.
@@ -149,9 +155,13 @@ func newSecureAgent(hub string, account account, side secureSide, stun string, t
 			}
 			return &tappedConn{Conn: conn, tap: tap}, nil
 		},
-		DialLocal: func(ctx context.Context, _ string, _ uint16, _ netip.Addr) (net.Conn, error) {
+		DialLocal: func(ctx context.Context, proto string, _ uint16, _ netip.Addr) (net.Conn, error) {
 			var dialer net.Dialer
-			return dialer.DialContext(ctx, "tcp", sink.tcp.Addr().String())
+			address := sink.tcp.Addr().String()
+			if proto == overlay.ProtoUDP {
+				address = sink.udp.LocalAddr().String()
+			}
+			return dialer.DialContext(ctx, proto, address)
 		},
 		OnState: func(state overlay.State) {
 			select {
@@ -173,6 +183,9 @@ func newSecureAgent(hub string, account account, side secureSide, stun string, t
 			},
 			Timeout: 500 * time.Millisecond,
 		}
+	}
+	if side.transport != nil {
+		config.Direct = side.transport
 	}
 	return overlayagent.New(config)
 }

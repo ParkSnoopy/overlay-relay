@@ -216,10 +216,15 @@ The reference agent offers a direct connection when `Config.Direct` is set and e
 1. At start, the agent opens one UDP socket (`DirectOptions.ListenPacket`, default all addresses) and serves QUIC on it. The socket should bypass the VPN.
 2. For every open and accept it asks a STUN server (RFC 5389 Binding request, over that same socket, retried every 500 ms for up to 3 s) for its public UDP address. It sends it as `endpoint`. If no STUN answer arrives, it sends no endpoint and the flow stays on the relay.
 3. If both sides offered an endpoint, the hub sends each side `Reply{ok:true, secure:true, direct:true, id, fingerprint, endpoint}` and closes both streams. It relays nothing.
-4. The destination registers the `id` before it sends its accept, so the requester cannot arrive early. Both sides send a short packet toward the other's endpoint every 200 ms to open their NAT.
-5. The requester dials the destination's endpoint with QUIC. ALPN is `overlay-relay/direct-1`, the TLS server name is the flow `id`, and both sides pin the fingerprint as in section 8.6. The destination picks the pinned fingerprint by that server name and refuses an unknown name.
+4. The destination registers the `id` before it sends its accept, so the requester cannot arrive early. Both sides send a hole-punch packet toward the other's endpoint every 200 ms. Its bytes are `00 6f 72 70 31` (`\x00orp1`) followed by the flow `id` as 32 ASCII hex digits. A receiver accepts a port hint only for a currently expected flow and the IP already offered through the hub; the UDP source port may replace the STUN-reported port. Subsequent punches target that observed endpoint. A legacy five-byte packet without an ID only wakes discovery at the exact offered IP and port. Unknown flows, other IPs and malformed packets cannot redirect a flow or cause a reply.
+5. The requester allows `min(1 s, DirectOptions.Timeout / 2)` within the overall direct timeout for a punch to reveal the peer-facing NAT port, then dials the observed endpoint with QUIC. If no punch arrives it still tries the original STUN endpoint, since a network may filter punch packets while allowing QUIC. ALPN is `overlay-relay/direct-1`, the TLS server name is the flow `id`, and both sides pin the fingerprint as in section 8.6. The destination picks the pinned fingerprint by that server name and refuses an unknown name. Outbound endpoint discovery alone never authorizes an incoming QUIC handshake. Port hints are not authentication and never carry application data.
 6. The requester opens one bidirectional stream and writes a single byte `0x01` so the destination can accept it. After that the stream carries the flow bytes exactly as a relayed flow would (compression, if enabled, sits on top).
 7. If the connection does not come up within `DirectOptions.Timeout` (default 10 s), the direct attempt fails on both sides. The requester then opens the flow again without an endpoint, so the hub relays it (section 8.4), and it offers no endpoint to that peer for five minutes. The destination sees the retry as a new request.
+
+Peer-reflexive port discovery can traverse a symmetric NAT when the other peer's NAT admits its probe.
+It cannot guarantee traversal when both NATs use endpoint-dependent mappings and strict filtering, when UDP is blocked, or when required NAT hairpinning is unavailable; those flows retain encrypted relay fallback.
+Both agents need flow-tagged punches to discover changed ports.
+The hub's version-2 frames are unchanged.
 
 ### 8.4 Relay mode
 
