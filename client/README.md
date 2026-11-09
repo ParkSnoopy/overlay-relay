@@ -103,7 +103,7 @@ Every agent makes a self-signed flow certificate when it is created. It sends th
 - An agent with encryption on refuses a peer that cannot encrypt: `Outbound` returns an error and an incoming flow is dropped. It never downgrades to plaintext.
 - Both peers must agree. Run the same setting on both sides of a flow, or leave the default.
 
-Direct connections are off by default. Set `Config.Direct` and two agents that both enable it connect to each other over the internet with QUIC, and the hub relays nothing:
+Direct links are off by default. Set `Config.Direct` and two agents that both enable it connect to each other over the internet, so later flows bypass the hub:
 
 ```go
 cfg.Direct = &overlayagent.DirectOptions{
@@ -114,11 +114,11 @@ cfg.Direct = &overlayagent.DirectOptions{
 }
 ```
 
-- The agent asks the STUN server, over the socket the QUIC connection will use, for its public UDP endpoint. Query it from outside the VPN, or the hub-side address you learn is not reachable.
-- Both peers hole-punch their NAT and connect. The QUIC handshake pins the same certificate fingerprints, so the connection is authenticated and encrypted.
-- If only one side enables `Direct`, or an agent cannot learn its endpoint, the flow stays on the encrypted relay.
-- Some NATs and firewalls refuse hole punching. When a direct connection does not come up, `Outbound` retries the flow once on the encrypted relay, and the destination serves it there. The peer is then not offered a direct connection for five minutes. The failed attempt delays the first flow by up to the timeout.
-- `DirectOptions.Timeout` bounds the connection attempt (default 10 seconds).
+- The agents negotiate over an encrypted relayed flow and try three methods in turn: Pion WebRTC (ICE with a data channel), Pion ICE with QUIC, and go-libp2p over QUIC. `DirectOptions.Methods` changes the list or order.
+- Every flow starts on the relay. The first one starts the negotiation in the background; flows opened after the link is up use it.
+- Each method pins the same certificate fingerprints, so the link is authenticated and encrypted. STUN queries run over the sockets from `ListenPacket`; use sockets that bypass the VPN.
+- If only one side enables `Direct`, or no method connects, flows stay on the encrypted relay and the peer is not offered a link again for five minutes. No TURN relay is used.
+- `DirectOptions.Timeout` bounds each method (default 10 seconds).
 
 ## Account identities
 

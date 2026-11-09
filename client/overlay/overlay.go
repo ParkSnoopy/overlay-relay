@@ -47,6 +47,10 @@ const (
 	UsableFrame = MaxFrame - SafetySpace
 	// UsableDatagram is the largest payload a writer emits as one datagram record.
 	UsableDatagram = MaxDatagram - SafetySpace
+	// LinkPort is the overlay TCP port reserved for agent-to-agent direct link
+	// negotiation. The destination agent answers it itself, so an incoming flow
+	// to this port never reaches the local service dialer.
+	LinkPort uint16 = 65535
 )
 
 // CIDR is the overlay address space. Network and broadcast addresses are never assigned.
@@ -81,8 +85,8 @@ type Hello struct {
 	// Fingerprint is the SHA-256 of the sender's flow certificate, as 64 hex
 	// digits. Sending it offers an end-to-end encrypted flow (open, accept).
 	Fingerprint string `json:"fingerprint,omitempty"`
-	// Endpoint is the sender's public UDP address, ip:port. Sending it with a
-	// fingerprint offers a direct connection (open, accept).
+	// Endpoint is reserved. The hub still pairs two offers that carry it, but
+	// agents negotiate direct links through LinkPort and never send it.
 	Endpoint string `json:"endpoint,omitempty"`
 }
 

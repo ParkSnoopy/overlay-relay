@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/pion/logging"
-	"github.com/pion/transport/v4/vnet"
+	"github.com/pion/transport/v5/vnet"
 
 	"github.com/ParkSnoopy/overlay-relay/client/overlay"
 	"github.com/ParkSnoopy/overlay-relay/client/overlayagent"
@@ -62,7 +62,7 @@ func directNetwork(t *testing.T, nats [2]vnet.NATType, filter vnet.ChunkFilter) 
 			t.Fatal(err)
 		}
 		options[i] = &overlayagent.DirectOptions{
-			STUNServers: []string{stun}, Timeout: 2 * time.Second,
+			STUNServers: []string{stun}, Timeout: 2 * time.Second, Net: nic,
 			ListenPacket: func(context.Context) (net.PacketConn, error) {
 				return nic.ListenPacket("udp4", "0.0.0.0:0")
 			},
@@ -85,8 +85,28 @@ func TestDirectThroughNAT(t *testing.T) {
 			nat := vnet.NATType{MappingBehavior: vnet.EndpointIndependent, FilteringBehavior: filtering}
 			options := directNetwork(t, [2]vnet.NATType{nat, nat}, nil)
 			env := startSecureEnv(t, secureSide{transport: options[0]}, secureSide{transport: options[1]})
+			establishLink(t, env)
 			for _, proto := range []string{overlay.ProtoTCP, overlay.ProtoUDP} {
 				transferDirect(t, env, false, proto)
+			}
+		})
+	}
+}
+
+// Each method must bring up a link by itself, or the later ones would hide a broken earlier one.
+func TestDirectEachMethodAlone(t *testing.T) {
+	for _, method := range []string{"webrtc", "ice", "libp2p"} {
+		t.Run(method, func(t *testing.T) {
+			nat := vnet.NATType{MappingBehavior: vnet.EndpointIndependent, FilteringBehavior: vnet.EndpointAddrPortDependent}
+			options := directNetwork(t, [2]vnet.NATType{nat, nat}, nil)
+			for _, option := range options {
+				option.Methods = []string{method}
+			}
+			env := startSecureEnv(t, secureSide{transport: options[0]}, secureSide{transport: options[1]})
+			establishLink(t, env)
+			for _, proto := range []string{overlay.ProtoTCP, overlay.ProtoUDP} {
+				transferDirect(t, env, false, proto)
+				transferDirect(t, env, true, proto)
 			}
 		})
 	}
@@ -98,6 +118,7 @@ func TestDirectWithChangingPeerPort(t *testing.T) {
 		{MappingBehavior: vnet.EndpointAddrPortDependent, FilteringBehavior: vnet.EndpointAddrPortDependent},
 	}, nil)
 	env := startSecureEnv(t, secureSide{transport: options[0]}, secureSide{transport: options[1]})
+	establishLink(t, env)
 	for _, reverse := range []bool{false, true} {
 		for _, proto := range []string{overlay.ProtoTCP, overlay.ProtoUDP} {
 			transferDirect(t, env, reverse, proto)
@@ -105,6 +126,21 @@ func TestDirectWithChangingPeerPort(t *testing.T) {
 	}
 }
 
+// establishLink moves one small file over the relay, which starts the link
+// negotiation, and waits until both agents report an established link.
+func establishLink(t *testing.T, env *secureEnv) {
+	t.Helper()
+	if _, err := sendFromAlice(t, env, 4096); err != nil {
+		t.Fatal(err)
+	}
+	for _, states := range []<-chan overlay.State{env.aliceStates, env.bobStates} {
+		waitFor(t, states, func(state overlay.State) bool {
+			return len(state.Peers) == 1 && state.Peers[0].DirectStatus == overlay.DirectSucceeded
+		})
+	}
+}
+
+// transferDirect sends one file over an established link and checks that the hub did not carry it.
 func transferDirect(t *testing.T, env *secureEnv, reverse bool, proto string) {
 	t.Helper()
 	sender, target, states, sink, tap := env.alice, env.bobIP, env.aliceStates, env.bobSink, env.aliceTap
@@ -122,10 +158,10 @@ func transferDirect(t *testing.T, env *secureEnv, reverse bool, proto string) {
 	}
 	requireSameFile(t, source, filepath.Join(sink.dir, name))
 	state := waitFor(t, states, func(state overlay.State) bool {
-		return len(state.Peers) == 1 && (state.Peers[0].DirectStatus == overlay.DirectSucceeded || state.Peers[0].DirectStatus == overlay.DirectFailed)
+		return len(state.Peers) == 1 && state.Peers[0].LastPath == overlay.PathDirect
 	})
 	if state.Peers[0].DirectStatus != overlay.DirectSucceeded {
-		t.Fatalf("reachable peer uses a new NAT port, but direct failed: %+v", state.Peers[0])
+		t.Fatalf("the link was reported down: %+v", state.Peers[0])
 	}
 	if size := len(tap.snapshot()) - before; size > 32<<10 {
 		t.Fatalf("direct payload went through the hub: %d bytes", size)
@@ -139,17 +175,7 @@ func TestDirectThroughPacketLoss(t *testing.T) {
 		return packets.Add(1)%7 != 0
 	})
 	env := startSecureEnv(t, secureSide{transport: options[0]}, secureSide{transport: options[1]})
-	for _, proto := range []string{overlay.ProtoTCP, overlay.ProtoUDP} {
-		transferDirect(t, env, false, proto)
-	}
-}
-
-func TestDirectWithoutPunchPackets(t *testing.T) {
-	nat := vnet.NATType{MappingBehavior: vnet.EndpointIndependent, FilteringBehavior: vnet.EndpointIndependent}
-	options := directNetwork(t, [2]vnet.NATType{nat, nat}, func(chunk vnet.Chunk) bool {
-		return !bytes.HasPrefix(chunk.UserData(), []byte{0, 'o', 'r', 'p', '1'})
-	})
-	env := startSecureEnv(t, secureSide{transport: options[0]}, secureSide{transport: options[1]})
+	establishLink(t, env)
 	for _, proto := range []string{overlay.ProtoTCP, overlay.ProtoUDP} {
 		transferDirect(t, env, false, proto)
 	}
@@ -164,11 +190,12 @@ func TestUntraversableNATUsesEncryptedRelay(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireSameFile(t, source, filepath.Join(env.bobSink.dir, "from-alice.bin"))
+	// Every method needs a few seconds to time out before the failure is reported.
 	state := waitFor(t, env.aliceStates, func(state overlay.State) bool {
-		return len(state.Peers) == 1 && state.Peers[0].LastPath == overlay.PathRelay
+		return len(state.Peers) == 1 && state.Peers[0].LastPath == overlay.PathRelay && state.Peers[0].DirectStatus == overlay.DirectFailed
 	})
-	if state.Peers[0].DirectStatus != overlay.DirectFailed {
-		t.Fatal("failed NAT traversal was not reported", state)
+	if state.Peers[0].DirectFlows != 0 {
+		t.Fatal("a failed traversal must leave no direct flow", state)
 	}
 	seen := env.aliceTap.snapshot()
 	if len(seen) < secureFileSize || bytes.Contains(seen, plainMarker) {

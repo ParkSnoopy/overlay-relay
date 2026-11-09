@@ -51,31 +51,14 @@ type Config struct {
 	// off. Both peers of a flow must enable it, because the hub relays bytes unchanged.
 	Compression bool
 	// DisableEncryption turns off end-to-end encryption. By default every flow
-	// is encrypted between the two agents with TLS 1.3 (or QUIC on a direct
-	// connection), and a flow whose peer does not support encryption fails.
+	// is encrypted between the two agents with TLS 1.3, and a flow whose peer
+	// does not support encryption fails.
 	DisableEncryption bool
 	// Direct lets flows bypass the hub when both peers enable it. Nil (the
 	// default) keeps every flow on the relay.
 	Direct *DirectOptions
 	// RelayOnly lists device IDs that must never use direct transport.
 	RelayOnly []string
-}
-
-// DirectOptions configures direct connections. Two peers connect directly
-// over the internet with QUIC when both enable it, and the hub then relays
-// nothing. It needs encryption. NAT can refuse the direct path, so a flow whose
-// direct connection fails is retried once on the relay, and that peer is not
-// offered a direct connection again for a few minutes.
-type DirectOptions struct {
-	// STUNServers lists host:port STUN servers, asked from outside the VPN to
-	// learn the public UDP endpoint. At least one is required.
-	STUNServers []string
-	// ListenPacket opens the UDP socket for direct connections. Return a socket
-	// that bypasses the VPN. Nil listens on all addresses, any port.
-	ListenPacket func(ctx context.Context) (net.PacketConn, error)
-	// Timeout bounds how long a direct connection may take to come up.
-	// Zero means ten seconds.
-	Timeout time.Duration
 }
 
 type timing struct {
@@ -114,13 +97,17 @@ type Agent struct {
 	relayOnly     map[string]bool
 	active        map[*peerFlow]struct{}
 	observations  map[netip.Addr]peerObservation
+	// links holds the live direct link per peer; linking holds negotiations in progress.
+	links   map[netip.Addr]*peerLink
+	linking map[netip.Addr]*linkAttempt
+	runCtx  context.Context
 
 	flows    sync.WaitGroup
 	inflight chan struct{}
 
 	identity    *identity // flow certificate; nil when encryption is off or unavailable
 	identityErr error
-	direct      atomic.Pointer[direct]
+	direct      atomic.Pointer[directState]
 }
 
 // New builds an idle agent using its enrolled identity.
@@ -171,12 +158,16 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	a.started = true
 	runCtx, cancel := context.WithCancel(ctx)
+	a.runCtx = runCtx
 	a.mu.Unlock()
 	defer func() {
 		cancel()
 		a.flows.Wait()
+		if d := a.direct.Load(); d != nil {
+			d.close()
+		}
 	}()
-	a.startDirect(runCtx)
+	a.startDirect()
 
 	a.emit()
 	delay := a.timing.backoffMin
@@ -334,6 +325,7 @@ func (a *Agent) disconnected(reason string) {
 	a.peers, a.peerSet = nil, map[netip.Addr]struct{}{}
 	a.observations, a.directBlocked = nil, nil
 	a.mu.Unlock()
+	a.closeLinks(nil)
 	a.emit()
 }
 
@@ -360,6 +352,12 @@ func (a *Agent) setPeers(peers []overlay.Peer) {
 		}
 	}
 	a.mu.Unlock()
+	ids := make(map[netip.Addr]string, len(kept))
+	for _, peer := range kept {
+		ip, _ := netip.ParseAddr(peer.IP)
+		ids[ip] = peer.ID
+	}
+	a.closeLinks(func(ip netip.Addr, id string) bool { return ids[ip] == id })
 	a.emit()
 }
 

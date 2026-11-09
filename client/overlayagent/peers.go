@@ -29,6 +29,10 @@ func (a *Agent) SetRelayOnly(ids []string) error {
 		}
 	}
 	a.mu.Unlock()
+	a.closeLinks(func(_ netip.Addr, id string) bool {
+		_, denied := policy[id]
+		return !denied
+	})
 	for _, flow := range closing {
 		closeConn(flow)
 	}

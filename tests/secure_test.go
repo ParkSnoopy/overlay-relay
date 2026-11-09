@@ -265,6 +265,7 @@ func TestRelayedFlowIsEncryptedByDefault(t *testing.T) {
 
 func TestDirectFlowBypassesTheHub(t *testing.T) {
 	env := startSecureEnv(t, secureSide{direct: true, name: "DUMMY Alice laptop"}, secureSide{direct: true, name: "DUMMY Bob 기기"})
+	establishLink(t, env)
 	source, err := sendFromAlice(t, env, 2*secureFileSize)
 	if err != nil {
 		t.Fatal(err)
@@ -303,6 +304,7 @@ func TestDirectFlowBypassesTheHub(t *testing.T) {
 func TestDevicePolicyClosesDirectFlowsAndRelaysBothDirections(t *testing.T) {
 	both := secureSide{direct: true}
 	env := startSecureEnv(t, both, both)
+	establishLink(t, env)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	flow, err := env.alice.Outbound(ctx, overlay.ProtoTCP, netip.AddrPortFrom(env.bobIP, 7000))
@@ -354,6 +356,15 @@ func TestDevicePolicyClosesDirectFlowsAndRelaysBothDirections(t *testing.T) {
 	if err := env.bob.SetRelayOnly(nil); err != nil {
 		t.Fatal(err)
 	}
+	// A relayed flow starts a new negotiation; wait for the link before the next flow.
+	trigger, err := env.bob.Outbound(ctx, overlay.ProtoTCP, netip.AddrPortFrom(env.aliceIP, 7000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = trigger.Close()
+	waitFor(t, env.bobStates, func(state overlay.State) bool {
+		return len(state.Peers) == 1 && state.Peers[0].DirectStatus == overlay.DirectSucceeded
+	})
 	restored, err := env.bob.Outbound(ctx, overlay.ProtoTCP, netip.AddrPortFrom(env.aliceIP, 7000))
 	if err != nil {
 		t.Fatal(err)

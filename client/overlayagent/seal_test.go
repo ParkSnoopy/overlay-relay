@@ -151,26 +151,18 @@ func TestSealIsSkippedWhenEncryptionIsDisabled(t *testing.T) {
 		t.Fatalf("plain relay must pass through unchanged, got %v / %v", conn, err)
 	}
 	hello := &overlay.Hello{}
-	a.offer(context.Background(), hello, true)
+	a.offer(hello)
 	if hello.Fingerprint != "" || hello.Endpoint != "" {
 		t.Fatalf("a disabled agent must offer nothing, got %+v", hello)
 	}
 }
 
-func TestOfferWithoutADirectSocketCarriesTheFingerprintOnly(t *testing.T) {
+func TestOfferCarriesTheFingerprintOnly(t *testing.T) {
 	a := sealedAgent(t)
 	hello := &overlay.Hello{}
-	a.offer(context.Background(), hello, true)
+	a.offer(hello)
 	if hello.Fingerprint != a.identity.fingerprint || hello.Endpoint != "" {
-		t.Fatalf("offer without a direct socket must carry the fingerprint only, got %+v", hello)
-	}
-}
-
-func TestExpectDirectNeedsADirectSocketAndAFullOffer(t *testing.T) {
-	a := sealedAgent(t)
-	in := &overlay.Incoming{ID: "id", Fingerprint: a.identity.fingerprint, Endpoint: "203.0.113.7:4001"}
-	if a.expectDirect(in) != nil {
-		t.Fatal("no direct socket must mean no expectation")
+		t.Fatalf("offer must carry the fingerprint only, got %+v", hello)
 	}
 }
 
