@@ -22,7 +22,7 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 		return nil, errors.New("unsupported overlay protocol")
 	}
 	ip := dst.Addr().Unmap()
-	if dst.Port() == 0 || !overlay.CIDR.Contains(ip) || !overlay.Assignable(ip) {
+	if dst.Port() == 0 || !overlay.AssignableIn(a.cfg.CIDR, ip) {
 		return nil, errors.New("destination is outside the overlay network")
 	}
 	if dst.Port() == overlay.LinkPort {
@@ -123,7 +123,7 @@ func (a *Agent) blockDirect(ip netip.Addr) {
 // accept starts handling one Incoming request unless the concurrency bound is reached.
 func (a *Agent) accept(ctx context.Context, in *overlay.Incoming) {
 	src, err := netip.ParseAddr(in.Src)
-	if (in.Proto != overlay.ProtoTCP && in.Proto != overlay.ProtoUDP) || in.Port == 0 || in.ID == "" || err != nil || !overlay.Assignable(src.Unmap()) {
+	if (in.Proto != overlay.ProtoTCP && in.Proto != overlay.ProtoUDP) || in.Port == 0 || in.ID == "" || err != nil || !overlay.AssignableIn(a.cfg.CIDR, src.Unmap()) {
 		slog.Debug("Overlay ignored a malformed incoming request")
 		return
 	}

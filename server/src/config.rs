@@ -2,13 +2,18 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use crate::dns::{Resolver, SystemResolver};
+use crate::{
+    address::AddressSpace,
+    dns::{Resolver, SystemResolver},
+};
 
 /// Inputs for a [`Hub`](crate::Hub). Start from [`Config::new`], which selects
 /// the production limits, and adjust fields as needed.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Config {
+    /// Address space assigned to peers. Existing out-of-range assignments expire.
+    pub address_space: AddressSpace,
     /// Directory that holds `ips.json`.
     pub data_dir: PathBuf,
     /// Host names whose current addresses may connect. Empty admits only
@@ -31,6 +36,7 @@ impl Config {
     #[must_use]
     pub fn new(data_dir: PathBuf, allowed_hosts: Vec<String>) -> Self {
         Self {
+            address_space: AddressSpace::default(),
             data_dir,
             allowed_hosts,
             resolver: Arc::new(SystemResolver),

@@ -32,6 +32,8 @@ const EVENT_QUEUE: usize = 16;
 /// The hub's side of one registered control stream.
 #[derive(Debug, Clone)]
 pub struct ControlHandle {
+    /// Opaque room membership, never exposed in snapshots or diagnostics.
+    pub room: String,
     /// Serial that distinguishes this registration from a later replacement.
     pub generation: u64,
     /// Queue of events for the writer. A full queue drops the control.
@@ -68,6 +70,7 @@ pub async fn serve(
         requester.name = name;
         let generation = state.next_serial();
         let handle = ControlHandle {
+            room: requester.room.clone(),
             generation,
             outbound: outbound.clone(),
             dirty: Arc::clone(&dirty),
@@ -81,7 +84,8 @@ pub async fn serve(
     if let Some(old) = replaced {
         old.close.cancel();
     }
-    let reply = Reply::registered(&requester.ip.to_string(), &requester.name);
+    let mut reply = Reply::registered(&requester.ip.to_string(), &requester.name);
+    reply.cidr = shared.config.address_space.to_string();
     if send_frame(&mut writer, &reply).await.is_err() {
         close.cancel();
         shared

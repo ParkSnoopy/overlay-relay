@@ -28,7 +28,7 @@ mod splice;
 mod state;
 mod verifier;
 
-pub use address::{FIRST_ADDRESS, LAST_ADDRESS, assignable, lowest_free};
+pub use address::{AddressSpace, FIRST_ADDRESS, LAST_ADDRESS, assignable, lowest_free};
 pub use config::Config;
 pub use dns::{Resolver, SystemResolver, admitted};
 pub use error::{Error, Result};

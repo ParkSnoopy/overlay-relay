@@ -34,7 +34,7 @@ const (
 	// ListenAddress binds the hub inside its private container network.
 	ListenAddress = "0.0.0.0:" + Port
 	// Version is the only wire version.
-	Version = 2
+	Version = 3
 	// MaxFrame bounds one control frame (JSON payload) in bytes.
 	MaxFrame = 16 << 10
 	// MaxDatagram bounds one UDP payload carried inside a UDP stream.
@@ -76,11 +76,13 @@ type Hello struct {
 	Version   int    `json:"version"`
 	Kind      string `json:"kind"`
 	PublicKey string `json:"public_key"`
-	Name      string `json:"name,omitempty"`  // control: advertised device name
-	Proto     string `json:"proto,omitempty"` // open
-	Dst       string `json:"dst,omitempty"`   // open: destination overlay IP
-	Port      uint16 `json:"port,omitempty"`  // open: destination port
-	ID        string `json:"id,omitempty"`    // accept: Incoming.ID
+	// Room is an opaque private-room capability, empty for the public room.
+	Room  string `json:"room,omitempty"`
+	Name  string `json:"name,omitempty"`  // control: advertised device name
+	Proto string `json:"proto,omitempty"` // open
+	Dst   string `json:"dst,omitempty"`   // open: destination overlay IP
+	Port  uint16 `json:"port,omitempty"`  // open: destination port
+	ID    string `json:"id,omitempty"`    // accept: Incoming.ID
 
 	// Fingerprint is the SHA-256 of the sender's flow certificate, as 64 hex
 	// digits. Sending it offers an end-to-end encrypted flow (open, accept).
@@ -107,6 +109,7 @@ type Reply struct {
 	Error string `json:"error,omitempty"`
 	IP    string `json:"ip,omitempty"`   // control: this account's address
 	Name  string `json:"name,omitempty"` // control: this account's display name
+	CIDR  string `json:"cidr,omitempty"` // control: authoritative address space
 
 	// Secure reports that both sides offered a fingerprint, so the flow is
 	// end-to-end encrypted. Fingerprint is then the other side's.
@@ -287,9 +290,5 @@ func ReadDatagram(r io.Reader, buffer []byte) (int, error) {
 
 // Assignable reports whether address may be handed to an account.
 func Assignable(address netip.Addr) bool {
-	if !CIDR.Contains(address) || !address.Is4() {
-		return false
-	}
-	b := address.As4()
-	return (b[2] != 0 || b[3] != 0) && (b[2] != 255 || b[3] != 255)
+	return AssignableIn(CIDR, address)
 }

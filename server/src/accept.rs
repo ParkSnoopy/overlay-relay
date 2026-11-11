@@ -26,7 +26,7 @@ pub async fn serve(shared: &Shared, mut stream: TcpStream, acceptor: Verifier, h
         .state
         .lock()
         .await
-        .claim_pending(&hello.id, &acceptor);
+        .claim_pending(&hello.id, &acceptor, &hello.room);
     let Some(pending) = claimed else {
         send_frame(&mut stream, &Reply::failed(ERR_UNAUTHORIZED))
             .await

@@ -40,7 +40,10 @@ async fn run() -> Result<()> {
     let host_count = hosts.len();
     let data_dir = env::var(DATA_DIR_ENV).map_or_else(|_| PathBuf::from(DATA_DIR), PathBuf::from);
     let listen = env::var(LISTEN_ADDRESS_ENV).unwrap_or_else(|_| LISTEN_ADDRESS.to_owned());
-    let config = Config::new(data_dir, hosts);
+    let mut config = Config::new(data_dir, hosts);
+    if let Ok(value) = env::var("OVERLAY_CIDR") {
+        config.address_space = value.parse()?;
+    }
     let hub = Hub::new(config).await?;
     let listener = TcpListener::bind(listen).await?;
     let shutdown = CancellationToken::new();

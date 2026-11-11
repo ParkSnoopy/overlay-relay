@@ -45,7 +45,37 @@ func (a *Agent) SetRelayOnly(ids []string) error {
 func (a *Agent) relayOnlyLocked(id string) bool {
 	// An older hub cannot identify incoming devices. Fail closed when any
 	// device restriction exists rather than silently bypassing that policy.
-	return a.relayOnly[id] || (id == "" && len(a.relayOnly) > 0)
+	return !overlay.ValidPeerID(id) || !a.directPeers[id] || a.relayOnly[id]
+}
+
+// SetDirectPeers replaces explicit device approvals, closing revoked direct
+// flows and negotiations immediately. Relay remains available for every peer.
+func (a *Agent) SetDirectPeers(ids []string) error {
+	if err := overlay.ValidateRelayOnly(ids); err != nil {
+		return err
+	}
+	policy := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		policy[id] = true
+	}
+	a.mu.Lock()
+	a.directPeers = policy
+	started := a.started
+	var closing []*peerFlow
+	for flow := range a.active {
+		if flow.direct && a.relayOnlyLocked(flow.peerID) {
+			closing = append(closing, flow)
+		}
+	}
+	a.mu.Unlock()
+	a.closeLinks(func(_ netip.Addr, id string) bool { return policy[id] })
+	for _, flow := range closing {
+		closeConn(flow)
+	}
+	if started {
+		a.emit()
+	}
+	return nil
 }
 
 func (a *Agent) peerIDLocked(ip netip.Addr) string {

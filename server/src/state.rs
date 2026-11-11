@@ -10,7 +10,7 @@ use std::{
 use tokio::{net::TcpStream, sync::oneshot};
 
 use crate::{
-    address::{LAST_ADDRESS, assignable, lowest_free},
+    address::AddressSpace,
     assignments::Record,
     control::ControlHandle,
     protocol::{MAX_ACCOUNTS, MAX_FLOWS_PER_ACCOUNT, MAX_PENDING_PER_ACCOUNT, Offer, Peer},
@@ -23,6 +23,8 @@ const SEEN_GRANULARITY: u64 = 3600;
 /// An authenticated account, as seen by one stream.
 #[derive(Debug, Clone)]
 pub struct Requester {
+    /// Authenticated room capability for this stream, never a public room label.
+    pub room: String,
     /// The account's verifier.
     pub verifier: Verifier,
     /// The account's display name, sent only in its own control reply.
@@ -43,6 +45,8 @@ pub struct Accepted {
 /// An open request waiting for its destination to accept.
 #[derive(Debug)]
 pub struct Pending {
+    /// Room in which the request was admitted.
+    pub room: String,
     /// Verifier of the account that asked.
     pub requester: Verifier,
     /// Verifier of the account that must accept.
@@ -72,6 +76,7 @@ fn display_name(verifier: &Verifier) -> String {
 /// The hub's mutable state.
 #[derive(Debug, Default)]
 pub struct State {
+    address_space: AddressSpace,
     accounts: HashMap<Verifier, Entry>,
     by_ip: HashMap<Ipv4Addr, Verifier>,
     controls: HashMap<Verifier, ControlHandle>,
@@ -86,9 +91,16 @@ impl State {
     /// are not assignable are dropped, so the identity receives a new one.
     #[must_use]
     pub fn load(records: &HashMap<Verifier, Record>) -> Self {
+        Self::load_in(records, AddressSpace::default())
+    }
+
+    /// Loads only assignments belonging to the selected range.
+    #[must_use]
+    pub fn load_in(records: &HashMap<Verifier, Record>, address_space: AddressSpace) -> Self {
         let mut state = Self::default();
+        state.address_space = address_space;
         for (verifier, record) in records {
-            if !assignable(record.ip) || state.by_ip.contains_key(&record.ip) {
+            if !address_space.assignable(record.ip) || state.by_ip.contains_key(&record.ip) {
                 state.dirty = true;
                 continue;
             }
@@ -152,7 +164,7 @@ impl State {
                 self.evict_idle()?;
             }
             let used: HashSet<Ipv4Addr> = self.by_ip.keys().copied().collect();
-            let ip = lowest_free(&used, LAST_ADDRESS).ok()?;
+            let ip = self.address_space.lowest_free(&used).ok()?;
             self.by_ip.insert(ip, verifier);
             self.accounts.insert(
                 verifier,
@@ -166,6 +178,7 @@ impl State {
         }
         let entry = self.accounts.get(&verifier)?;
         Some(Requester {
+            room: String::new(),
             verifier,
             name: entry.name.clone(),
             ip: entry.ip,
@@ -221,8 +234,16 @@ impl State {
     #[must_use]
     pub fn snapshot(&self, self_verifier: Verifier) -> Vec<Peer> {
         let mut listed: Vec<(Ipv4Addr, Peer)> = Vec::new();
+        let Some(own) = self.controls.get(&self_verifier) else {
+            return Vec::new();
+        };
         for verifier in self.controls.keys() {
-            if *verifier == self_verifier {
+            if *verifier == self_verifier
+                || self
+                    .controls
+                    .get(verifier)
+                    .is_none_or(|control| control.room != own.room)
+            {
                 continue;
             }
             if let Some(entry) = self.accounts.get(verifier) {
@@ -278,8 +299,14 @@ impl State {
     ) -> Option<(Verifier, ControlHandle)> {
         let dest = *self.by_ip.get(&destination)?;
         let allowed = dest != requester.verifier
-            && self.controls.contains_key(&requester.verifier)
-            && self.controls.contains_key(&dest)
+            && self
+                .controls
+                .get(&requester.verifier)
+                .is_some_and(|control| control.room == requester.room)
+            && self
+                .controls
+                .get(&dest)
+                .is_some_and(|control| control.room == requester.room)
             && self.flow_count(&requester.verifier) < MAX_FLOWS_PER_ACCOUNT
             && self.flow_count(&dest) < MAX_FLOWS_PER_ACCOUNT
             && self.pending_count(&dest) < MAX_PENDING_PER_ACCOUNT;
@@ -290,6 +317,7 @@ impl State {
         self.pending.insert(
             id.to_owned(),
             Pending {
+                room: requester.room.clone(),
                 requester: requester.verifier,
                 destination: dest,
                 accept,
@@ -299,11 +327,19 @@ impl State {
     }
 
     /// Removes and returns the pending request `id` if `acceptor` is its destination.
-    pub fn claim_pending(&mut self, id: &str, acceptor: &Verifier) -> Option<Pending> {
-        let owned = self
-            .pending
-            .get(id)
-            .is_some_and(|pending| pending.destination == *acceptor);
+    pub fn claim_pending(&mut self, id: &str, acceptor: &Verifier, room: &str) -> Option<Pending> {
+        let owned = self.pending.get(id).is_some_and(|pending| {
+            pending.destination == *acceptor
+                && pending.room == room
+                && self
+                    .controls
+                    .get(acceptor)
+                    .is_some_and(|control| control.room == room)
+                && self
+                    .controls
+                    .get(&pending.requester)
+                    .is_some_and(|control| control.room == room)
+        });
         if owned { self.pending.remove(id) } else { None }
     }
 

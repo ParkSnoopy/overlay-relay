@@ -140,7 +140,7 @@ func (h *fakeHub) serve(conn net.Conn) {
 		return
 	}
 	signature, err := hex.DecodeString(proof.Signature)
-	digest := sha512.Sum384(append([]byte("overlay-relay/auth/v2:"), nonce...))
+	digest := sha512.Sum384(append(append([]byte("overlay-relay/auth/v3:"), nonce...), []byte(hello.Room)...))
 	if err != nil || !ecdsa.VerifyASN1(publicKey, digest[:], signature) {
 		_ = conn.Close()
 		return
@@ -172,7 +172,7 @@ func (h *fakeHub) serveControl(conn net.Conn, hello *overlay.Hello) {
 	account := h.account(hello.PublicKey)
 	account.wmu.Lock()
 	account.control = conn
-	err := overlay.WriteFrame(conn, overlay.Reply{OK: true, IP: account.ip.String(), Name: account.name})
+	err := overlay.WriteFrame(conn, overlay.Reply{OK: true, IP: account.ip.String(), Name: account.name, CIDR: overlay.CIDR.String()})
 	account.wmu.Unlock()
 	if err != nil {
 		return

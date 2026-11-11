@@ -7,7 +7,7 @@ Where this document and the code disagree, the code in `server/` (hub) and `clie
 ## 1. What the system does
 
 - A **hub** (Rust binary `overlay-hub`, source in `server/`) is reachable over TCP on port `6697`.
-- Each **peer** holds one stable private IPv4 address in `10.77.0.0/16`. A peer is a client key pair that the client generated itself; nobody enrolls it.
+- Each **peer** holds one stable IPv4 address in the configured range, default `10.77.0.0/16`. A peer is a client key pair that the client generated itself; nobody enrolls it.
 - A **client** that "broadcasts" registers a **control stream** with the hub. The hub then tells it which other broadcasting peers exist (`peers`).
 - A client opens a **flow** (TCP or UDP) to a peer's overlay address and port. The hub asks the peer to accept, pairs the two streams, and relays bytes between them.
 - The hub never inspects payload bytes after the handshake. It forwards them unchanged.
@@ -63,10 +63,10 @@ The hub keeps every key it has verified in `ips.json` in its data directory: ver
 
 ## 5. Addresses
 
-- Overlay CIDR: `10.77.0.0/16`.
-- Assignable addresses: `10.77.0.1` through `10.77.255.255`, excluding `10.77.0.0` and `10.77.255.255`. Helper: `overlay.Assignable` and `overlay_relay::assignable`.
+- Overlay CIDR: administrator-selected canonical IPv4 unicast `/8` through `/30`, default `10.77.0.0/16`. Configure `OVERLAY_CIDR` on the hub and the matching client range.
+- Reserve the selected network and broadcast addresses. Helpers: `overlay.ParseCIDR`, `overlay.AssignableIn` and `overlay_relay::AddressSpace`.
 - The hub assigns each peer an address when its key first proves possession. Assignments persist in `ips.json` in the data directory (JSON object: verifier hex to `{ip, seen}`).
-- A known peer keeps its address. A new peer receives the lowest free assignable address, starting at `10.77.0.1`.
+- A known peer keeps its address. A new peer receives the lowest free assignable address. Changing the configured range reassigns addresses.
 - A peer loses its address only by eviction from a full table (section 4).
 - A client learns its own address from the registration reply. Do not compute it.
 
@@ -88,7 +88,8 @@ All field names are lowercase JSON keys.
 
 | Field | Type | Used by | Meaning |
 |---|---|---|---|
-| `version` | integer | all | Must be `2`. Otherwise the hub closes the stream silently. |
+| `version` | integer | all | Must be `3`. Otherwise the hub closes the stream silently. Coordinated client/hub updates are required; existing keys remain valid. |
+| `room` | string | all | Opaque room capability, empty for public membership. Derive private membership locally from the room ID and password. Never log it. |
 | `kind` | string | all | `"control"`, `"open"` or `"accept"`. Anything else gets reply `invalid request`. |
 | `public_key` | string | all | Hex-encoded uncompressed P-384 public key (section 4). |
 | `name` | string | control | Optional advertised name for the authenticated device. Empty uses the identity-derived default; invalid names receive `invalid request` without replacing an existing control. |
@@ -103,7 +104,11 @@ A malformed or inconsistent offer (bad fingerprint, bad endpoint, endpoint witho
 
 Optional fields that do not apply to a kind may be omitted. The hub ignores unrelated fields.
 
-After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The client signs the UTF-8 bytes `overlay-relay/auth/v2:` followed by the raw nonce using ECDSA P-384 with SHA-384. It sends `{"signature":"<hex>"}` with the ASN.1 DER signature. The hub verifies the proof before issuing the reply; a valid proof of any key is accepted, and a key seen for the first time receives an address. A malformed public key can receive an unauthorized reply without a challenge.
+Private membership is the lowercase hex of PBKDF2-HMAC-SHA256(password, `overlay-relay/room/v3:` + room ID, 210000 iterations, 32 bytes). Both credentials stay local. The opaque capability requires the authenticated VPN. Peer lists, opens and accepts require matching rooms. Different passwords select separate rooms without revealing their existence. All rooms share the hub's address space.
+
+Both devices must explicitly approve the other's ID in `DirectPeers` before direct offers or connections. Empty approvals permit relay only. Revocation closes affected direct flows and negotiations.
+
+After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The signed transcript is UTF-8 `overlay-relay/auth/v3:`, followed by the 32 raw nonce bytes and the UTF-8 room capability without a separator. The client signs using ECDSA P-384 with SHA-384. It sends `{"signature":"<hex>"}` with the ASN.1 DER signature. The hub verifies the proof before issuing the reply; a valid proof of any key is accepted, and a key seen for the first time receives an address. A malformed public key can receive an unauthorized reply without a challenge.
 
 ### 7.2 Reply (hub to client)
 
@@ -147,7 +152,7 @@ Any other content on a control stream ends the control stream (see section 8.1).
 
 ### 8.1 Control stream
 
-1. Client dials through the authenticated VPN, sends `Hello{version:2, kind:"control", public_key}`, and completes the challenge exchange.
+1. Client dials through the authenticated VPN, sends `Hello{version:3, kind:"control", public_key, room}`, and completes the challenge exchange.
 2. Hub replies:
    - Success: `Reply{ok:true, ip, name}`. The account is now registered. The client's address is `ip`.
    - Failure: `Reply{ok:false, error:"unauthorized"}` and the stream closes.
@@ -162,7 +167,7 @@ Writes from the hub to a control stream have a `10` second write deadline. A sta
 
 Preconditions the hub enforces: the requester has an active control stream; the destination has an active control stream; the destination is not the requester; each side has fewer than `256` active flows; the destination has fewer than `4` pending requests.
 
-1. Client dials through the authenticated VPN, sends `Hello{version:2, kind:"open", public_key, proto, dst, port}`, and completes the challenge exchange.
+1. Client dials through the authenticated VPN, sends `Hello{version:3, kind:"open", public_key, room, proto, dst, port}`, and completes the challenge exchange.
 2. The hub validates `proto`, `dst`, `port`. Any invalid value gets `Reply{ok:false, error:"peer unavailable"}`.
 3. The hub looks up the destination. If the destination is missing, hidden, not connected, the requester itself, or a precondition fails, the reply is `peer unavailable`. This is intentionally identical for every case, so a requester cannot discover hidden accounts.
 4. The hub sends an `incoming` event to the destination's control stream with a fresh random `id` (16 random bytes, 32 hex digits) and waits up to `10` seconds for the destination to answer.
@@ -172,7 +177,7 @@ Preconditions the hub enforces: the requester has an active control stream; the 
 ### 8.3 Accept stream (destination side)
 
 1. The destination receives an `incoming` event `{id, proto, src, port}` on its control stream. `src` is the requester's overlay address. `port` is the destination port requested.
-2. The destination dials through the authenticated VPN, sends `Hello{version:2, kind:"accept", public_key, id}`, and completes the challenge exchange. The `id` must be the one from the event.
+2. The destination dials through the authenticated VPN, sends `Hello{version:3, kind:"accept", public_key, room, id}`, and completes the challenge exchange. The `id` must be the one from the event.
 3. The hub pairs the stream with the pending request only if the authenticated identity belongs to the destination account that was asked. Otherwise: `Reply{ok:false, error:"unauthorized"}`.
 4. The accept stream waits (up to the `10` second accept timeout measured from the incoming event). When the open side is accepted, the accept stream receives `Reply{ok:true}` and switches to relay mode.
 5. If the pending request expired or was refused, the accept stream is closed without a successful reply.
@@ -328,7 +333,7 @@ Pre-checks before dialing (the hub is the authority; these only save round trips
 
 - `proto` is `tcp` or `udp`.
 - Destination port is nonzero.
-- Destination is inside `10.77.0.0/16` and assignable.
+- Destination is inside the configured overlay range and assignable.
 - Destination is not this client's own address.
 - Destination is in the latest `peers` list. Otherwise return `peer unavailable` locally.
 
@@ -445,12 +450,12 @@ The hub logs with `tracing`. It never logs private keys, identifiers, payloads o
 
 - The hub does not encrypt traffic itself and holds no private identity keys. Encryption is the agents' job (section 8.6). Hub-to-agent control frames are not encrypted by the overlay; an authenticated VPN must protect that transport.
 - No hub-side tracking of direct links, no TURN relay (the hub relay is the fallback), no certificate authority, and no STUN server in the hub.
-- The hub does not route to the internet or to addresses outside `10.77.0.0/16`.
+- The hub does not route to the internet or to addresses outside the configured overlay range.
 - The hub has no accounting or quotas beyond the flow and pending limits in section 11.
-- No version negotiation beyond `version: 2`. A new wire version requires a new `version` value and a coordinated release.
+- No version negotiation beyond `version: 3`. A new wire version requires a new `version` value and a coordinated release.
 
 ## 20. Release and versioning
 
 - The hub and the Go module share one release version: the `version` field in `server/Cargo.toml`.
 - Go module tags follow the same version as `client/vX.Y.Z`, where `X.Y.Z` matches `server/Cargo.toml`.
-- The wire version is separate (`version: 2`). It changes only on incompatible wire changes.
+- The wire version is separate (`version: 3`). It changes only on incompatible wire changes.

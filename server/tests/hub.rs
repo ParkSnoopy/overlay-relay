@@ -221,8 +221,9 @@ async fn dial(address: SocketAddr, hello: &Hello) -> TestResult<(TcpStream, Repl
             .find(|name| public_of(name) == hello.public_key)
             .and_then(key_of)
             .ok_or("unknown test identity")?;
-        let mut message = b"overlay-relay/auth/v2:".to_vec();
+        let mut message = b"overlay-relay/auth/v3:".to_vec();
         message.extend_from_slice(&hex::decode(nonce)?);
+        message.extend_from_slice(hello.room.as_bytes());
         let signature: Signature = key.sign(&message);
         write_frame(
             &mut stream,
@@ -393,7 +394,7 @@ async fn rejects_wrong_key_and_replayed_proof() -> TestResult {
         let signature = if signer == "replay" {
             saved.clone()
         } else {
-            let mut message = b"overlay-relay/auth/v2:".to_vec();
+            let mut message = b"overlay-relay/auth/v3:".to_vec();
             message.extend_from_slice(&hex::decode(challenge.nonce)?);
             let key = key_of(signer).ok_or("invalid test key")?;
             let signature: Signature = key.sign(&message);
@@ -521,6 +522,69 @@ async fn control_registration_replies_then_sends_peers() -> TestResult {
     await_peers(&mut alice, &["bob", "carol"]).await?;
     drop(bob);
     await_peers(&mut alice, &["carol"]).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_rooms_hide_members_and_refuse_cross_room_flows() -> TestResult {
+    let f = fixture(|_| {}).await?;
+    let room = "ab".repeat(32);
+    let mut alice_hello = control_hello("alice");
+    alice_hello.room = room.clone();
+    let (mut alice, alice_reply) = dial(f.address, &alice_hello).await?;
+    ensure!(alice_reply.ok);
+    let mut bob_hello = control_hello("bob");
+    bob_hello.room = room.clone();
+    let (mut bob, bob_reply) = dial(f.address, &bob_hello).await?;
+    ensure!(bob_reply.ok);
+    let (mut public, _) = register(f.address, "carol").await?;
+    let mut wrong_hello = control_hello("dave");
+    wrong_hello.room = "cd".repeat(32);
+    let (mut wrong, _) = dial(f.address, &wrong_hello).await?;
+    await_peers(&mut alice, &["bob"]).await?;
+    await_peers(&mut bob, &["alice"]).await?;
+    await_peers(&mut public, &[]).await?;
+    await_peers(&mut wrong, &[]).await?;
+    refused(
+        f.address,
+        open_hello("carol", &bob_reply.ip, PROTO_TCP, Some(80)),
+    )
+    .await?;
+    let mut spoof = open_hello("alice", &bob_reply.ip, PROTO_TCP, Some(80));
+    spoof.room = wrong_hello.room;
+    refused(f.address, spoof).await?;
+    let mut opening = open_hello("alice", &bob_reply.ip, PROTO_TCP, Some(80));
+    opening.room = room.clone();
+    let opened = tokio::spawn(open_flow(f.address, opening));
+    let incoming = next_incoming(&mut bob).await?;
+    let (_, rejected) = dial(f.address, &accept_hello("bob", &incoming.id)).await?;
+    ensure_eq!(rejected, Reply::failed(ERR_UNAUTHORIZED));
+    let mut accepting = accept_hello("bob", &incoming.id);
+    accepting.room = room;
+    let (mut receiver, accepted) = dial(f.address, &accepting).await?;
+    ensure!(accepted.ok);
+    let (mut sender, reply) = opened.await??;
+    ensure!(reply.ok);
+    sender.write_all(b"DUMMY private payload").await?;
+    let mut bytes = [0; 21];
+    timeout(IO_WAIT, receiver.read_exact(&mut bytes)).await??;
+    ensure_eq!(&bytes, b"DUMMY private payload");
+    Ok(())
+}
+
+#[tokio::test]
+async fn configured_address_spaces_assign_and_advertise_the_selected_range() -> TestResult {
+    for cidr in ["10.0.0.0/8", "176.77.0.0/16", "192.168.77.0/30"] {
+        let space: overlay_relay::AddressSpace = cidr.parse()?;
+        let f = fixture(|config| config.address_space = space).await?;
+        let (_alice, alice) = register(f.address, "alice").await?;
+        let (_bob, bob) = register(f.address, "bob").await?;
+        ensure_eq!(alice.cidr.as_str(), cidr);
+        ensure_eq!(bob.cidr.as_str(), cidr);
+        ensure!(space.assignable(alice.ip.parse()?));
+        ensure!(space.assignable(bob.ip.parse()?));
+        ensure!(alice.ip != bob.ip);
+    }
     Ok(())
 }
 

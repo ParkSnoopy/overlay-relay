@@ -2,7 +2,7 @@
 
 Base: `server/` (crate `overlay-relay`, binary `overlay-hub`).
 Client counterpart: [client](client.md).
-The snoo-box server manager owns only the container lifecycle; the hub needs no configuration and no table.
+The snoo-box server manager owns the container lifecycle and selected address range; the hub needs no operator-maintained peer table.
 The [wire contract](../client/overlay/overlay.go) owns frames, datagram records, the address space and identity messages.
 
 The hub is an authenticated rendezvous and byte relay between the VPN clients of one managed server that chose to broadcast.
@@ -12,6 +12,7 @@ The hub enrolls nobody: each client generates its own P-384 key pair, and a clie
 ## Inputs
 
 - `OVERLAY_ALLOWED_HOST` is an optional comma-separated list of engine container names. Without it the hub admits every loopback, private or link-local source.
+- `OVERLAY_CIDR` selects a canonical IPv4 unicast `/8` through `/30` range, default `10.77.0.0/16`. Clients must configure the same range. The administrator owns routing conflicts.
 - `/var/lib/overlay-relay` is the only writable path and holds `ips.json`; it is the only state.
 
 ## Admission
@@ -24,7 +25,7 @@ Source admission with the allowed-host list still closes any source that is not 
 
 ## Identities and addresses
 
-A peer is a public key. The first valid signature of a key creates the peer, and it receives one stable address from `overlay.CIDR`, the lowest free one from `10.77.0.1` with `overlay.Assignable`.
+A peer is a public key. The first valid signature creates the peer and assigns the lowest free usable address in the selected range. Reserve the network and broadcast addresses. Changing the configured range reassigns addresses.
 Peers are written atomically with mode `0600` to `ips.json` keyed by verifier, together with the time they were last seen.
 The default display name of a peer is `peer-` and the first 8 hex digits of its verifier.
 A control Hello may supply `name`, applied only after proof of possession of that peer's key.
@@ -33,6 +34,8 @@ Names are transient and are not written to `ips.json`; an empty or absent name r
 The table holds 4096 peers. When it is full, a new key takes the address of the peer seen longest ago that has no control stream and no flow, and when every peer is in use the new key receives `unauthorized`.
 
 ## Protocol
+
+Wire version 3 requires coordinated client/hub updates. Existing identity keys remain valid. An optional opaque `room` capability confines discovery, opens and accepts to matching members. Empty selects public membership. Clients derive private capabilities from a room ID and password. The hub exposes no room directory and never logs capabilities. The authenticated VPN remains mandatory.
 
 The client sends a `Hello` within 10 seconds, and every frame it reads is bounded by `overlay.MaxFrame` (16 KiB on the wire).
 The hub validates the public key, issues a fresh challenge, verifies its signature and looks up the public-key digest. It answers an unknown identity with `unauthorized` before closing.

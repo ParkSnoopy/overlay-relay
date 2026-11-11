@@ -21,12 +21,32 @@ import (
 // While no agent runs, flows to the overlay address space are refused rather
 // than forwarded, so hidden sessions never leak overlay traffic to the server.
 type Router struct {
-	mu    sync.RWMutex
-	agent *Agent
+	// Prefix reserves the range even before registration or while disconnected.
+	// Set it before exposing the session's packet handler; zero uses the default.
+	Prefix netip.Prefix
+	mu     sync.RWMutex
+	agent  *Agent
 }
 
 // Owns reports whether the destination belongs to the overlay address space.
-func (r *Router) Owns(address netip.Addr) bool { return overlay.CIDR.Contains(address.Unmap()) }
+func (r *Router) Owns(address netip.Addr) bool {
+	prefix := r.Prefix
+	if !prefix.IsValid() {
+		prefix = overlay.CIDR
+	}
+	return prefix.Contains(address.Unmap())
+}
+
+// SetDirectPeers replaces the running agent's explicit direct approvals.
+func (r *Router) SetDirectPeers(ids []string) error {
+	r.mu.RLock()
+	agent := r.agent
+	r.mu.RUnlock()
+	if agent == nil {
+		return errInactive
+	}
+	return agent.SetDirectPeers(ids)
+}
 
 var errInactive = errors.New("overlay network is not active")
 

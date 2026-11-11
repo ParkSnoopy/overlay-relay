@@ -34,6 +34,10 @@ const (
 
 // Config wires an Agent to its platform.
 type Config struct {
+	// CIDR must match the hub. Invalid zero selects the default address space.
+	CIDR netip.Prefix
+	// Room is an opaque capability derived with overlay.RoomToken.
+	Room string
 	// Name is this device's advertised name. Empty uses the hub's default.
 	Name string
 	// Identity is the persistent private key enrolled with the hub.
@@ -59,6 +63,8 @@ type Config struct {
 	Direct *DirectOptions
 	// RelayOnly lists device IDs that must never use direct transport.
 	RelayOnly []string
+	// DirectPeers is the explicit direct allowlist. Empty permits relay only.
+	DirectPeers []string
 }
 
 type timing struct {
@@ -95,6 +101,7 @@ type Agent struct {
 	// directBlocked holds peers whose direct connection failed, until when.
 	directBlocked map[netip.Addr]time.Time
 	relayOnly     map[string]bool
+	directPeers   map[string]bool
 	active        map[*peerFlow]struct{}
 	observations  map[netip.Addr]peerObservation
 	// links holds the live direct link per peer; linking holds negotiations in progress.
@@ -112,6 +119,9 @@ type Agent struct {
 
 // New builds an idle agent using its enrolled identity.
 func New(cfg Config) *Agent {
+	if !cfg.CIDR.IsValid() {
+		cfg.CIDR = overlay.CIDR
+	}
 	publicKey, identityErr := overlay.PublicIdentity(cfg.Identity)
 	a := &Agent{
 		cfg:         cfg,
@@ -123,6 +133,11 @@ func New(cfg Config) *Agent {
 		inflight:    make(chan struct{}, maxIncoming),
 	}
 	a.identityErr = errors.Join(a.identityErr, a.SetRelayOnly(cfg.RelayOnly), overlay.ValidateName(cfg.Name))
+	_, rangeErr := overlay.ParseCIDR(cfg.CIDR.String())
+	a.identityErr = errors.Join(a.identityErr, rangeErr, a.SetDirectPeers(cfg.DirectPeers))
+	if cfg.Room != "" && !overlay.ValidPeerID(cfg.Room) {
+		a.identityErr = errors.Join(a.identityErr, errors.New("invalid overlay room"))
+	}
 	if !cfg.DisableEncryption {
 		var err error
 		a.identity, err = newIdentity()
@@ -209,7 +224,7 @@ func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
 		return false, boundedReason(reply.Error)
 	}
 	ip, err := netip.ParseAddr(reply.IP)
-	if err != nil || !overlay.Assignable(ip) {
+	if err != nil || reply.CIDR != a.cfg.CIDR.String() || !overlay.AssignableIn(a.cfg.CIDR, ip) {
 		return false, "overlay hub assigned an invalid address"
 	}
 	a.registered(ip, reply.Name)
@@ -241,6 +256,7 @@ func (a *Agent) handshake(ctx context.Context, conn net.Conn, hello *overlay.Hel
 		return reply, err
 	}
 	hello.PublicKey = a.publicKey
+	hello.Room = a.cfg.Room
 	if err := overlay.WriteFrame(conn, hello); err != nil {
 		return reply, err
 	}
@@ -252,7 +268,7 @@ func (a *Agent) handshake(ctx context.Context, conn net.Conn, hello *overlay.Hel
 	if err != nil || len(nonce) != 32 {
 		return reply, errors.New("invalid overlay challenge")
 	}
-	digest := sha512.Sum384(append([]byte("overlay-relay/auth/v2:"), nonce...))
+	digest := sha512.Sum384(append(append([]byte("overlay-relay/auth/v3:"), nonce...), []byte(hello.Room)...))
 	signature, err := ecdsa.SignASN1(rand.Reader, a.cfg.Identity, digest[:])
 	if err != nil {
 		return reply, err
@@ -334,7 +350,7 @@ func (a *Agent) setPeers(peers []overlay.Peer) {
 	set := make(map[netip.Addr]struct{}, len(peers))
 	for _, peer := range peers {
 		ip, err := netip.ParseAddr(peer.IP)
-		if err != nil || !overlay.Assignable(ip) {
+		if err != nil || !overlay.AssignableIn(a.cfg.CIDR, ip) {
 			continue
 		}
 		if _, duplicate := set[ip]; duplicate || len(kept) == maxPeers {

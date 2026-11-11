@@ -45,6 +45,32 @@ func TestIdentityRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAddressSpacesAndPrivateRooms(t *testing.T) {
+	for _, value := range []string{"10.0.0.0/8", "10.77.0.0/16", "176.77.0.0/16", "192.168.77.0/30"} {
+		prefix, err := ParseCIDR(value)
+		if err != nil || !AssignableIn(prefix, prefix.Addr().Next()) || AssignableIn(prefix, prefix.Addr()) {
+			t.Fatalf("invalid assignment in %s: %v", value, err)
+		}
+	}
+	for _, value := range []string{"10.77.0.1/16", "0.0.0.0/8", "127.0.0.0/8", "224.0.0.0/8", "10.0.0.0/7", "10.77.0.0/31", "::/16"} {
+		if _, err := ParseCIDR(value); err == nil {
+			t.Fatalf("accepted invalid range %s", value)
+		}
+	}
+	first, err := RoomToken("DUMMY room", "DUMMY password")
+	if err != nil || !ValidPeerID(first) {
+		t.Fatal("invalid private-room token", err)
+	}
+	same, _ := RoomToken("DUMMY room", "DUMMY password")
+	other, _ := RoomToken("DUMMY room", "DUMMY different password")
+	if first != same || first == other {
+		t.Fatal("room membership is not credential-bound")
+	}
+	if _, err := RoomToken("DUMMY room", ""); err == nil {
+		t.Fatal("accepted incomplete private-room credentials")
+	}
+}
+
 func TestFramesRoundTripAndBounds(t *testing.T) {
 	var buffer bytes.Buffer
 	if err := WriteFrame(&buffer, Hello{Version: Version, Kind: KindOpen, PublicKey: "t", Proto: ProtoTCP, Dst: "10.77.0.2", Port: 22}); err != nil {

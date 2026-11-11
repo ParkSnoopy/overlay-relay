@@ -99,7 +99,7 @@ impl Hub {
     pub async fn new(config: Config) -> Result<Self> {
         let records =
             assignments::load(&config.data_dir.join(assignments::FILE_NAME), unix_now()).await?;
-        let state = State::load(&records);
+        let state = State::load_in(&records, config.address_space);
         info!(identities = records.len(), "overlay identities loaded");
         let hub = Self {
             shared: Arc::new(Shared {
@@ -158,8 +158,11 @@ impl Hub {
         if hello.version != VERSION {
             return;
         }
-        let Ok(Some(requester)) =
-            timeout(handshake, self.authenticate(&mut stream, &hello.public_key)).await
+        let Ok(Some(requester)) = timeout(
+            handshake,
+            self.authenticate(&mut stream, &hello.public_key, &hello.room),
+        )
+        .await
         else {
             send_frame(&mut stream, &Reply::failed(ERR_UNAUTHORIZED))
                 .await
@@ -184,7 +187,20 @@ impl Hub {
 
     /// Challenges the peer to sign a fresh nonce with the key it presented.
     /// The same key with a valid signature is always the same identity.
-    async fn authenticate(&self, stream: &mut TcpStream, public_key: &str) -> Option<Requester> {
+    async fn authenticate(
+        &self,
+        stream: &mut TcpStream,
+        public_key: &str,
+        room: &str,
+    ) -> Option<Requester> {
+        if !room.is_empty()
+            && (room.len() != 64
+                || !room
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        {
+            return None;
+        }
         let verifier = Verifier::from_public_key(public_key)?;
         let public = hex::decode(public_key).ok()?;
         let mut nonce = [0_u8; 32];
@@ -199,18 +215,20 @@ impl Hub {
         .ok()?;
         let proof: Proof = read_frame(stream).await.ok()?;
         let signature = hex::decode(proof.signature).ok()?;
-        let mut message = b"overlay-relay/auth/v2:".to_vec();
+        let mut message = b"overlay-relay/auth/v3:".to_vec();
         message.extend_from_slice(&nonce);
+        message.extend_from_slice(room.as_bytes());
         UnparsedPublicKey::new(&ECDSA_P384_SHA384_ASN1, public)
             .verify(&message, &signature)
             .ok()?;
-        let requester = self
+        let mut requester = self
             .shared
             .state
             .lock()
             .await
             .identify(verifier, unix_now())?;
         persist(&self.shared).await;
+        requester.room = room.to_owned();
         Some(requester)
     }
 }

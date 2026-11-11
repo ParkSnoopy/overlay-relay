@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// The only accepted wire version, carried in `Hello.version`.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// Port the hub listens on inside its private container network.
 pub const PORT: u16 = 6697;
@@ -77,6 +77,9 @@ pub struct Hello {
     pub kind: String,
     /// Hex-encoded uncompressed P-384 public key.
     pub public_key: String,
+    /// Opaque room capability; empty selects the public room.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub room: String,
     /// Control only: optional advertised device name. Empty uses the default.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,
@@ -131,6 +134,9 @@ pub struct Reply {
     /// Control only: the account's overlay address.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub ip: String,
+    /// Control only: the authoritative configured address space.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub cidr: String,
     /// Control only: the account's display name.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,

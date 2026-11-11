@@ -4,6 +4,75 @@ use std::{collections::HashSet, hash::BuildHasher, net::Ipv4Addr};
 
 use crate::error::{Error, Result};
 
+/// An administrator-selected canonical IPv4 unicast CIDR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddressSpace {
+    network: u32,
+    bits: u8,
+}
+
+impl Default for AddressSpace {
+    fn default() -> Self {
+        Self {
+            network: u32::from(Ipv4Addr::new(10, 77, 0, 0)),
+            bits: 16,
+        }
+    }
+}
+
+impl std::str::FromStr for AddressSpace {
+    type Err = Error;
+    fn from_str(value: &str) -> Result<Self> {
+        let invalid =
+            || Error::Config("overlay range must be a canonical IPv4 unicast /8 through /30 CIDR");
+        let (ip, bits) = value.split_once('/').ok_or_else(invalid)?;
+        let ip: Ipv4Addr = ip.parse().map_err(|_| invalid())?;
+        let bits: u8 = bits.parse().map_err(|_| invalid())?;
+        if !(8..=30).contains(&bits)
+            || ip.is_loopback()
+            || ip.is_link_local()
+            || ip.octets()[0] == 0
+            || ip.octets()[0] >= 224
+        {
+            return Err(invalid());
+        }
+        let network = u32::from(ip);
+        if network & (!0_u32 >> bits) != 0 {
+            return Err(invalid());
+        }
+        Ok(Self { network, bits })
+    }
+}
+
+impl std::fmt::Display for AddressSpace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", Ipv4Addr::from(self.network), self.bits)
+    }
+}
+
+impl AddressSpace {
+    /// Whether this is a host address, excluding network and broadcast.
+    #[must_use]
+    pub fn assignable(self, address: Ipv4Addr) -> bool {
+        let address = u32::from(address);
+        address > self.network && address < self.network + (!0_u32 >> self.bits)
+    }
+
+    /// Selects the lowest unused host address without allocating the full range.
+    pub fn lowest_free<S: BuildHasher>(self, used: &HashSet<Ipv4Addr, S>) -> Result<Ipv4Addr> {
+        let mut cursor = self.network + 1;
+        let last = self.network + (!0_u32 >> self.bits);
+        while cursor < last {
+            let candidate = Ipv4Addr::from(cursor);
+            if !used.contains(&candidate) {
+                return Ok(candidate);
+            }
+            cursor += 1;
+        }
+        Err(Error::AddressExhausted)
+    }
+}
+
 /// The first address handed to an account.
 pub const FIRST_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 77, 0, 1);
 

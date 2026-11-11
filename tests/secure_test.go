@@ -114,11 +114,12 @@ func stunSuccess(transaction []byte, address netip.Addr, port uint16) []byte {
 
 // secureSide configures one agent of a secureEnv.
 type secureSide struct {
-	name      string
-	plain     bool // DisableEncryption
-	direct    bool // offer a direct connection
-	nat       bool // drop UDP to everything but the STUN server, like a NAT that refuses hole punching
-	transport *overlayagent.DirectOptions
+	name       string
+	plain      bool // DisableEncryption
+	direct     bool // offer a direct connection
+	nat        bool // drop UDP to everything but the STUN server, like a NAT that refuses hole punching
+	transport  *overlayagent.DirectOptions
+	unapproved bool // leave the direct allowlist empty
 }
 
 // natConn drops datagrams to any address except the STUN server.
@@ -204,6 +205,32 @@ func startSecureEnv(t *testing.T, alice, bob secureSide) *secureEnv {
 	env.aliceStates, env.bobStates = aliceStates, bobStates
 	env.alice = newSecureAgent(hub.address, aliceAccount, alice, stun, env.aliceTap, aliceStates, env.aliceSink)
 	env.bob = newSecureAgent(hub.address, bobAccount, bob, stun, env.bobTap, bobStates, env.bobSink)
+	alicePublic, err := overlay.PublicIdentity(aliceAccount.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceID, err := overlay.IdentityID(alicePublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobPublic, err := overlay.PublicIdentity(bobAccount.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobID, err := overlay.IdentityID(bobPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !alice.unapproved {
+		if err := env.alice.SetDirectPeers([]string{bobID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !bob.unapproved {
+		if err := env.bob.SetDirectPeers([]string{aliceID}); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -261,6 +288,25 @@ func TestRelayedFlowIsEncryptedByDefault(t *testing.T) {
 			t.Errorf("%s: the hub carried %d bytes, want the relayed file (at least %d)", name, len(seen), secureFileSize)
 		}
 	}
+}
+
+func TestDirectNeedsExplicitApprovalOnBothDevices(t *testing.T) {
+	env := startSecureEnv(t, secureSide{direct: true, unapproved: true}, secureSide{direct: true})
+	source, err := sendFromAlice(t, env, secureFileSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireSameFile(t, source, filepath.Join(env.bobSink.dir, "from-alice.bin"))
+	state := waitFor(t, env.aliceStates, func(state overlay.State) bool {
+		return len(state.Peers) == 1 && state.Peers[0].LastPath == overlay.PathRelay
+	})
+	if state.Peers[0].DirectAllowed || state.Peers[0].DirectStatus != "" || len(env.aliceTap.snapshot()) < secureFileSize {
+		t.Fatal("unapproved peer did not stay on the relay")
+	}
+	if err := env.alice.SetDirectPeers([]string{state.Peers[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+	establishLink(t, env)
 }
 
 func TestDirectFlowBypassesTheHub(t *testing.T) {
@@ -322,7 +368,7 @@ func TestDevicePolicyClosesDirectFlowsAndRelaysBothDirections(t *testing.T) {
 	if !overlay.ValidPeerID(aliceID) || !overlay.ValidPeerID(bobID) || aliceID == bobID {
 		t.Fatal("missing distinct device identities")
 	}
-	if err := env.bob.SetRelayOnly([]string{aliceID}); err != nil {
+	if err := env.bob.SetDirectPeers(nil); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, env.bobStates, func(state overlay.State) bool {
@@ -353,7 +399,7 @@ func TestDevicePolicyClosesDirectFlowsAndRelaysBothDirections(t *testing.T) {
 	})
 	_ = incoming.Close()
 	_ = outgoing.Close()
-	if err := env.bob.SetRelayOnly(nil); err != nil {
+	if err := env.bob.SetDirectPeers([]string{aliceID}); err != nil {
 		t.Fatal(err)
 	}
 	// A relayed flow starts a new negotiation; wait for the link before the next flow.

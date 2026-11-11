@@ -51,7 +51,7 @@ func freeAddress(t *testing.T) string {
 }
 
 // startHub starts the hub with no configuration and waits until it accepts a source.
-func startHub(t *testing.T, binary string) hubProcess {
+func startHub(t *testing.T, binary string, environment ...string) hubProcess {
 	t.Helper()
 	dir := t.TempDir()
 	address := freeAddress(t)
@@ -60,6 +60,7 @@ func startHub(t *testing.T, binary string) hubProcess {
 		"OVERLAY_DATA_DIR="+dir,
 		"OVERLAY_LISTEN_ADDRESS="+address,
 	)
+	cmd.Env = append(cmd.Env, environment...)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -97,9 +98,9 @@ func newAccount(t *testing.T, name string) account {
 	return account{name: name, key: key}
 }
 
-func newAgent(t *testing.T, hub string, account account, states chan<- overlay.State, local func(port uint16) string) *overlayagent.Agent {
+func newAgent(t *testing.T, hub string, account account, states chan<- overlay.State, local func(port uint16) string, configure ...func(*overlayagent.Config)) *overlayagent.Agent {
 	t.Helper()
-	return overlayagent.New(overlayagent.Config{
+	config := overlayagent.Config{
 		Identity: account.key,
 		Dial: func(ctx context.Context) (net.Conn, error) {
 			var dialer net.Dialer
@@ -115,7 +116,11 @@ func newAgent(t *testing.T, hub string, account account, states chan<- overlay.S
 			default:
 			}
 		},
-	})
+	}
+	for _, apply := range configure {
+		apply(&config)
+	}
+	return overlayagent.New(config)
 }
 
 func waitFor(t *testing.T, states <-chan overlay.State, done func(overlay.State) bool) overlay.State {
@@ -133,11 +138,19 @@ func waitFor(t *testing.T, states <-chan overlay.State, done func(overlay.State)
 	}
 }
 
-func TestGoAgentAndRustHubRelayTCP(t *testing.T) {
+func TestGoAgentAndRustHubPrivateRoomTCP(t *testing.T) {
 	binary := buildHub(t)
 	alice := newAccount(t, "alice")
 	bob := newAccount(t, "bob")
-	hub := startHub(t, binary)
+	hub := startHub(t, binary, "OVERLAY_CIDR=10.0.0.0/8")
+	room, err := overlay.RoomToken("DUMMY private room", "DUMMY password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	configure := func(config *overlayagent.Config) {
+		config.CIDR = netip.MustParsePrefix("10.0.0.0/8")
+		config.Room = room
+	}
 
 	// Bob's local service receives relayed flows at the overlay port.
 	service, err := net.Listen("tcp", "127.0.0.1:0")
@@ -164,8 +177,8 @@ func TestGoAgentAndRustHubRelayTCP(t *testing.T) {
 	defer cancel()
 	aliceStates := make(chan overlay.State, 64)
 	bobStates := make(chan overlay.State, 64)
-	aliceAgent := newAgent(t, hub.address, alice, aliceStates, localTarget)
-	bobAgent := newAgent(t, hub.address, bob, bobStates, localTarget)
+	aliceAgent := newAgent(t, hub.address, alice, aliceStates, localTarget, configure)
+	bobAgent := newAgent(t, hub.address, bob, bobStates, localTarget, configure)
 
 	runErrs := make(chan error, 2)
 	go func() { runErrs <- aliceAgent.Run(ctx) }()
@@ -173,7 +186,8 @@ func TestGoAgentAndRustHubRelayTCP(t *testing.T) {
 
 	aliceIP := <-aliceAgent.Ready()
 	bobIP := <-bobAgent.Ready()
-	if !overlay.CIDR.Contains(aliceIP) || !overlay.CIDR.Contains(bobIP) || aliceIP == bobIP {
+	prefix := netip.MustParsePrefix("10.0.0.0/8")
+	if !overlay.AssignableIn(prefix, aliceIP) || !overlay.AssignableIn(prefix, bobIP) || aliceIP == bobIP {
 		t.Fatalf("invalid overlay addresses alice=%s bob=%s", aliceIP, bobIP)
 	}
 	waitFor(t, aliceStates, func(state overlay.State) bool {
