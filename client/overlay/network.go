@@ -8,10 +8,8 @@ import (
 	"net/netip"
 )
 
-// ParseCIDR validates an administrator-selected IPv4 unicast address space.
-// Empty selects the default. Host bits, special-use networks and prefixes with
-// fewer than two host addresses are rejected. Public unicast space is allowed
-// deliberately: the administrator is responsible for routing conflicts.
+// ParseCIDR accepts canonical subnets wholly inside RFC 1918 private space.
+// Empty selects the default; network and broadcast addresses remain reserved.
 func ParseCIDR(value string) (netip.Prefix, error) {
 	if value == "" {
 		return CIDR, nil
@@ -20,11 +18,16 @@ func ParseCIDR(value string) (netip.Prefix, error) {
 	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() || prefix.Bits() < 8 || prefix.Bits() > 30 {
 		return netip.Prefix{}, errors.New("overlay range must be a canonical IPv4 /8 through /30 CIDR")
 	}
-	address := prefix.Addr()
-	if !address.IsGlobalUnicast() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.As4()[0] == 0 || address.As4()[0] >= 224 {
-		return netip.Prefix{}, errors.New("overlay range must contain usable unicast addresses")
+	for _, block := range []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+	} {
+		if prefix.Bits() >= block.Bits() && block.Contains(prefix.Addr()) {
+			return prefix, nil
+		}
 	}
-	return prefix, nil
+	return netip.Prefix{}, errors.New("overlay range must be within RFC 1918 private IPv4 space")
 }
 
 // AssignableIn excludes the network and broadcast addresses of prefix.

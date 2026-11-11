@@ -12,7 +12,7 @@ The hub enrolls nobody: each client generates its own P-384 key pair, and a clie
 ## Inputs
 
 - `OVERLAY_ALLOWED_HOST` is an optional comma-separated list of engine container names. Without it the hub admits every loopback, private or link-local source.
-- `OVERLAY_CIDR` selects a canonical IPv4 unicast `/8` through `/30` range, default `10.77.0.0/16`. Clients must configure the same range. The administrator owns routing conflicts.
+- `OVERLAY_CIDR` selects a canonical IPv4 `/8` through `/30` subnet wholly within RFC 1918 private space (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), default `10.77.0.0/16`. Clients must configure the same range. Public ranges and supernets crossing private block boundaries are rejected. The administrator owns routing conflicts.
 - `/var/lib/overlay-relay` is the only writable path and holds `ips.json`; it is the only state.
 
 ## Admission

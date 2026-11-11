@@ -1,6 +1,6 @@
 [package]
 name        = "overlay-relay"
-version     = "0.4.0"
+version     = "0.4.1"
 edition     = "2024"
 description = "Authenticated rendezvous and byte relay for overlay VPN accounts"
 license     = "GPL-3.0-only"

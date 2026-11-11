@@ -63,7 +63,7 @@ The hub keeps every key it has verified in `ips.json` in its data directory: ver
 
 ## 5. Addresses
 
-- Overlay CIDR: administrator-selected canonical IPv4 unicast `/8` through `/30`, default `10.77.0.0/16`. Configure `OVERLAY_CIDR` on the hub and the matching client range.
+- Overlay CIDR: canonical IPv4 `/8` through `/30` subnet wholly within RFC 1918 private space (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), default `10.77.0.0/16`. Configure `OVERLAY_CIDR` on the hub and the matching client range. Public ranges and supernets crossing private block boundaries are rejected.
 - Reserve the selected network and broadcast addresses. Helpers: `overlay.ParseCIDR`, `overlay.AssignableIn` and `overlay_relay::AddressSpace`.
 - The hub assigns each peer an address when its key first proves possession. Assignments persist in `ips.json` in the data directory (JSON object: verifier hex to `{ip, seen}`).
 - A known peer keeps its address. A new peer receives the lowest free assignable address. Changing the configured range reassigns addresses.

@@ -4,7 +4,7 @@ use std::{collections::HashSet, hash::BuildHasher, net::Ipv4Addr};
 
 use crate::error::{Error, Result};
 
-/// An administrator-selected canonical IPv4 unicast CIDR.
+/// A canonical IPv4 subnet wholly inside RFC 1918 private space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AddressSpace {
     network: u32,
@@ -23,17 +23,19 @@ impl Default for AddressSpace {
 impl std::str::FromStr for AddressSpace {
     type Err = Error;
     fn from_str(value: &str) -> Result<Self> {
-        let invalid =
-            || Error::Config("overlay range must be a canonical IPv4 unicast /8 through /30 CIDR");
+        let invalid = || {
+            Error::Config("overlay range must be a canonical RFC 1918 IPv4 subnet, /8 through /30")
+        };
         let (ip, bits) = value.split_once('/').ok_or_else(invalid)?;
         let ip: Ipv4Addr = ip.parse().map_err(|_| invalid())?;
         let bits: u8 = bits.parse().map_err(|_| invalid())?;
-        if !(8..=30).contains(&bits)
-            || ip.is_loopback()
-            || ip.is_link_local()
-            || ip.octets()[0] == 0
-            || ip.octets()[0] >= 224
-        {
+        let minimum = match ip.octets() {
+            [10, ..] => 8,
+            [172, 16..=31, ..] => 12,
+            [192, 168, ..] => 16,
+            _ => return Err(invalid()),
+        };
+        if !(minimum..=30).contains(&bits) {
             return Err(invalid());
         }
         let network = u32::from(ip);
@@ -116,6 +118,40 @@ mod tests {
 
     fn ip(text: &str) -> Ipv4Addr {
         text.parse().unwrap_or(Ipv4Addr::UNSPECIFIED)
+    }
+
+    #[test]
+    fn configured_ranges_are_wholly_inside_rfc1918_space() {
+        for cidr in [
+            "10.0.0.0/8",
+            "10.77.0.0/16",
+            "172.16.0.0/12",
+            "172.31.255.252/30",
+            "192.168.0.0/16",
+            "192.168.77.0/30",
+        ] {
+            assert!(cidr.parse::<super::AddressSpace>().is_ok(), "{cidr}");
+        }
+        for cidr in [
+            "10.77.0.1/16",
+            "0.0.0.0/8",
+            "127.0.0.0/8",
+            "224.0.0.0/8",
+            "10.0.0.0/7",
+            "10.77.0.0/31",
+            "::/16",
+            "176.77.0.0/16",
+            "172.0.0.0/8",
+            "172.16.0.0/11",
+            "172.15.0.0/16",
+            "172.32.0.0/16",
+            "192.168.0.0/15",
+            "192.169.0.0/16",
+            "100.64.0.0/10",
+            "169.254.0.0/16",
+        ] {
+            assert!(cidr.parse::<super::AddressSpace>().is_err(), "{cidr}");
+        }
     }
 
     #[test]
