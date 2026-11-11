@@ -574,7 +574,12 @@ async fn private_rooms_hide_members_and_refuse_cross_room_flows() -> TestResult 
 
 #[tokio::test]
 async fn configured_address_spaces_assign_and_advertise_the_selected_range() -> TestResult {
-    for cidr in ["10.0.0.0/8", "172.16.0.0/12", "192.168.77.0/30"] {
+    for (cidr, network, broadcast) in [
+        ("10.0.0.0/8", "10.0.0.0", "10.255.255.255"),
+        ("172.16.0.0/12", "172.16.0.0", "172.31.255.255"),
+        ("192.168.100.0/24", "192.168.100.0", "192.168.100.255"),
+        ("192.168.77.0/30", "192.168.77.0", "192.168.77.3"),
+    ] {
         let space: overlay_relay::AddressSpace = cidr.parse()?;
         let f = fixture(|config| config.address_space = space).await?;
         let (_alice, alice) = register(f.address, "alice").await?;
@@ -584,6 +589,29 @@ async fn configured_address_spaces_assign_and_advertise_the_selected_range() -> 
         ensure!(space.assignable(alice.ip.parse()?));
         ensure!(space.assignable(bob.ip.parse()?));
         ensure!(alice.ip != bob.ip);
+        // These requests bypass every app/client-side validator.
+        for destination in [
+            network,
+            broadcast,
+            "1.1.1.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "10.77.0.1",
+        ] {
+            refused(
+                f.address,
+                open_hello("alice", destination, PROTO_TCP, Some(80)),
+            )
+            .await?;
+        }
+        if cidr.ends_with("/30") {
+            let (_, reply) = dial(f.address, &control_hello("carol")).await?;
+            ensure!(!reply.ok, "exhausted subnet admitted a third account");
+            ensure!(
+                reply.ip.is_empty(),
+                "exhaustion returned an invalid address"
+            );
+        }
     }
     Ok(())
 }

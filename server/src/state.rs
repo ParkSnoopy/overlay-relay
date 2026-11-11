@@ -97,8 +97,10 @@ impl State {
     /// Loads only assignments belonging to the selected range.
     #[must_use]
     pub fn load_in(records: &HashMap<Verifier, Record>, address_space: AddressSpace) -> Self {
-        let mut state = Self::default();
-        state.address_space = address_space;
+        let mut state = Self {
+            address_space,
+            ..Self::default()
+        };
         for (verifier, record) in records {
             if !address_space.assignable(record.ip) || state.by_ip.contains_key(&record.ip) {
                 state.dirty = true;

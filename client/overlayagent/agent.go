@@ -34,7 +34,8 @@ const (
 
 // Config wires an Agent to its platform.
 type Config struct {
-	// CIDR must match the hub. Invalid zero selects the default address space.
+	// CIDR pins the server-discovered range for this session's routing policy.
+	// It is not sent to the hub or used to request an address.
 	CIDR netip.Prefix
 	// Room is an opaque capability derived with overlay.RoomToken.
 	Room string
@@ -283,6 +284,38 @@ func (a *Agent) handshake(ctx context.Context, conn net.Conn, hello *overlay.Hel
 		return reply, err
 	}
 	return reply, ctx.Err()
+}
+
+// DiscoverCIDR authenticates through the selected transport and reads the hub's
+// assigned range before the application installs its routes. No client range
+// is sent. The temporary control connection closes before the session starts.
+func DiscoverCIDR(ctx context.Context, cfg Config) (netip.Prefix, error) {
+	a := New(cfg)
+	if a.identityErr != nil || cfg.Dial == nil || cfg.Identity == nil {
+		return netip.Prefix{}, errors.New("overlay discovery is not configured")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	conn, err := cfg.Dial(ctx)
+	if err != nil {
+		return netip.Prefix{}, errors.New("overlay hub is unreachable")
+	}
+	defer closeConn(conn)
+	stop := context.AfterFunc(ctx, func() { closeConn(conn) })
+	defer stop()
+	reply, err := a.handshake(ctx, conn, &overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl, Name: cfg.Name})
+	if err != nil {
+		return netip.Prefix{}, errors.New("overlay discovery failed")
+	}
+	if !reply.OK {
+		return netip.Prefix{}, errors.New(boundedReason(reply.Error))
+	}
+	prefix, err := overlay.ParseCIDR(reply.CIDR)
+	ip, ipErr := netip.ParseAddr(reply.IP)
+	if err != nil || reply.CIDR != prefix.String() || ipErr != nil || !overlay.AssignableIn(prefix, ip) {
+		return netip.Prefix{}, errors.New("overlay hub assigned an invalid address")
+	}
+	return prefix, nil
 }
 
 func (a *Agent) ping(ctx context.Context, conn net.Conn) {

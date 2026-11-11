@@ -4,7 +4,7 @@ use std::{collections::HashSet, hash::BuildHasher, net::Ipv4Addr};
 
 use crate::error::{Error, Result};
 
-/// A canonical IPv4 subnet wholly inside RFC 1918 private space.
+/// A canonical `IPv4` subnet wholly inside RFC 1918 private space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AddressSpace {
     network: u32,
@@ -42,7 +42,11 @@ impl std::str::FromStr for AddressSpace {
         if network & (!0_u32 >> bits) != 0 {
             return Err(invalid());
         }
-        Ok(Self { network, bits })
+        let space = Self { network, bits };
+        if space.to_string() != value {
+            return Err(invalid());
+        }
+        Ok(space)
     }
 }
 
@@ -61,6 +65,9 @@ impl AddressSpace {
     }
 
     /// Selects the lowest unused host address without allocating the full range.
+    ///
+    /// # Errors
+    /// Returns `Error::AddressExhausted` when all usable hosts are assigned.
     pub fn lowest_free<S: BuildHasher>(self, used: &HashSet<Ipv4Addr, S>) -> Result<Ipv4Addr> {
         let mut cursor = self.network + 1;
         let last = self.network + (!0_u32 >> self.bits);
@@ -149,6 +156,13 @@ mod tests {
             "192.169.0.0/16",
             "100.64.0.0/10",
             "169.254.0.0/16",
+            "10.0.0.0/08",
+            "10.0.0.0/+8",
+            "10.01.0.0/16",
+            "10.0.0.1/32",
+            "192.168.100.1/24",
+            "192.168.100.0/24 ",
+            "",
         ] {
             assert!(cidr.parse::<super::AddressSpace>().is_err(), "{cidr}");
         }

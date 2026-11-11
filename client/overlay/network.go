@@ -15,7 +15,7 @@ func ParseCIDR(value string) (netip.Prefix, error) {
 		return CIDR, nil
 	}
 	prefix, err := netip.ParsePrefix(value)
-	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() || prefix.Bits() < 8 || prefix.Bits() > 30 {
+	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() || prefix.String() != value || prefix.Bits() < 8 || prefix.Bits() > 30 {
 		return netip.Prefix{}, errors.New("overlay range must be a canonical IPv4 /8 through /30 CIDR")
 	}
 	for _, block := range []netip.Prefix{

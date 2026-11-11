@@ -40,6 +40,7 @@ type fakeHub struct {
 	accepted atomic.Int32 // streams whose Hello was read
 	acceptOK atomic.Int32 // accept streams answered ok
 	pings    atomic.Int32
+	cidr     atomic.Value // string; defaults to the production range
 
 	silent        atomic.Bool // do not answer pings
 	rejectControl atomic.Bool
@@ -60,6 +61,7 @@ func newFakeHub(t *testing.T) *fakeHub {
 		t.Fatal(err)
 	}
 	h := &fakeHub{t: t, listener: listener, conns: map[net.Conn]struct{}{}, accounts: map[string]*hubAccount{}, pending: map[string]chan net.Conn{}}
+	h.cidr.Store(overlay.CIDR.String())
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
@@ -103,6 +105,12 @@ func (h *fakeHub) account(token string) *hubAccount {
 	if a == nil {
 		h.nextID++
 		a = &hubAccount{ip: netip.AddrFrom4([4]byte{10, 77, 1, byte(h.nextID)}), name: fmt.Sprintf("acct-%d", h.nextID)}
+		if prefix, err := overlay.ParseCIDR(h.cidr.Load().(string)); err == nil && prefix != overlay.CIDR {
+			a.ip = prefix.Addr()
+			for range h.nextID {
+				a.ip = a.ip.Next()
+			}
+		}
 		h.accounts[token] = a
 	}
 	return a
@@ -172,7 +180,7 @@ func (h *fakeHub) serveControl(conn net.Conn, hello *overlay.Hello) {
 	account := h.account(hello.PublicKey)
 	account.wmu.Lock()
 	account.control = conn
-	err := overlay.WriteFrame(conn, overlay.Reply{OK: true, IP: account.ip.String(), Name: account.name, CIDR: overlay.CIDR.String()})
+	err := overlay.WriteFrame(conn, overlay.Reply{OK: true, IP: account.ip.String(), Name: account.name, CIDR: h.cidr.Load().(string)})
 	account.wmu.Unlock()
 	if err != nil {
 		return
@@ -492,6 +500,32 @@ func echoLocal(tcp, udp string, calls chan<- localCall) func(context.Context, st
 			return (&net.Dialer{}).DialContext(ctx, "udp", udp)
 		}
 		return (&net.Dialer{}).DialContext(ctx, "tcp", tcp)
+	}
+}
+
+func TestDiscoverCIDRUsesOnlyTheAuthenticatedHubRange(t *testing.T) {
+	for _, cidr := range []string{"10.77.0.0/16", "172.20.0.0/24", "192.168.100.0/24"} {
+		t.Run(cidr, func(t *testing.T) {
+			hub := newFakeHub(t)
+			hub.cidr.Store(cidr)
+			a := hub.newAgent(t, "DUMMY", nil)
+			cfg := a.cfg
+			cfg.CIDR = netip.MustParsePrefix("10.1.0.0/16")
+			prefix, err := DiscoverCIDR(context.Background(), cfg)
+			if err != nil || prefix.String() != cidr {
+				t.Fatal("discovery did not use the server range", prefix, err)
+			}
+		})
+	}
+	for _, cidr := range []string{"", "176.77.0.0/16", "192.168.100.1/24", "10.0.0.0/08", "10.0.0.0/31"} {
+		t.Run("reject "+cidr, func(t *testing.T) {
+			hub := newFakeHub(t)
+			hub.cidr.Store(cidr)
+			a := hub.newAgent(t, "DUMMY", nil)
+			if _, err := DiscoverCIDR(context.Background(), a.cfg); err == nil {
+				t.Fatal("accepted an invalid server range", cidr)
+			}
+		})
 	}
 }
 
