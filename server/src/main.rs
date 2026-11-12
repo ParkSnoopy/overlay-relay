@@ -55,12 +55,17 @@ async fn rooms_command(arguments: &[String]) -> Result<()> {
         [group, action, id, name, proof] if group == "rooms" && action == "create" => {
             overlay_relay::create(&data_dir, id, name, proof).await
         }
+        [group, action, confirm, id, name, proof]
+            if group == "rooms" && action == "replace" && confirm == "--confirm" =>
+        {
+            overlay_relay::replace(&data_dir, id, name, proof).await
+        }
         [group, action, room] if group == "rooms" && action == "remove" => {
             overlay_relay::remove(&data_dir, room).await
         }
         _ => {
             Err(Error::Config(
-                "usage: overlay-hub [rooms list|rooms create <id> <name> <proof>|rooms remove <key>]",
+                "usage: overlay-hub [rooms list|rooms create <id> <name> <proof>|rooms replace --confirm <id> <name> <proof>|rooms remove <key>]",
             ))
         }
     }

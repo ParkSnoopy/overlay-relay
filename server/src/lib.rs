@@ -63,5 +63,16 @@ pub use protocol::{
     Reply,
     VERSION,
 };
-pub use rooms::{Admission, Listed, Listing, ROOMS_FILE, admit, create, key, listing, remove};
+pub use rooms::{
+    Admission,
+    Listed,
+    Listing,
+    ROOMS_FILE,
+    admit,
+    create,
+    key,
+    listing,
+    remove,
+    replace,
+};
 pub use verifier::Verifier;

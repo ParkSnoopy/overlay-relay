@@ -45,6 +45,8 @@ type Config struct {
 	Room string
 	// RoomID names the private room; it is required with Room.
 	RoomID string
+	// FallbackPublic permits a public-room retry only after explicit private-room rejection.
+	FallbackPublic bool
 	// Name is this device's advertised name. Empty uses the hub's default.
 	Name string
 	// Identity is the persistent private key enrolled with the hub.
@@ -124,6 +126,7 @@ type Agent struct {
 	identity    *identity                    // flow certificate; nil when encryption is off or unavailable
 	identityErr error
 	direct      atomic.Pointer[directState]
+	publicRoom  atomic.Bool
 }
 
 // New builds an idle agent using its enrolled identity.
@@ -231,6 +234,11 @@ func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
 		return false, "overlay hub is unreachable"
 	}
 	if !reply.OK {
+		if a.cfg.FallbackPublic && a.cfg.Room != "" && !a.publicRoom.Load() && roomRejected(reply.Error) {
+			closeConn(conn)
+			a.publicRoom.Store(true)
+			return a.session(ctx)
+		}
 		return false, boundedReason(reply.Error)
 	}
 	ip, err := netip.ParseAddr(reply.IP)
@@ -271,6 +279,9 @@ func (a *Agent) handshake(ctx context.Context, conn net.Conn, hello *overlay.Hel
 	}
 	hello.PublicKey = a.publicKey
 	hello.Room, hello.RoomID = a.cfg.Room, a.cfg.RoomID
+	if a.publicRoom.Load() {
+		hello.Room, hello.RoomID = "", ""
+	}
 	if err := overlay.WriteFrame(conn, hello); err != nil {
 		return reply, err
 	}
@@ -325,6 +336,11 @@ func DiscoverCIDR(ctx context.Context, cfg Config) (netip.Prefix, error) {
 		return netip.Prefix{}, errors.New("overlay discovery failed")
 	}
 	if !reply.OK {
+		if cfg.FallbackPublic && cfg.Room != "" && roomRejected(reply.Error) {
+			closeConn(conn)
+			cfg.Room, cfg.RoomID = "", ""
+			return DiscoverCIDR(ctx, cfg)
+		}
 		return netip.Prefix{}, errors.New(boundedReason(reply.Error))
 	}
 	prefix, err := overlay.ParseCIDR(reply.CIDR)
@@ -333,6 +349,10 @@ func DiscoverCIDR(ctx context.Context, cfg Config) (netip.Prefix, error) {
 		return netip.Prefix{}, errors.New("overlay hub assigned an invalid address")
 	}
 	return prefix, nil
+}
+
+func roomRejected(reason string) bool {
+	return reason == "room does not exist" || reason == "room password is incorrect"
 }
 
 func (a *Agent) ping(ctx context.Context, conn net.Conn) {

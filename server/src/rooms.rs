@@ -94,7 +94,7 @@ async fn load(directory: &Path) -> Result<BTreeMap<String, Room>> {
     }
 }
 
-async fn save(directory: &Path, rooms: &BTreeMap<String, Room>) -> Result<()> {
+async fn save<T: Serialize>(directory: &Path, rooms: &BTreeMap<String, T>) -> Result<()> {
     let suffix: [u8; 8] = rand::random();
     let temporary = directory.join(format!(".rooms-{}", hex::encode(suffix)));
     let result = write_then_rename(
@@ -153,6 +153,24 @@ pub async fn listing(directory: &Path) -> Result<Listing> {
 /// Returns an error when the ID, name or proof is malformed, when the room
 /// exists, or when the room file cannot be read or written.
 pub async fn create(directory: &Path, id: &str, name: &str, proof: &str) -> Result<()> {
+    write_room(directory, id, name, proof, false).await
+}
+
+/// Replaces one existing room after explicit operator confirmation.
+///
+/// # Errors
+/// Rejects invalid input, missing rooms and unreadable or unwritable storage.
+pub async fn replace(directory: &Path, id: &str, name: &str, proof: &str) -> Result<()> {
+    write_room(directory, id, name, proof, true).await
+}
+
+async fn write_room(
+    directory: &Path,
+    id: &str,
+    name: &str,
+    proof: &str,
+    replace: bool,
+) -> Result<()> {
     if id.is_empty() || !valid_name(id) {
         return Err(Error::Config("room ID is not valid"));
     }
@@ -162,18 +180,28 @@ pub async fn create(directory: &Path, id: &str, name: &str, proof: &str) -> Resu
     if !valid_room(proof) {
         return Err(Error::Config("room password proof is not valid"));
     }
-    let mut rooms = load(directory).await?;
+    // Preserve unrelated entries, including records from older binaries. Only
+    // the explicitly selected key is rewritten into the current schema.
+    let mut rooms: BTreeMap<String, serde_json::Value> =
+        match tokio::fs::read(directory.join(ROOMS_FILE)).await {
+            Ok(raw) => serde_json::from_slice(&raw)?,
+            Err(error) if error.kind() == ErrorKind::NotFound => BTreeMap::new(),
+            Err(error) => return Err(error.into()),
+        };
     let room = key(id);
-    if rooms.contains_key(&room) {
+    if rooms.contains_key(&room) && !replace {
         return Err(Error::Config("room already exists"));
+    }
+    if !rooms.contains_key(&room) && replace {
+        return Err(Error::Config("room is unknown"));
     }
     rooms.insert(
         room,
-        Room {
+        serde_json::to_value(Room {
             id: id.to_owned(),
             name: name.to_owned(),
             proof: proof.to_owned(),
-        },
+        })?,
     );
     save(directory, &rooms).await
 }

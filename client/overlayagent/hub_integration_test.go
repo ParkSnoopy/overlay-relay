@@ -53,7 +53,7 @@ func TestServerAssignedRangeWithRustHub(t *testing.T) {
 	defer stopEcho()
 	calls := make(chan localCall, 4)
 	var agents []*testAgent
-	for range 2 {
+	for index := range 2 {
 		key, err := overlay.GenerateIdentity()
 		if err != nil {
 			t.Fatal(err)
@@ -62,6 +62,17 @@ func TestServerAssignedRangeWithRustHub(t *testing.T) {
 		cfg := Config{Identity: key, Name: "DUMMY", Dial: func(ctx context.Context) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "tcp", address)
 		}, DialLocal: echoLocal(tcp, udp, calls)}
+		if index == 0 {
+			cfg.RoomID = "DUMMY missing room"
+			cfg.Room, err = overlay.RoomToken(cfg.RoomID, "DUMMY password")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := DiscoverCIDR(ctx, cfg); err == nil {
+				t.Fatal("private room rejection must not fall back by default")
+			}
+			cfg.FallbackPublic = true
+		}
 		prefix, err := DiscoverCIDR(ctx, cfg)
 		if err != nil || prefix.String() != "192.168.100.0/24" {
 			t.Fatal("did not discover the non-default hub range", prefix, err)
