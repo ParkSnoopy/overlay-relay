@@ -76,9 +76,12 @@ type Hello struct {
 	Version   int    `json:"version"`
 	Kind      string `json:"kind"`
 	PublicKey string `json:"public_key"`
-	// Room is an opaque private-room capability, empty for the public room.
-	Room  string `json:"room,omitempty"`
-	Name  string `json:"name,omitempty"`  // control: advertised device name
+	// Room is the private-room password proof, empty for the public room.
+	Room string `json:"room,omitempty"`
+	// RoomID names the private room, empty for the public room. A known ID
+	// only admits the password proof that its first requester used.
+	RoomID string `json:"room_id,omitempty"`
+	Name   string `json:"name,omitempty"`  // control: advertised device name
 	Proto string `json:"proto,omitempty"` // open
 	Dst   string `json:"dst,omitempty"`   // open: destination overlay IP
 	Port  uint16 `json:"port,omitempty"`  // open: destination port

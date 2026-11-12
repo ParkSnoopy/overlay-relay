@@ -37,8 +37,10 @@ type Config struct {
 	// CIDR pins the server-discovered range for this session's routing policy.
 	// It is not sent to the hub or used to request an address.
 	CIDR netip.Prefix
-	// Room is an opaque capability derived with overlay.RoomToken.
+	// Room is the password proof derived with overlay.RoomToken.
 	Room string
+	// RoomID names the private room; it is required with Room.
+	RoomID string
 	// Name is this device's advertised name. Empty uses the hub's default.
 	Name string
 	// Identity is the persistent private key enrolled with the hub.
@@ -136,7 +138,7 @@ func New(cfg Config) *Agent {
 	a.identityErr = errors.Join(a.identityErr, a.SetRelayOnly(cfg.RelayOnly), overlay.ValidateName(cfg.Name))
 	_, rangeErr := overlay.ParseCIDR(cfg.CIDR.String())
 	a.identityErr = errors.Join(a.identityErr, rangeErr, a.SetDirectPeers(cfg.DirectPeers))
-	if cfg.Room != "" && !overlay.ValidPeerID(cfg.Room) {
+	if cfg.Room != "" && (!overlay.ValidPeerID(cfg.Room) || cfg.RoomID == "" || overlay.ValidateName(cfg.RoomID) != nil) || cfg.Room == "" && cfg.RoomID != "" {
 		a.identityErr = errors.Join(a.identityErr, errors.New("invalid overlay room"))
 	}
 	if !cfg.DisableEncryption {
@@ -257,7 +259,7 @@ func (a *Agent) handshake(ctx context.Context, conn net.Conn, hello *overlay.Hel
 		return reply, err
 	}
 	hello.PublicKey = a.publicKey
-	hello.Room = a.cfg.Room
+	hello.Room, hello.RoomID = a.cfg.Room, a.cfg.RoomID
 	if err := overlay.WriteFrame(conn, hello); err != nil {
 		return reply, err
 	}
@@ -269,7 +271,11 @@ func (a *Agent) handshake(ctx context.Context, conn net.Conn, hello *overlay.Hel
 	if err != nil || len(nonce) != 32 {
 		return reply, errors.New("invalid overlay challenge")
 	}
-	digest := sha512.Sum384(append(append([]byte("overlay-relay/auth/v3:"), nonce...), []byte(hello.Room)...))
+	message := append(append([]byte("overlay-relay/auth/v3:"), nonce...), []byte(hello.Room)...)
+	if hello.Room != "" {
+		message = append(append(message, 0), []byte(hello.RoomID)...)
+	}
+	digest := sha512.Sum384(message)
 	signature, err := ecdsa.SignASN1(rand.Reader, a.cfg.Identity, digest[:])
 	if err != nil {
 		return reply, err

@@ -13,6 +13,7 @@ use std::{
 use overlay_relay::{
     Config,
     ERR_INVALID_REQUEST,
+    ERR_ROOM_DENIED,
     ERR_ROOM_PENDING,
     ERR_UNAUTHORIZED,
     ERR_UNAVAILABLE,
@@ -225,6 +226,10 @@ async fn dial(address: SocketAddr, hello: &Hello) -> TestResult<(TcpStream, Repl
         let mut message = b"overlay-relay/auth/v3:".to_vec();
         message.extend_from_slice(&hex::decode(nonce)?);
         message.extend_from_slice(hello.room.as_bytes());
+        if !hello.room.is_empty() {
+            message.push(0);
+            message.extend_from_slice(hello.room_id.as_bytes());
+        }
         let signature: Signature = key.sign(&message);
         write_frame(
             &mut stream,
@@ -530,18 +535,23 @@ async fn control_registration_replies_then_sends_peers() -> TestResult {
 async fn private_rooms_hide_members_and_refuse_cross_room_flows() -> TestResult {
     let f = fixture(|_| {}).await?;
     let room = "ab".repeat(32);
-    tokio::fs::write(f.dir.path().join("rooms.json"), format!(r#"["{room}"]"#)).await?;
     let mut alice_hello = control_hello("alice");
     alice_hello.room = room.clone();
+    alice_hello.room_id = "DUMMY room".to_owned();
+    let (_, waiting) = dial(f.address, &alice_hello).await?;
+    ensure_eq!(waiting, Reply::failed(ERR_ROOM_PENDING));
+    overlay_relay::approve(f.dir.path(), &overlay_relay::key("DUMMY room")).await?;
     let (mut alice, alice_reply) = dial(f.address, &alice_hello).await?;
     ensure!(alice_reply.ok);
     let mut bob_hello = control_hello("bob");
     bob_hello.room = room.clone();
+    bob_hello.room_id = "DUMMY room".to_owned();
     let (mut bob, bob_reply) = dial(f.address, &bob_hello).await?;
     ensure!(bob_reply.ok);
     let (mut public, _) = register(f.address, "carol").await?;
     let mut wrong_hello = control_hello("dave");
     wrong_hello.room = "cd".repeat(32);
+    wrong_hello.room_id = "DUMMY other room".to_owned();
     let (_wrong, wrong_reply) = dial(f.address, &wrong_hello).await?;
     ensure_eq!(wrong_reply, Reply::failed(ERR_ROOM_PENDING));
     let pending = tokio::fs::read_to_string(f.dir.path().join("rooms-pending.json")).await?;
@@ -559,16 +569,19 @@ async fn private_rooms_hide_members_and_refuse_cross_room_flows() -> TestResult 
     .await?;
     let mut spoof = open_hello("alice", &bob_reply.ip, PROTO_TCP, Some(80));
     spoof.room = wrong_hello.room;
+    spoof.room_id = wrong_hello.room_id;
     let (_, spoofed) = dial(f.address, &spoof).await?;
     ensure_eq!(spoofed, Reply::failed(ERR_ROOM_PENDING));
     let mut opening = open_hello("alice", &bob_reply.ip, PROTO_TCP, Some(80));
     opening.room = room.clone();
+    opening.room_id = "DUMMY room".to_owned();
     let opened = tokio::spawn(open_flow(f.address, opening));
     let incoming = next_incoming(&mut bob).await?;
     let (_, rejected) = dial(f.address, &accept_hello("bob", &incoming.id)).await?;
     ensure_eq!(rejected, Reply::failed(ERR_UNAUTHORIZED));
     let mut accepting = accept_hello("bob", &incoming.id);
     accepting.room = room;
+    accepting.room_id = "DUMMY room".to_owned();
     let (mut receiver, accepted) = dial(f.address, &accepting).await?;
     ensure!(accepted.ok);
     let (mut sender, reply) = opened.await??;
@@ -583,9 +596,10 @@ async fn private_rooms_hide_members_and_refuse_cross_room_flows() -> TestResult 
 #[tokio::test]
 async fn first_request_waits_for_approval_and_then_connects_unchanged() -> TestResult {
     let f = fixture(|_| {}).await?;
-    let room = "ef".repeat(32);
+    let room = overlay_relay::key("DUMMY room");
     let mut hello = control_hello("alice");
-    hello.room = room.clone();
+    hello.room = "ef".repeat(32);
+    hello.room_id = "DUMMY room".to_owned();
     let (_, waiting) = dial(f.address, &hello).await?;
     ensure_eq!(waiting, Reply::failed(ERR_ROOM_PENDING));
     let listed = overlay_relay::listing(f.dir.path()).await?;
@@ -594,10 +608,18 @@ async fn first_request_waits_for_approval_and_then_connects_unchanged() -> TestR
         listed.pending.contains_key(&room),
         "the room must be listed"
     );
-    // A later device that knows the same capability does not replace the first request.
+    // A device with the same room ID but another password is denied and never recorded.
     let mut other = control_hello("bob");
-    other.room = room.clone();
-    let (_, second) = dial(f.address, &other).await?;
+    other.room = "12".repeat(32);
+    other.room_id = "DUMMY room".to_owned();
+    let (_, denied) = dial(f.address, &other).await?;
+    ensure_eq!(denied, Reply::failed(ERR_ROOM_DENIED));
+    ensure_eq!(overlay_relay::listing(f.dir.path()).await?, listed);
+    // The same password from another device is the same request.
+    let mut same = control_hello("bob");
+    same.room.clone_from(&hello.room);
+    same.room_id.clone_from(&hello.room_id);
+    let (_, second) = dial(f.address, &same).await?;
     ensure_eq!(second, Reply::failed(ERR_ROOM_PENDING));
     ensure_eq!(overlay_relay::listing(f.dir.path()).await?, listed);
     ensure!(
@@ -612,11 +634,10 @@ async fn first_request_waits_for_approval_and_then_connects_unchanged() -> TestR
         admitted.ok,
         "the first requester must connect after approval"
     );
-    let (_bob, admitted) = dial(f.address, &other).await?;
-    ensure!(
-        admitted.ok,
-        "the same capability is admitted after approval"
-    );
+    let (_bob, admitted) = dial(f.address, &same).await?;
+    ensure!(admitted.ok, "the same password is admitted after approval");
+    let (_, denied) = dial(f.address, &other).await?;
+    ensure_eq!(denied, Reply::failed(ERR_ROOM_DENIED));
     ensure!(
         overlay_relay::listing(f.dir.path())
             .await?
@@ -624,6 +645,9 @@ async fn first_request_waits_for_approval_and_then_connects_unchanged() -> TestR
             .is_empty(),
         "an approved room must leave the waiting list"
     );
+    overlay_relay::remove(f.dir.path(), &room).await?;
+    let (_, again) = dial(f.address, &other).await?;
+    ensure_eq!(again, Reply::failed(ERR_ROOM_PENDING));
     Ok(())
 }
 

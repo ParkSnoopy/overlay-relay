@@ -61,6 +61,9 @@ pub const ERR_UNAUTHORIZED: &str = "unauthorized";
 /// Reason given to an authenticated device whose private room is not yet approved.
 pub const ERR_ROOM_PENDING: &str = "room awaiting approval";
 
+/// Reason given when the room ID exists but the password proof differs.
+pub const ERR_ROOM_DENIED: &str = "room password is incorrect";
+
 /// Reason given for an unknown Hello kind.
 pub const ERR_INVALID_REQUEST: &str = "invalid request";
 
@@ -80,9 +83,12 @@ pub struct Hello {
     pub kind: String,
     /// Hex-encoded uncompressed P-384 public key.
     pub public_key: String,
-    /// Opaque room capability; empty selects the public room.
+    /// Password proof of the private room; empty selects the public room.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub room: String,
+    /// Room ID of a private room; empty selects the public room.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub room_id: String,
     /// Control only: optional advertised device name. Empty uses the default.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,

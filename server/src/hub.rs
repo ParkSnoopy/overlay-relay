@@ -2,7 +2,6 @@
 //! and dispatch of each connection to its stream kind.
 
 use std::{
-    collections::BTreeMap,
     fmt,
     net::Ipv4Addr,
     sync::Arc,
@@ -34,6 +33,7 @@ use crate::{
     protocol::{
         Challenge,
         ERR_INVALID_REQUEST,
+        ERR_ROOM_DENIED,
         ERR_ROOM_PENDING,
         ERR_UNAUTHORIZED,
         Hello,
@@ -45,7 +45,7 @@ use crate::{
         VERSION,
         valid_name,
     },
-    rooms::{self, MAX_PENDING, Request},
+    rooms::{self, Admission},
     state::{Requester, State},
     verifier::Verifier,
 };
@@ -59,8 +59,8 @@ pub struct Shared {
     pub state: Mutex<State>,
     /// Serializes writes of the persisted identities.
     pub store: Mutex<()>,
-    /// Private rooms that asked for approval and have not received it.
-    pub pending_rooms: Mutex<BTreeMap<String, Request>>,
+    /// Serializes the admission of private rooms.
+    pub rooms: Mutex<()>,
 }
 
 /// Seconds since the Unix epoch.
@@ -107,18 +107,12 @@ impl Hub {
             assignments::load(&config.data_dir.join(assignments::FILE_NAME), unix_now()).await?;
         let state = State::load_in(&records, config.address_space);
         info!(identities = records.len(), "overlay identities loaded");
-        let pending_rooms = rooms::load_pending(&config.data_dir)
-            .await
-            .unwrap_or_else(|error| {
-                warn!(error = %error, "overlay room requests could not be loaded");
-                BTreeMap::new()
-            });
         let hub = Self {
             shared: Arc::new(Shared {
                 config,
                 state: Mutex::new(state),
                 store: Mutex::new(()),
-                pending_rooms: Mutex::new(pending_rooms),
+                rooms: Mutex::new(()),
             }),
         };
         persist(&hub.shared).await;
@@ -173,7 +167,7 @@ impl Hub {
         }
         let Ok(Some(requester)) = timeout(
             handshake,
-            self.authenticate(&mut stream, &hello.public_key, &hello.room),
+            self.authenticate(&mut stream, &hello.public_key, &hello.room, &hello.room_id),
         )
         .await
         else {
@@ -182,11 +176,20 @@ impl Hub {
                 .ok();
             return;
         };
-        if !self.room_approved(&requester, &hello.name).await {
-            send_frame(&mut stream, &Reply::failed(ERR_ROOM_PENDING))
-                .await
-                .ok();
-            return;
+        match self.admit_room(&requester, &hello).await {
+            Admission::Approved => {}
+            Admission::Waiting => {
+                send_frame(&mut stream, &Reply::failed(ERR_ROOM_PENDING))
+                    .await
+                    .ok();
+                return;
+            }
+            Admission::Denied => {
+                send_frame(&mut stream, &Reply::failed(ERR_ROOM_DENIED))
+                    .await
+                    .ok();
+                return;
+            }
         }
         match hello.kind.as_str() {
             KIND_CONTROL => {
@@ -204,49 +207,36 @@ impl Hub {
         }
     }
 
-    /// Admits a private room only after the operator approved its capability.
-    /// An unapproved room is recorded once, with its first requester, so the
-    /// operator can approve it; the public room needs no approval.
-    async fn room_approved(&self, requester: &Requester, name: &str) -> bool {
+    /// Admits a private room only after the operator approved it with the
+    /// password of its first requester. An unknown room ID is recorded once,
+    /// with its first requester; a known room ID with another password is
+    /// denied and never recorded again. The public room needs no approval.
+    async fn admit_room(&self, requester: &Requester, hello: &Hello) -> Admission {
         if requester.room.is_empty() {
-            return true;
+            return Admission::Approved;
         }
-        let directory = &self.shared.config.data_dir;
-        let mut pending = self.shared.pending_rooms.lock().await;
-        match rooms::load_approved(directory).await {
-            Ok(approved) if approved.contains(&requester.room) => {
-                if pending.remove(&requester.room).is_some() {
-                    rooms::save_pending(directory, &pending).await.ok();
-                }
-                return true;
-            }
-            Ok(_) => {}
-            Err(error) => {
-                warn!(error = %error, "overlay approved rooms could not be read");
-                return false;
-            }
-        }
-        if pending.contains_key(&requester.room) || pending.len() >= MAX_PENDING {
-            return false;
-        }
-        let name = if name.is_empty() || !valid_name(name) {
+        let name = if hello.name.is_empty() || !valid_name(&hello.name) {
             &requester.name
         } else {
-            name
+            &hello.name
         };
-        pending.insert(
-            requester.room.clone(),
-            Request {
-                peer: requester.verifier.to_hex(),
-                name: name.to_owned(),
-                requested: unix_now(),
-            },
-        );
-        if let Err(error) = rooms::save_pending(directory, &pending).await {
-            warn!(error = %error, "overlay room request could not be saved");
+        let _serial = self.shared.rooms.lock().await;
+        match rooms::admit(
+            &self.shared.config.data_dir,
+            &hello.room_id,
+            &requester.room,
+            &requester.verifier.to_hex(),
+            name,
+            unix_now(),
+        )
+        .await
+        {
+            Ok(admission) => admission,
+            Err(error) => {
+                warn!(error = %error, "overlay rooms could not be checked");
+                Admission::Waiting
+            }
         }
-        drop(pending);
-        false
     }
 
     /// Challenges the peer to sign a fresh nonce with the key it presented.
@@ -256,13 +246,13 @@ impl Hub {
         stream: &mut TcpStream,
         public_key: &str,
         room: &str,
+        room_id: &str,
     ) -> Option<Requester> {
-        if !room.is_empty()
-            && (room.len() != 64
-                || !room
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-        {
+        // A private room needs both its password proof and a room ID.
+        if room.is_empty() != room_id.is_empty() {
+            return None;
+        }
+        if !room.is_empty() && (!rooms::valid_room(room) || !valid_name(room_id)) {
             return None;
         }
         let verifier = Verifier::from_public_key(public_key)?;
@@ -282,6 +272,10 @@ impl Hub {
         let mut message = b"overlay-relay/auth/v3:".to_vec();
         message.extend_from_slice(&nonce);
         message.extend_from_slice(room.as_bytes());
+        if !room.is_empty() {
+            message.push(0);
+            message.extend_from_slice(room_id.as_bytes());
+        }
         UnparsedPublicKey::new(&ECDSA_P384_SHA384_ASN1, public)
             .verify(&message, &signature)
             .ok()?;

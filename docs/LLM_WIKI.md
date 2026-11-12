@@ -89,7 +89,8 @@ All field names are lowercase JSON keys.
 | Field | Type | Used by | Meaning |
 |---|---|---|---|
 | `version` | integer | all | Must be `3`. Otherwise the hub closes the stream silently. Coordinated client/hub updates are required; existing keys remain valid. |
-| `room` | string | all | Opaque room capability, empty for public membership. Derive private membership locally from the room ID and password. Never log it. |
+| `room` | string | all | Private room password proof, empty for public membership. Derive it locally from the room ID and password. Never log it. |
+| `room_id` | string | all | Private room ID, empty for public membership. Required with `room`. A known ID admits only the proof its first requester used. |
 | `kind` | string | all | `"control"`, `"open"` or `"accept"`. Anything else gets reply `invalid request`. |
 | `public_key` | string | all | Hex-encoded uncompressed P-384 public key (section 4). |
 | `name` | string | control | Optional advertised name for the authenticated device. Empty uses the identity-derived default; invalid names receive `invalid request` without replacing an existing control. |
@@ -108,7 +109,7 @@ Private membership is the lowercase hex of PBKDF2-HMAC-SHA256(password, `overlay
 
 Both devices must explicitly approve the other's ID in `DirectPeers` before direct offers or connections. Empty approvals permit relay only. Revocation closes affected direct flows and negotiations.
 
-After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The signed transcript is UTF-8 `overlay-relay/auth/v3:`, followed by the 32 raw nonce bytes and the UTF-8 room capability without a separator. The client signs using ECDSA P-384 with SHA-384. It sends `{"signature":"<hex>"}` with the ASN.1 DER signature. The hub verifies the proof before issuing the reply; a valid proof of any key is accepted, and a key seen for the first time receives an address. A malformed public key can receive an unauthorized reply without a challenge.
+After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The signed transcript is UTF-8 `overlay-relay/auth/v3:`, followed by the 32 raw nonce bytes and the UTF-8 room proof without a separator. A private room also appends one `0` byte and the UTF-8 room ID; a public room appends nothing. The client signs using ECDSA P-384 with SHA-384. It sends `{"signature":"<hex>"}` with the ASN.1 DER signature. The hub verifies the proof before issuing the reply; a valid proof of any key is accepted, and a key seen for the first time receives an address. A malformed public key can receive an unauthorized reply without a challenge.
 
 ### 7.2 Reply (hub to client)
 
@@ -244,7 +245,8 @@ Exact error strings in `Reply.error`:
 
 | Value | When |
 |---|---|
-| `room awaiting approval` | The device proved its key, but its private room capability is not approved. The first request is recorded for the operator; retry after approval. |
+| `room awaiting approval` | The device proved its key, but its private room is not approved. The first request for an unknown room ID is recorded for the operator; retry after approval. |
+| `room password is incorrect` | The room ID is known but the password proof differs from the one fixed by its first requester. Nothing is recorded, so it never becomes an approval request. |
 | `unauthorized` | Public key or proof is malformed or invalid, or the identity table is full of active peers. Accept answers this also when the id is unknown, expired, already used, or addressed to another account. |
 | `peer unavailable` | Open request is invalid, destination is missing or hidden, a precondition fails, or the destination did not accept in time. |
 | `invalid request` | Authenticated identity, but `kind` is not `control`, `open` or `accept`. |

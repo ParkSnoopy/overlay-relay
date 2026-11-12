@@ -42,7 +42,8 @@ async fn main() -> ExitCode {
 }
 
 /// `rooms list` prints the waiting and approved rooms as JSON; `rooms approve
-/// <room>` approves a requested room. Both act on the hub's data directory.
+/// <key>` approves a requested room and `rooms remove <key>` forgets a waiting
+/// or approved one. All act on the hub's data directory.
 async fn rooms_command(arguments: &[String]) -> Result<()> {
     let data_dir = env::var(DATA_DIR_ENV).map_or_else(|_| PathBuf::from(DATA_DIR), PathBuf::from);
     match arguments {
@@ -54,9 +55,12 @@ async fn rooms_command(arguments: &[String]) -> Result<()> {
         [group, action, room] if group == "rooms" && action == "approve" => {
             overlay_relay::approve(&data_dir, room).await
         }
+        [group, action, room] if group == "rooms" && action == "remove" => {
+            overlay_relay::remove(&data_dir, room).await
+        }
         _ => {
             Err(Error::Config(
-                "usage: overlay-hub [rooms list|rooms approve <room>]",
+                "usage: overlay-hub [rooms list|rooms approve <key>|rooms remove <key>]",
             ))
         }
     }
