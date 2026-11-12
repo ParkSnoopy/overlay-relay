@@ -34,9 +34,13 @@ const (
 
 // Config wires an Agent to its platform.
 type Config struct {
-	// CIDR pins the server-discovered range for this session's routing policy.
-	// It is not sent to the hub or used to request an address.
+	// CIDR optionally pins a range the caller already received from the hub.
+	// It is never sent to the hub. When unset, the agent adopts the range from
+	// the hub's first accepted reply and reports it through OnRange.
 	CIDR netip.Prefix
+	// OnRange is called once, without the agent's locks held, when the hub's
+	// range becomes known. The caller installs its routes for the range here.
+	OnRange func(netip.Prefix)
 	// Room is the password proof derived with overlay.RoomToken.
 	Room string
 	// RoomID names the private room; it is required with Room.
@@ -115,16 +119,14 @@ type Agent struct {
 	flows    sync.WaitGroup
 	inflight chan struct{}
 
-	identity    *identity // flow certificate; nil when encryption is off or unavailable
+	rng         atomic.Pointer[netip.Prefix] // hub range; nil until the hub assigns it
+	identity    *identity                    // flow certificate; nil when encryption is off or unavailable
 	identityErr error
 	direct      atomic.Pointer[directState]
 }
 
 // New builds an idle agent using its enrolled identity.
 func New(cfg Config) *Agent {
-	if !cfg.CIDR.IsValid() {
-		cfg.CIDR = overlay.CIDR
-	}
 	publicKey, identityErr := overlay.PublicIdentity(cfg.Identity)
 	a := &Agent{
 		cfg:         cfg,
@@ -136,8 +138,12 @@ func New(cfg Config) *Agent {
 		inflight:    make(chan struct{}, maxIncoming),
 	}
 	a.identityErr = errors.Join(a.identityErr, a.SetRelayOnly(cfg.RelayOnly), overlay.ValidateName(cfg.Name))
-	_, rangeErr := overlay.ParseCIDR(cfg.CIDR.String())
-	a.identityErr = errors.Join(a.identityErr, rangeErr, a.SetDirectPeers(cfg.DirectPeers))
+	if cfg.CIDR.IsValid() {
+		prefix, rangeErr := overlay.ParseCIDR(cfg.CIDR.String())
+		a.identityErr = errors.Join(a.identityErr, rangeErr)
+		a.rng.Store(&prefix)
+	}
+	a.identityErr = errors.Join(a.identityErr, a.SetDirectPeers(cfg.DirectPeers))
 	if cfg.Room != "" && (!overlay.ValidPeerID(cfg.Room) || cfg.RoomID == "" || overlay.ValidateName(cfg.RoomID) != nil) || cfg.Room == "" && cfg.RoomID != "" {
 		a.identityErr = errors.Join(a.identityErr, errors.New("invalid overlay room"))
 	}
@@ -227,8 +233,12 @@ func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
 		return false, boundedReason(reply.Error)
 	}
 	ip, err := netip.ParseAddr(reply.IP)
-	if err != nil || reply.CIDR != a.cfg.CIDR.String() || !overlay.AssignableIn(a.cfg.CIDR, ip) {
+	prefix, rangeErr := overlay.ParseCIDR(reply.CIDR)
+	if err != nil || rangeErr != nil || reply.CIDR != prefix.String() || !overlay.AssignableIn(prefix, ip) {
 		return false, "overlay hub assigned an invalid address"
+	}
+	if !a.pinRange(prefix) {
+		return false, "overlay hub changed its address range"
 	}
 	a.registered(ip, reply.Name)
 
@@ -362,6 +372,28 @@ func (a *Agent) readEvents(ctx context.Context, conn net.Conn) {
 	}
 }
 
+// Range is the hub's address space, or the zero prefix before the hub has
+// assigned one.
+func (a *Agent) Range() netip.Prefix {
+	if prefix := a.rng.Load(); prefix != nil {
+		return *prefix
+	}
+	return netip.Prefix{}
+}
+
+// pinRange fixes the range on first use and reports whether prefix is the
+// pinned range. A hub that later answers with another range is refused, because
+// the caller's routes were installed for the first one.
+func (a *Agent) pinRange(prefix netip.Prefix) bool {
+	if a.rng.CompareAndSwap(nil, &prefix) {
+		if a.cfg.OnRange != nil {
+			a.cfg.OnRange(prefix)
+		}
+		return true
+	}
+	return a.Range() == prefix
+}
+
 func (a *Agent) registered(ip netip.Addr, name string) {
 	a.mu.Lock()
 	a.ip, a.name, a.connected, a.reason = ip, name, true, ""
@@ -389,7 +421,7 @@ func (a *Agent) setPeers(peers []overlay.Peer) {
 	set := make(map[netip.Addr]struct{}, len(peers))
 	for _, peer := range peers {
 		ip, err := netip.ParseAddr(peer.IP)
-		if err != nil || !overlay.AssignableIn(a.cfg.CIDR, ip) {
+		if err != nil || !overlay.AssignableIn(a.Range(), ip) {
 			continue
 		}
 		if _, duplicate := set[ip]; duplicate || len(kept) == maxPeers {

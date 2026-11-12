@@ -21,8 +21,9 @@ import (
 // While no agent runs, flows to the overlay address space are refused rather
 // than forwarded, so hidden sessions never leak overlay traffic to the server.
 type Router struct {
-	// Prefix reserves the range even before registration or while disconnected.
-	// Set it before exposing the session's packet handler; zero uses the default.
+	// Prefix optionally reserves a range the hub already assigned, even while
+	// disconnected. Zero follows the running agent's range, which stays empty
+	// until the hub assigns one.
 	Prefix netip.Prefix
 	mu     sync.RWMutex
 	agent  *Agent
@@ -32,7 +33,13 @@ type Router struct {
 func (r *Router) Owns(address netip.Addr) bool {
 	prefix := r.Prefix
 	if !prefix.IsValid() {
-		prefix = overlay.CIDR
+		r.mu.RLock()
+		agent := r.agent
+		r.mu.RUnlock()
+		if agent == nil {
+			return false
+		}
+		prefix = agent.Range()
 	}
 	return prefix.Contains(address.Unmap())
 }
