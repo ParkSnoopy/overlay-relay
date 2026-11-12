@@ -24,6 +24,7 @@ mod frame;
 mod hub;
 mod open;
 mod protocol;
+mod rooms;
 mod splice;
 mod state;
 mod verifier;
@@ -37,6 +38,7 @@ pub use hub::{Hub, Shared, persist, unix_now};
 pub use protocol::{
     Challenge,
     ERR_INVALID_REQUEST,
+    ERR_ROOM_PENDING,
     ERR_UNAUTHORIZED,
     ERR_UNAVAILABLE,
     Event,
@@ -60,4 +62,5 @@ pub use protocol::{
     Reply,
     VERSION,
 };
+pub use rooms::{APPROVED_FILE, Listing, PENDING_FILE, Request, approve, listing};
 pub use verifier::Verifier;

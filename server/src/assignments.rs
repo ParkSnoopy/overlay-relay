@@ -97,7 +97,7 @@ pub async fn save(path: &Path, records: &HashMap<Verifier, Record>) -> Result<()
     result
 }
 
-async fn write_then_rename(temporary: &Path, path: &Path, raw: &[u8]) -> Result<()> {
+pub async fn write_then_rename(temporary: &Path, path: &Path, raw: &[u8]) -> Result<()> {
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

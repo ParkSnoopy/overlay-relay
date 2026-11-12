@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,7 @@ const serverManifest = "../server/Cargo.toml"
 
 type hubProcess struct {
 	address string
+	dir     string
 	cmd     *exec.Cmd
 }
 
@@ -81,7 +83,7 @@ func startHub(t *testing.T, binary string, environment ...string) hubProcess {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return hubProcess{address: address, cmd: cmd}
+	return hubProcess{address: address, dir: dir, cmd: cmd}
 }
 
 type account struct {
@@ -150,6 +152,27 @@ func TestGoAgentAndRustHubPrivateRoomTCP(t *testing.T) {
 	configure := func(config *overlayagent.Config) {
 		config.CIDR = netip.MustParsePrefix("10.0.0.0/8")
 		config.Room = room
+	}
+
+	// The hub refuses a private room until the operator approves its first request.
+	discover := overlayagent.Config{
+		Identity: alice.key,
+		Room:     room,
+		Dial: func(ctx context.Context) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "tcp", hub.address)
+		},
+	}
+	if _, err := overlayagent.DiscoverCIDR(context.Background(), discover); err == nil || !strings.Contains(err.Error(), "room awaiting approval") {
+		t.Fatalf("unapproved room error = %v, want room awaiting approval", err)
+	}
+	approve := exec.Command(binary, "rooms", "approve", room)
+	approve.Env = append(os.Environ(), "OVERLAY_DATA_DIR="+hub.dir)
+	if output, err := approve.CombinedOutput(); err != nil {
+		t.Fatalf("approve room: %v: %s", err, output)
+	}
+	if _, err := overlayagent.DiscoverCIDR(context.Background(), discover); err != nil {
+		t.Fatalf("approved room: %v", err)
 	}
 
 	// Bob's local service receives relayed flows at the overlay port.

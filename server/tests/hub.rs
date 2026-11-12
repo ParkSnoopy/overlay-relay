@@ -13,6 +13,7 @@ use std::{
 use overlay_relay::{
     Config,
     ERR_INVALID_REQUEST,
+    ERR_ROOM_PENDING,
     ERR_UNAUTHORIZED,
     ERR_UNAVAILABLE,
     Event,
@@ -529,6 +530,7 @@ async fn control_registration_replies_then_sends_peers() -> TestResult {
 async fn private_rooms_hide_members_and_refuse_cross_room_flows() -> TestResult {
     let f = fixture(|_| {}).await?;
     let room = "ab".repeat(32);
+    tokio::fs::write(f.dir.path().join("rooms.json"), format!(r#"["{room}"]"#)).await?;
     let mut alice_hello = control_hello("alice");
     alice_hello.room = room.clone();
     let (mut alice, alice_reply) = dial(f.address, &alice_hello).await?;
@@ -540,11 +542,16 @@ async fn private_rooms_hide_members_and_refuse_cross_room_flows() -> TestResult 
     let (mut public, _) = register(f.address, "carol").await?;
     let mut wrong_hello = control_hello("dave");
     wrong_hello.room = "cd".repeat(32);
-    let (mut wrong, _) = dial(f.address, &wrong_hello).await?;
+    let (_wrong, wrong_reply) = dial(f.address, &wrong_hello).await?;
+    ensure_eq!(wrong_reply, Reply::failed(ERR_ROOM_PENDING));
+    let pending = tokio::fs::read_to_string(f.dir.path().join("rooms-pending.json")).await?;
+    ensure!(
+        pending.contains(&wrong_hello.room),
+        "an unapproved room must be recorded for the operator"
+    );
     await_peers(&mut alice, &["bob"]).await?;
     await_peers(&mut bob, &["alice"]).await?;
     await_peers(&mut public, &[]).await?;
-    await_peers(&mut wrong, &[]).await?;
     refused(
         f.address,
         open_hello("carol", &bob_reply.ip, PROTO_TCP, Some(80)),
@@ -552,7 +559,8 @@ async fn private_rooms_hide_members_and_refuse_cross_room_flows() -> TestResult 
     .await?;
     let mut spoof = open_hello("alice", &bob_reply.ip, PROTO_TCP, Some(80));
     spoof.room = wrong_hello.room;
-    refused(f.address, spoof).await?;
+    let (_, spoofed) = dial(f.address, &spoof).await?;
+    ensure_eq!(spoofed, Reply::failed(ERR_ROOM_PENDING));
     let mut opening = open_hello("alice", &bob_reply.ip, PROTO_TCP, Some(80));
     opening.room = room.clone();
     let opened = tokio::spawn(open_flow(f.address, opening));
@@ -569,6 +577,53 @@ async fn private_rooms_hide_members_and_refuse_cross_room_flows() -> TestResult 
     let mut bytes = [0; 21];
     timeout(IO_WAIT, receiver.read_exact(&mut bytes)).await??;
     ensure_eq!(&bytes, b"DUMMY private payload");
+    Ok(())
+}
+
+#[tokio::test]
+async fn first_request_waits_for_approval_and_then_connects_unchanged() -> TestResult {
+    let f = fixture(|_| {}).await?;
+    let room = "ef".repeat(32);
+    let mut hello = control_hello("alice");
+    hello.room = room.clone();
+    let (_, waiting) = dial(f.address, &hello).await?;
+    ensure_eq!(waiting, Reply::failed(ERR_ROOM_PENDING));
+    let listed = overlay_relay::listing(f.dir.path()).await?;
+    ensure_eq!(listed.pending.len(), 1);
+    ensure!(
+        listed.pending.contains_key(&room),
+        "the room must be listed"
+    );
+    // A later device that knows the same capability does not replace the first request.
+    let mut other = control_hello("bob");
+    other.room = room.clone();
+    let (_, second) = dial(f.address, &other).await?;
+    ensure_eq!(second, Reply::failed(ERR_ROOM_PENDING));
+    ensure_eq!(overlay_relay::listing(f.dir.path()).await?, listed);
+    ensure!(
+        overlay_relay::approve(f.dir.path(), &"01".repeat(32))
+            .await
+            .is_err(),
+        "a room nobody requested must not be approvable"
+    );
+    overlay_relay::approve(f.dir.path(), &room).await?;
+    let (_alice, admitted) = dial(f.address, &hello).await?;
+    ensure!(
+        admitted.ok,
+        "the first requester must connect after approval"
+    );
+    let (_bob, admitted) = dial(f.address, &other).await?;
+    ensure!(
+        admitted.ok,
+        "the same capability is admitted after approval"
+    );
+    ensure!(
+        overlay_relay::listing(f.dir.path())
+            .await?
+            .pending
+            .is_empty(),
+        "an approved room must leave the waiting list"
+    );
     Ok(())
 }
 

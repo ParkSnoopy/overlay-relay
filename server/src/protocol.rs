@@ -58,6 +58,9 @@ pub const ERR_UNAVAILABLE: &str = "peer unavailable";
 /// Reason given when an identity does not authenticate or an accept is not allowed.
 pub const ERR_UNAUTHORIZED: &str = "unauthorized";
 
+/// Reason given to an authenticated device whose private room is not yet approved.
+pub const ERR_ROOM_PENDING: &str = "room awaiting approval";
+
 /// Reason given for an unknown Hello kind.
 pub const ERR_INVALID_REQUEST: &str = "invalid request";
 

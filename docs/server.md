@@ -35,7 +35,7 @@ The table holds 4096 peers. When it is full, a new key takes the address of the 
 
 ## Protocol
 
-Wire version 3 requires coordinated client/hub updates. Existing identity keys remain valid. An optional opaque `room` capability confines discovery, opens and accepts to matching members. Empty selects public membership. Clients derive private capabilities from a room ID and password. The hub exposes no room directory and never logs capabilities. The authenticated VPN remains mandatory.
+Wire version 3 requires coordinated client/hub updates. Existing identity keys remain valid. An optional opaque `room` capability confines discovery, opens and accepts to matching members. Empty selects public membership. Clients derive private capabilities from a room ID and password. The hub exposes no room directory and never logs capabilities. A private room is refused with `room awaiting approval` until the operator approves it. The first request for an unapproved capability is recorded with its device name in `rooms-pending.json`. `overlay-hub rooms list` prints the waiting and approved capabilities as JSON, and `overlay-hub rooms approve <room>` adds a requested capability to `rooms.json`. Approval therefore fixes the room to the password its first requester used. The hub reads `rooms.json` on every private-room connection, so no restart is needed. The hub keeps at most 64 waiting requests. The authenticated VPN remains mandatory.
 
 The client sends a `Hello` within 10 seconds, and every frame it reads is bounded by `overlay.MaxFrame` (16 KiB on the wire).
 The hub validates the public key, issues a fresh challenge, verifies its signature and looks up the public-key digest. It answers an unknown identity with `unauthorized` before closing.

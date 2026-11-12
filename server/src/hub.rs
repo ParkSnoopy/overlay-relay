@@ -2,6 +2,7 @@
 //! and dispatch of each connection to its stream kind.
 
 use std::{
+    collections::BTreeMap,
     fmt,
     net::Ipv4Addr,
     sync::Arc,
@@ -33,6 +34,7 @@ use crate::{
     protocol::{
         Challenge,
         ERR_INVALID_REQUEST,
+        ERR_ROOM_PENDING,
         ERR_UNAUTHORIZED,
         Hello,
         KIND_ACCEPT,
@@ -41,7 +43,9 @@ use crate::{
         Proof,
         Reply,
         VERSION,
+        valid_name,
     },
+    rooms::{self, MAX_PENDING, Request},
     state::{Requester, State},
     verifier::Verifier,
 };
@@ -55,6 +59,8 @@ pub struct Shared {
     pub state: Mutex<State>,
     /// Serializes writes of the persisted identities.
     pub store: Mutex<()>,
+    /// Private rooms that asked for approval and have not received it.
+    pub pending_rooms: Mutex<BTreeMap<String, Request>>,
 }
 
 /// Seconds since the Unix epoch.
@@ -101,11 +107,18 @@ impl Hub {
             assignments::load(&config.data_dir.join(assignments::FILE_NAME), unix_now()).await?;
         let state = State::load_in(&records, config.address_space);
         info!(identities = records.len(), "overlay identities loaded");
+        let pending_rooms = rooms::load_pending(&config.data_dir)
+            .await
+            .unwrap_or_else(|error| {
+                warn!(error = %error, "overlay room requests could not be loaded");
+                BTreeMap::new()
+            });
         let hub = Self {
             shared: Arc::new(Shared {
                 config,
                 state: Mutex::new(state),
                 store: Mutex::new(()),
+                pending_rooms: Mutex::new(pending_rooms),
             }),
         };
         persist(&hub.shared).await;
@@ -169,6 +182,12 @@ impl Hub {
                 .ok();
             return;
         };
+        if !self.room_approved(&requester, &hello.name).await {
+            send_frame(&mut stream, &Reply::failed(ERR_ROOM_PENDING))
+                .await
+                .ok();
+            return;
+        }
         match hello.kind.as_str() {
             KIND_CONTROL => {
                 control::serve(&self.shared, stream, requester, &hello.name, session).await;
@@ -183,6 +202,51 @@ impl Hub {
                     .ok();
             }
         }
+    }
+
+    /// Admits a private room only after the operator approved its capability.
+    /// An unapproved room is recorded once, with its first requester, so the
+    /// operator can approve it; the public room needs no approval.
+    async fn room_approved(&self, requester: &Requester, name: &str) -> bool {
+        if requester.room.is_empty() {
+            return true;
+        }
+        let directory = &self.shared.config.data_dir;
+        let mut pending = self.shared.pending_rooms.lock().await;
+        match rooms::load_approved(directory).await {
+            Ok(approved) if approved.contains(&requester.room) => {
+                if pending.remove(&requester.room).is_some() {
+                    rooms::save_pending(directory, &pending).await.ok();
+                }
+                return true;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %error, "overlay approved rooms could not be read");
+                return false;
+            }
+        }
+        if pending.contains_key(&requester.room) || pending.len() >= MAX_PENDING {
+            return false;
+        }
+        let name = if name.is_empty() || !valid_name(name) {
+            &requester.name
+        } else {
+            name
+        };
+        pending.insert(
+            requester.room.clone(),
+            Request {
+                peer: requester.verifier.to_hex(),
+                name: name.to_owned(),
+                requested: unix_now(),
+            },
+        );
+        if let Err(error) = rooms::save_pending(directory, &pending).await {
+            warn!(error = %error, "overlay room request could not be saved");
+        }
+        drop(pending);
+        false
     }
 
     /// Challenges the peer to sign a fresh nonce with the key it presented.

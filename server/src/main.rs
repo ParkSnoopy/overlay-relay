@@ -4,9 +4,9 @@
 //! of host names that may connect; without it every private-network source
 //! may. A client needs no enrollment: its own key is its identity.
 
-use std::{env, path::PathBuf, process::ExitCode};
+use std::{env, io::Write, path::PathBuf, process::ExitCode};
 
-use overlay_relay::{Config, Hub, LISTEN_ADDRESS, Result};
+use overlay_relay::{Config, Error, Hub, LISTEN_ADDRESS, Result};
 use tokio::{
     net::TcpListener,
     select,
@@ -26,11 +26,38 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .with_max_level(Level::INFO)
         .init();
-    match run().await {
+    let arguments: Vec<String> = env::args().skip(1).collect();
+    let outcome = if arguments.is_empty() {
+        run().await
+    } else {
+        rooms_command(&arguments).await
+    };
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => {
             error!(error = %failure, "overlay hub stopped");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// `rooms list` prints the waiting and approved rooms as JSON; `rooms approve
+/// <room>` approves a requested room. Both act on the hub's data directory.
+async fn rooms_command(arguments: &[String]) -> Result<()> {
+    let data_dir = env::var(DATA_DIR_ENV).map_or_else(|_| PathBuf::from(DATA_DIR), PathBuf::from);
+    match arguments {
+        [group, action] if group == "rooms" && action == "list" => {
+            let listing = serde_json::to_string(&overlay_relay::listing(&data_dir).await?)?;
+            writeln!(std::io::stdout(), "{listing}")?;
+            Ok(())
+        }
+        [group, action, room] if group == "rooms" && action == "approve" => {
+            overlay_relay::approve(&data_dir, room).await
+        }
+        _ => {
+            Err(Error::Config(
+                "usage: overlay-hub [rooms list|rooms approve <room>]",
+            ))
         }
     }
 }

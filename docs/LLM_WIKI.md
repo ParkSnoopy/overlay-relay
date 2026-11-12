@@ -244,6 +244,7 @@ Exact error strings in `Reply.error`:
 
 | Value | When |
 |---|---|
+| `room awaiting approval` | The device proved its key, but its private room capability is not approved. The first request is recorded for the operator; retry after approval. |
 | `unauthorized` | Public key or proof is malformed or invalid, or the identity table is full of active peers. Accept answers this also when the id is unknown, expired, already used, or addressed to another account. |
 | `peer unavailable` | Open request is invalid, destination is missing or hidden, a precondition fails, or the destination did not accept in time. |
 | `invalid request` | Authenticated identity, but `kind` is not `control`, `open` or `accept`. |
