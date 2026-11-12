@@ -479,13 +479,14 @@ func (a *Agent) emit() {
 	defer a.emitMu.Unlock()
 	a.mu.Lock()
 	state := overlay.State{
-		Available:    true,
-		Broadcasting: true,
-		Connected:    a.connected,
-		Reason:       a.reason,
-		Name:         a.name,
-		RoomName:     a.roomName,
-		Peers:        append([]overlay.Peer{}, a.peers...),
+		Available:      true,
+		Broadcasting:   true,
+		Connected:      a.connected,
+		PublicFallback: a.connected && a.publicRoom.Load(),
+		Reason:         a.reason,
+		Name:           a.name,
+		RoomName:       a.roomName,
+		Peers:          append([]overlay.Peer{}, a.peers...),
 	}
 	for i := range state.Peers {
 		peer := &state.Peers[i]

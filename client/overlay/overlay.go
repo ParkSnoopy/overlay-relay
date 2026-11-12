@@ -231,12 +231,13 @@ const ErrUnavailable = "peer unavailable"
 // Available is false with a Reason when the engine or platform cannot carry
 // the overlay; Broadcasting reports the connect-time choice.
 type State struct {
-	Available    bool   `json:"available"`
-	Reason       string `json:"reason,omitempty"`
-	Broadcasting bool   `json:"broadcasting"`
-	Connected    bool   `json:"connected"` // control stream registered with the hub
-	IP           string `json:"ip,omitempty"`
-	Name         string `json:"name,omitempty"`
+	Available      bool   `json:"available"`
+	Reason         string `json:"reason,omitempty"`
+	Broadcasting   bool   `json:"broadcasting"`
+	Connected      bool   `json:"connected"`                 // control stream registered with the hub
+	PublicFallback bool   `json:"public_fallback,omitempty"` // private-room rejection selected the public room
+	IP             string `json:"ip,omitempty"`
+	Name           string `json:"name,omitempty"`
 	// RoomName is the hub's display name of the joined private room.
 	RoomName string `json:"room_name,omitempty"`
 	Peers    []Peer `json:"peers"`

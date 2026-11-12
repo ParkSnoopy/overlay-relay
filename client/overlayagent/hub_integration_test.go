@@ -88,6 +88,9 @@ func TestServerAssignedRangeWithRustHub(t *testing.T) {
 		if ip := a.waitReady(t); !overlay.AssignableIn(prefix, ip) {
 			t.Fatal("hub assigned an address outside its own range", ip)
 		}
+		a.waitState(t, "public fallback state", func(state overlay.State) bool {
+			return state.Connected && state.PublicFallback == (index == 0)
+		})
 		agents = append(agents, a)
 	}
 	a, b := agents[0], agents[1]
