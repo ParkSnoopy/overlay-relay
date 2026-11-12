@@ -41,9 +41,9 @@ async fn main() -> ExitCode {
     }
 }
 
-/// `rooms list` prints the waiting and approved rooms as JSON; `rooms approve
-/// <key>` approves a requested room and `rooms remove <key>` forgets a waiting
-/// or approved one. All act on the hub's data directory.
+/// `rooms list` prints the created rooms as JSON; `rooms create <id> <name>
+/// <proof>` creates one with the password proof the client derives, and
+/// `rooms remove <key>` forgets it. All act on the hub's data directory.
 async fn rooms_command(arguments: &[String]) -> Result<()> {
     let data_dir = env::var(DATA_DIR_ENV).map_or_else(|_| PathBuf::from(DATA_DIR), PathBuf::from);
     match arguments {
@@ -52,15 +52,15 @@ async fn rooms_command(arguments: &[String]) -> Result<()> {
             writeln!(std::io::stdout(), "{listing}")?;
             Ok(())
         }
-        [group, action, room] if group == "rooms" && action == "approve" => {
-            overlay_relay::approve(&data_dir, room).await
+        [group, action, id, name, proof] if group == "rooms" && action == "create" => {
+            overlay_relay::create(&data_dir, id, name, proof).await
         }
         [group, action, room] if group == "rooms" && action == "remove" => {
             overlay_relay::remove(&data_dir, room).await
         }
         _ => {
             Err(Error::Config(
-                "usage: overlay-hub [rooms list|rooms approve <key>|rooms remove <key>]",
+                "usage: overlay-hub [rooms list|rooms create <id> <name> <proof>|rooms remove <key>]",
             ))
         }
     }

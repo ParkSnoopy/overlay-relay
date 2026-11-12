@@ -245,8 +245,8 @@ Exact error strings in `Reply.error`:
 
 | Value | When |
 |---|---|
-| `room awaiting approval` | The device proved its key, but its private room is not approved. The first request for an unknown room ID is recorded for the operator; retry after approval. |
-| `room password is incorrect` | The room ID is known but the password proof differs from the one fixed by its first requester. Nothing is recorded, so it never becomes an approval request. |
+| `room does not exist` | The device proved its key, but the operator has not created its private room. Nothing is recorded; retry after the room is created. |
+| `room password is incorrect` | The room ID is known but the password proof differs from the one stored when the operator created the room. |
 | `unauthorized` | Public key or proof is malformed or invalid, or the identity table is full of active peers. Accept answers this also when the id is unknown, expired, already used, or addressed to another account. |
 | `peer unavailable` | Open request is invalid, destination is missing or hidden, a precondition fails, or the destination did not accept in time. |
 | `invalid request` | Authenticated identity, but `kind` is not `control`, `open` or `accept`. |

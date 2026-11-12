@@ -114,6 +114,9 @@ type Reply struct {
 	Name  string `json:"name,omitempty"` // control: this account's display name
 	CIDR  string `json:"cidr,omitempty"` // control: authoritative address space
 
+	// RoomName is the display name of the private room, empty in the public room.
+	RoomName string `json:"room_name,omitempty"`
+
 	// Secure reports that both sides offered a fingerprint, so the flow is
 	// end-to-end encrypted. Fingerprint is then the other side's.
 	Secure      bool   `json:"secure,omitempty"`
@@ -234,7 +237,9 @@ type State struct {
 	Connected    bool   `json:"connected"` // control stream registered with the hub
 	IP           string `json:"ip,omitempty"`
 	Name         string `json:"name,omitempty"`
-	Peers        []Peer `json:"peers"`
+	// RoomName is the hub's display name of the joined private room.
+	RoomName string `json:"room_name,omitempty"`
+	Peers    []Peer `json:"peers"`
 }
 
 // WriteFrame writes one length-prefixed JSON frame.

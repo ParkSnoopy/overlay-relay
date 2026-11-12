@@ -25,6 +25,8 @@ const SEEN_GRANULARITY: u64 = 3600;
 pub struct Requester {
     /// Authenticated room capability for this stream, never a public room label.
     pub room: String,
+    /// Display name of the private room, empty in the public room.
+    pub room_name: String,
     /// The account's verifier.
     pub verifier: Verifier,
     /// The account's display name, sent only in its own control reply.
@@ -181,6 +183,7 @@ impl State {
         let entry = self.accounts.get(&verifier)?;
         Some(Requester {
             room: String::new(),
+            room_name: String::new(),
             verifier,
             name: entry.name.clone(),
             ip: entry.ip,

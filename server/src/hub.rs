@@ -34,7 +34,7 @@ use crate::{
         Challenge,
         ERR_INVALID_REQUEST,
         ERR_ROOM_DENIED,
-        ERR_ROOM_PENDING,
+        ERR_ROOM_UNKNOWN,
         ERR_UNAUTHORIZED,
         Hello,
         KIND_ACCEPT,
@@ -59,8 +59,6 @@ pub struct Shared {
     pub state: Mutex<State>,
     /// Serializes writes of the persisted identities.
     pub store: Mutex<()>,
-    /// Serializes the admission of private rooms.
-    pub rooms: Mutex<()>,
 }
 
 /// Seconds since the Unix epoch.
@@ -112,7 +110,6 @@ impl Hub {
                 config,
                 state: Mutex::new(state),
                 store: Mutex::new(()),
-                rooms: Mutex::new(()),
             }),
         };
         persist(&hub.shared).await;
@@ -176,19 +173,22 @@ impl Hub {
                 .ok();
             return;
         };
-        match self.admit_room(&requester, &hello).await {
-            Admission::Approved => {}
-            Admission::Waiting => {
-                send_frame(&mut stream, &Reply::failed(ERR_ROOM_PENDING))
-                    .await
-                    .ok();
-                return;
-            }
-            Admission::Denied => {
-                send_frame(&mut stream, &Reply::failed(ERR_ROOM_DENIED))
-                    .await
-                    .ok();
-                return;
+        let mut requester = requester;
+        if !requester.room.is_empty() {
+            match self.admit_room(&requester, &hello).await {
+                Admission::Admitted(name) => requester.room_name = name,
+                Admission::Unknown => {
+                    send_frame(&mut stream, &Reply::failed(ERR_ROOM_UNKNOWN))
+                        .await
+                        .ok();
+                    return;
+                }
+                Admission::Denied => {
+                    send_frame(&mut stream, &Reply::failed(ERR_ROOM_DENIED))
+                        .await
+                        .ok();
+                    return;
+                }
             }
         }
         match hello.kind.as_str() {
@@ -207,34 +207,20 @@ impl Hub {
         }
     }
 
-    /// Admits a private room only after the operator approved it with the
-    /// password of its first requester. An unknown room ID is recorded once,
-    /// with its first requester; a known room ID with another password is
-    /// denied and never recorded again. The public room needs no approval.
+    /// Admits a private room only when the operator created it and the device
+    /// proves its password. The hub never creates a room.
     async fn admit_room(&self, requester: &Requester, hello: &Hello) -> Admission {
-        if requester.room.is_empty() {
-            return Admission::Approved;
-        }
-        let name = if hello.name.is_empty() || !valid_name(&hello.name) {
-            &requester.name
-        } else {
-            &hello.name
-        };
-        let _serial = self.shared.rooms.lock().await;
         match rooms::admit(
             &self.shared.config.data_dir,
             &hello.room_id,
             &requester.room,
-            &requester.verifier.to_hex(),
-            name,
-            unix_now(),
         )
         .await
         {
             Ok(admission) => admission,
             Err(error) => {
                 warn!(error = %error, "overlay rooms could not be checked");
-                Admission::Waiting
+                Admission::Unknown
             }
         }
     }

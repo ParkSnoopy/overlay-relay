@@ -39,7 +39,7 @@ pub use protocol::{
     Challenge,
     ERR_INVALID_REQUEST,
     ERR_ROOM_DENIED,
-    ERR_ROOM_PENDING,
+    ERR_ROOM_UNKNOWN,
     ERR_UNAUTHORIZED,
     ERR_UNAVAILABLE,
     Event,
@@ -63,16 +63,5 @@ pub use protocol::{
     Reply,
     VERSION,
 };
-pub use rooms::{
-    APPROVED_FILE,
-    Admission,
-    Listing,
-    PENDING_FILE,
-    Waiting,
-    admit,
-    approve,
-    key,
-    listing,
-    remove,
-};
+pub use rooms::{Admission, Listed, Listing, ROOMS_FILE, admit, create, key, listing, remove};
 pub use verifier::Verifier;

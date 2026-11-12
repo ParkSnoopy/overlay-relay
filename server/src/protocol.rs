@@ -58,8 +58,8 @@ pub const ERR_UNAVAILABLE: &str = "peer unavailable";
 /// Reason given when an identity does not authenticate or an accept is not allowed.
 pub const ERR_UNAUTHORIZED: &str = "unauthorized";
 
-/// Reason given to an authenticated device whose private room is not yet approved.
-pub const ERR_ROOM_PENDING: &str = "room awaiting approval";
+/// Reason given to an authenticated device that asks for a room nobody created.
+pub const ERR_ROOM_UNKNOWN: &str = "room does not exist";
 
 /// Reason given when the room ID exists but the password proof differs.
 pub const ERR_ROOM_DENIED: &str = "room password is incorrect";
@@ -149,6 +149,9 @@ pub struct Reply {
     /// Control only: the account's display name.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,
+    /// Control only: the display name of the private room, empty in the public room.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub room_name: String,
     /// Open and accept only: both sides offered a fingerprint, so the flow is
     /// end-to-end encrypted.
     #[serde(skip_serializing_if = "std::ops::Not::not")]

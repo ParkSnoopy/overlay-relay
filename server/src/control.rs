@@ -86,6 +86,7 @@ pub async fn serve(
     }
     let mut reply = Reply::registered(&requester.ip.to_string(), &requester.name);
     reply.cidr = shared.config.address_space.to_string();
+    reply.room_name.clone_from(&requester.room_name);
     if send_frame(&mut writer, &reply).await.is_err() {
         close.cancel();
         shared

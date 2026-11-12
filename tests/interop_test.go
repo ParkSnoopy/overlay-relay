@@ -3,8 +3,6 @@ package tests
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"io"
 	"net"
@@ -158,7 +156,7 @@ func TestGoAgentAndRustHubPrivateRoomTCP(t *testing.T) {
 		config.RoomID = roomID
 	}
 
-	// The hub refuses a private room until the operator approves its first request.
+	// The hub refuses a private room until the operator creates it.
 	discover := overlayagent.Config{
 		Identity: alice.key,
 		Room:     room,
@@ -168,30 +166,25 @@ func TestGoAgentAndRustHubPrivateRoomTCP(t *testing.T) {
 			return dialer.DialContext(ctx, "tcp", hub.address)
 		},
 	}
-	if _, err := overlayagent.DiscoverCIDR(context.Background(), discover); err == nil || !strings.Contains(err.Error(), "room awaiting approval") {
-		t.Fatalf("unapproved room error = %v, want room awaiting approval", err)
+	if _, err := overlayagent.DiscoverCIDR(context.Background(), discover); err == nil || !strings.Contains(err.Error(), "room does not exist") {
+		t.Fatalf("missing room error = %v, want room does not exist", err)
 	}
-	// The room ID is unique: another password is denied and never becomes a request.
 	other := discover
 	other.Room, err = overlay.RoomToken(roomID, "DUMMY other password")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := overlayagent.DiscoverCIDR(context.Background(), other); err == nil || !strings.Contains(err.Error(), "room password is incorrect") {
-		t.Fatalf("wrong password error = %v, want room password is incorrect", err)
-	}
-	digest := sha256.Sum256([]byte(roomID))
-	key := hex.EncodeToString(digest[:])
-	approve := exec.Command(binary, "rooms", "approve", key)
-	approve.Env = append(os.Environ(), "OVERLAY_DATA_DIR="+hub.dir)
-	if output, err := approve.CombinedOutput(); err != nil {
-		t.Fatalf("approve room: %v: %s", err, output)
+	create := exec.Command(binary, "rooms", "create", roomID, "DUMMY room name", room)
+	create.Env = append(os.Environ(), "OVERLAY_DATA_DIR="+hub.dir)
+	if output, err := create.CombinedOutput(); err != nil {
+		t.Fatalf("create room: %v: %s", err, output)
 	}
 	if _, err := overlayagent.DiscoverCIDR(context.Background(), discover); err != nil {
-		t.Fatalf("approved room: %v", err)
+		t.Fatalf("created room: %v", err)
 	}
+	// The room ID is unique: another password is denied.
 	if _, err := overlayagent.DiscoverCIDR(context.Background(), other); err == nil || !strings.Contains(err.Error(), "room password is incorrect") {
-		t.Fatalf("approved wrong password error = %v, want room password is incorrect", err)
+		t.Fatalf("wrong password error = %v, want room password is incorrect", err)
 	}
 
 	// Bob's local service receives relayed flows at the overlay port.

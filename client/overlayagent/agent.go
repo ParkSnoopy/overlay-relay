@@ -98,6 +98,7 @@ type Agent struct {
 	mu        sync.Mutex
 	ip        netip.Addr
 	name      string
+	roomName  string
 	connected bool
 	reason    string
 	peers     []overlay.Peer
@@ -240,7 +241,7 @@ func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
 	if !a.pinRange(prefix) {
 		return false, "overlay hub changed its address range"
 	}
-	a.registered(ip, reply.Name)
+	a.registered(ip, reply.Name, reply.RoomName)
 
 	sctx, cancel := context.WithCancel(ctx)
 	stopClose := context.AfterFunc(sctx, func() { closeConn(conn) })
@@ -394,9 +395,9 @@ func (a *Agent) pinRange(prefix netip.Prefix) bool {
 	return a.Range() == prefix
 }
 
-func (a *Agent) registered(ip netip.Addr, name string) {
+func (a *Agent) registered(ip netip.Addr, name, roomName string) {
 	a.mu.Lock()
-	a.ip, a.name, a.connected, a.reason = ip, name, true, ""
+	a.ip, a.name, a.roomName, a.connected, a.reason = ip, name, roomName, true, ""
 	first := a.ready
 	a.mu.Unlock()
 	a.readyOnce.Do(func() {
@@ -463,6 +464,7 @@ func (a *Agent) emit() {
 		Connected:    a.connected,
 		Reason:       a.reason,
 		Name:         a.name,
+		RoomName:     a.roomName,
 		Peers:        append([]overlay.Peer{}, a.peers...),
 	}
 	for i := range state.Peers {
