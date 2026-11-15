@@ -168,7 +168,14 @@ impl State {
                 self.evict_idle()?;
             }
             let used: HashSet<Ipv4Addr> = self.by_ip.keys().copied().collect();
-            let ip = self.address_space.lowest_free(&used).ok()?;
+            let ip = match self.address_space.lowest_free(&used) {
+                Ok(ip) => ip,
+                Err(_) => {
+                    self.evict_idle()?;
+                    let used: HashSet<Ipv4Addr> = self.by_ip.keys().copied().collect();
+                    self.address_space.lowest_free(&used).ok()?
+                }
+            };
             self.by_ip.insert(ip, verifier);
             self.accounts.insert(
                 verifier,

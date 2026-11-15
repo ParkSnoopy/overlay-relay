@@ -57,7 +57,7 @@ Every hub stream must traverse an authenticated VPN. The challenge authenticates
 
 The hub keeps every key it has verified in `ips.json` in its data directory: verifier hex mapped to an object with the peer's `ip` and `seen` (Unix seconds of its last authentication or disconnect). No operator writes this file. The hub rewrites it atomically with mode `0600`.
 
-- At most `4096` peers. When the table is full, a new key takes over the address of the peer with the oldest `seen` that has no control stream and no flow. When every peer is in use, the new key is refused with `unauthorized`.
+- At most `4096` peers, also bounded by subnet capacity. When either limit is exhausted, a new key takes over the address of the peer with the oldest `seen` that has no control stream and no flow. When every peer is in use, the new key is refused with `unauthorized`.
 - The default display name of a peer is `peer-` followed by the first 8 hex digits of its verifier. An authenticated control Hello may advertise its own name, up to 128 Unicode characters without control characters or surrounding whitespace. Empty or absent restores the default. Names are transient, never written to `ips.json`, and do not change identity or address.
 - A file written by an older hub (verifier hex mapped to a bare address) loads, and each entry counts as seen at load time. A corrupt file stops the hub rather than renumbering peers.
 
@@ -247,6 +247,7 @@ Exact error strings in `Reply.error`:
 |---|---|
 | `room does not exist` | The device proved its key, but the operator has not created its private room. Nothing is recorded; retry after the room is created. |
 | `room password is incorrect` | The room ID is known but the password proof differs from the one stored when the operator created the room. |
+| `rooms are unavailable` | Room storage or the selected record cannot be read safely; clients must not treat this as permission for public fallback. |
 | `unauthorized` | Public key or proof is malformed or invalid, or the identity table is full of active peers. Accept answers this also when the id is unknown, expired, already used, or addressed to another account. |
 | `peer unavailable` | Open request is invalid, destination is missing or hidden, a precondition fails, or the destination did not accept in time. |
 | `invalid request` | Authenticated identity, but `kind` is not `control`, `open` or `accept`. |

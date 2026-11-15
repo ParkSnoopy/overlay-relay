@@ -169,7 +169,7 @@ fn key_of(name: &str) -> Option<SigningKey> {
 
 fn public_of(name: &str) -> String {
     key_of(name).map_or_else(String::new, |key| {
-        hex::encode(key.verifying_key().to_encoded_point(false).as_bytes())
+        hex::encode(key.verifying_key().to_sec1_point(false).as_bytes())
     })
 }
 

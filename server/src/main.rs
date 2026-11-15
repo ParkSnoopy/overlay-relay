@@ -23,6 +23,7 @@ const DATA_DIR: &str = "/var/lib/overlay-relay";
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
+        .with_ansi(false)
         .with_writer(std::io::stderr)
         .with_max_level(Level::INFO)
         .init();

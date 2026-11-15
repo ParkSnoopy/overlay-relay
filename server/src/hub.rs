@@ -177,6 +177,12 @@ impl Hub {
         if !requester.room.is_empty() {
             match self.admit_room(&requester, &hello).await {
                 Admission::Admitted(name) => requester.room_name = name,
+                Admission::Unavailable => {
+                    send_frame(&mut stream, &Reply::failed("rooms are unavailable"))
+                        .await
+                        .ok();
+                    return;
+                }
                 Admission::Unknown => {
                     send_frame(&mut stream, &Reply::failed(ERR_ROOM_UNKNOWN))
                         .await
@@ -220,7 +226,7 @@ impl Hub {
             Ok(admission) => admission,
             Err(error) => {
                 warn!(error = %error, "overlay rooms could not be checked");
-                Admission::Unknown
+                Admission::Unavailable
             }
         }
     }

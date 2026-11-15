@@ -13,7 +13,7 @@ The hub enrolls nobody: each client generates its own P-384 key pair, and a clie
 
 - `OVERLAY_ALLOWED_HOST` is an optional comma-separated list of engine container names. Without it the hub admits every loopback, private or link-local source.
 - `OVERLAY_CIDR` selects a canonical IPv4 `/8` through `/30` subnet wholly within RFC 1918 private space (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), default `10.77.0.0/16`. Clients must configure the same range. Public ranges and supernets crossing private block boundaries are rejected. The administrator owns routing conflicts.
-- `/var/lib/overlay-relay` is the only writable path and holds `ips.json`; it is the only state.
+- `/var/lib/overlay-relay` is the writable state directory for `ips.json` and `rooms.json`.
 
 ## Admission
 
@@ -31,11 +31,17 @@ The default display name of a peer is `peer-` and the first 8 hex digits of its 
 A control Hello may supply `name`, applied only after proof of possession of that peer's key.
 The hub validates a maximum of 128 Unicode characters with no control characters or surrounding whitespace, updates only that authenticated peer and publishes fresh peer snapshots.
 Names are transient and are not written to `ips.json`; an empty or absent name restores the default on registration without changing the address.
-The table holds 4096 peers. When it is full, a new key takes the address of the peer seen longest ago that has no control stream and no flow, and when every peer is in use the new key receives `unauthorized`.
+The table holds at most 4096 peers, bounded also by the subnet's usable addresses.
+When either limit is exhausted, a new key reclaims the oldest peer with no control stream or flow; if every peer is in use it receives `unauthorized`.
 
 ## Protocol
 
 Wire version 3 requires coordinated client/hub updates. Existing identity keys remain valid. An optional `room_id` and `room` password proof confine discovery, opens and accepts to matching members. Both empty select public membership; a private room needs both. Clients derive the proof from the room ID and password, so the hub never learns the password. The hub exposes no room directory and never logs proofs. A room ID is unique, and the hub keys a room by the SHA-256 hex of its ID. A private room exists only when the operator creates it, and the hub never creates one from a request. An unknown ID is refused with `room does not exist`. `overlay-hub rooms create <id> <name> <proof>` writes the room, with its display name and password proof, to `rooms.json`; `overlay-hub rooms list` prints the rooms as JSON, and `overlay-hub rooms remove <key>` deletes one. A known ID with another password proof is refused with `room password is incorrect`. The hub reads `rooms.json` on every private-room connection, so no restart is needed. A joined device receives the room's display name as `room_name` in the hub's reply. The authenticated VPN remains mandatory.
+
+Unreadable/corrupt room storage or an invalid selected record returns `rooms are unavailable`, never an unknown-room refusal.
+Healthy rooms remain usable alongside malformed records, which listing retains as repairable placeholders.
+Legacy approval arrays remain denied placeholders until explicitly replaced or removed; adding another room preserves them.
+Administrative errors contain no ANSI formatting so managers can classify duplicate-room failures reliably.
 
 The client sends a `Hello` within 10 seconds, and every frame it reads is bounded by `overlay.MaxFrame` (16 KiB on the wire).
 The hub validates the public key, issues a fresh challenge, verifies its signature and looks up the public-key digest. It answers an unknown identity with `unauthorized` before closing.

@@ -59,6 +59,8 @@ pub enum Admission {
     Unknown,
     /// The room ID is known and the proof differs.
     Denied,
+    /// Storage is unavailable or the selected record is invalid.
+    Unavailable,
 }
 
 /// Returns the room key: the SHA-256 hex of the room ID.
@@ -86,12 +88,39 @@ fn same(left: &str, right: &str) -> bool {
             == 0
 }
 
-async fn load(directory: &Path) -> Result<BTreeMap<String, Room>> {
+async fn load(directory: &Path) -> Result<BTreeMap<String, serde_json::Value>> {
     match tokio::fs::read(directory.join(ROOMS_FILE)).await {
-        Ok(raw) => Ok(serde_json::from_slice(&raw)?),
+        Ok(raw) => {
+            let value: serde_json::Value = serde_json::from_slice(&raw)?;
+            if let Some(legacy) = value.as_array() {
+                let mut rooms = BTreeMap::new();
+                for entry in legacy {
+                    let room = entry
+                        .as_str()
+                        .filter(|room| valid_room(room))
+                        .ok_or(Error::Config("legacy room key is not valid"))?;
+                    rooms.insert(room.to_owned(), serde_json::Value::Null);
+                }
+                return Ok(rooms);
+            }
+            Ok(serde_json::from_value(value)?)
+        }
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(BTreeMap::new()),
         Err(error) => Err(error.into()),
     }
+}
+
+fn decode_room(room_key: &str, value: serde_json::Value) -> Result<Room> {
+    let room: Room = serde_json::from_value(value)?;
+    if room.id.is_empty()
+        || !valid_name(&room.id)
+        || !valid_name(&room.name)
+        || !valid_room(&room.proof)
+        || key(&room.id) != room_key
+    {
+        return Err(Error::Config("room record is not valid"));
+    }
+    Ok(room)
 }
 
 async fn save<T: Serialize>(directory: &Path, rooms: &BTreeMap<String, T>) -> Result<()> {
@@ -114,7 +143,14 @@ async fn save<T: Serialize>(directory: &Path, rooms: &BTreeMap<String, T>) -> Re
 /// # Errors
 /// Returns an error when the room file cannot be read or parsed.
 pub async fn admit(directory: &Path, id: &str, proof: &str) -> Result<Admission> {
-    Ok(match load(directory).await?.get(&key(id)) {
+    let room_key = key(id);
+    let rooms = load(directory).await?;
+    let room = rooms
+        .get(&room_key)
+        .cloned()
+        .map(|value| decode_room(&room_key, value))
+        .transpose()?;
+    Ok(match room {
         None => Admission::Unknown,
         Some(room) if same(&room.proof, proof) => {
             Admission::Admitted(if room.name.is_empty() {
@@ -136,6 +172,15 @@ pub async fn listing(directory: &Path) -> Result<Listing> {
         .await?
         .into_iter()
         .map(|(room, entry)| {
+            let Ok(entry) = decode_room(&room, entry) else {
+                return (
+                    room,
+                    Listed {
+                        id: String::new(),
+                        name: "Invalid room record — replace or remove".to_owned(),
+                    },
+                );
+            };
             let name = if entry.name.is_empty() {
                 entry.id.clone()
             } else {
@@ -182,12 +227,7 @@ async fn write_room(
     }
     // Preserve unrelated entries, including records from older binaries. Only
     // the explicitly selected key is rewritten into the current schema.
-    let mut rooms: BTreeMap<String, serde_json::Value> =
-        match tokio::fs::read(directory.join(ROOMS_FILE)).await {
-            Ok(raw) => serde_json::from_slice(&raw)?,
-            Err(error) if error.kind() == ErrorKind::NotFound => BTreeMap::new(),
-            Err(error) => return Err(error.into()),
-        };
+    let mut rooms = load(directory).await?;
     let room = key(id);
     if rooms.contains_key(&room) && !replace {
         return Err(Error::Config("room already exists"));

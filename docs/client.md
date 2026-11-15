@@ -14,6 +14,9 @@ The name is session metadata, not an identity or address change.
 The caller must route each hub connection through an authenticated VPN. The challenge alone does not authenticate the hub or prevent active interception.
 It pings every 30 seconds, treats 75 seconds without any frame as a dead hub, and reconnects with capped exponential backoff from 1 to 30 seconds while its context lives.
 Every change calls `OnState` with `Available`, `Broadcasting` and `Connected`; a rejected account carries the hub's short reason.
+Opt-in public fallback applies only to missing-room or incorrect-password refusals, never unavailable room storage.
+Connected fallback state retains the private-room refusal reason and explicitly identifies public membership.
+Each control reconnect retries the configured private room before considering public fallback again.
 `Ready` delivers the overlay address once at the first registration and `IP` returns the latest address.
 `Run` returns after every goroutine it started has stopped.
 

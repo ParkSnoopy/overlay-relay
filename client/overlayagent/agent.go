@@ -202,6 +202,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	for {
 		registered, reason := a.session(runCtx)
 		a.disconnected(reason)
+		a.publicRoom.Store(false)
 		if runCtx.Err() != nil {
 			return ctx.Err()
 		}
@@ -237,6 +238,9 @@ func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
 		if a.cfg.FallbackPublic && a.cfg.Room != "" && !a.publicRoom.Load() && roomRejected(reply.Error) {
 			closeConn(conn)
 			a.publicRoom.Store(true)
+			a.mu.Lock()
+			a.reason = boundedReason(reply.Error)
+			a.mu.Unlock()
 			return a.session(ctx)
 		}
 		return false, boundedReason(reply.Error)
@@ -417,7 +421,10 @@ func (a *Agent) pinRange(prefix netip.Prefix) bool {
 
 func (a *Agent) registered(ip netip.Addr, name, roomName string) {
 	a.mu.Lock()
-	a.ip, a.name, a.roomName, a.connected, a.reason = ip, name, roomName, true, ""
+	a.ip, a.name, a.roomName, a.connected = ip, name, roomName, true
+	if !a.publicRoom.Load() {
+		a.reason = ""
+	}
 	first := a.ready
 	a.mu.Unlock()
 	a.readyOnce.Do(func() {
