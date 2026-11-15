@@ -219,6 +219,8 @@ type Peer struct {
 	LastPath      FlowPath         `json:"lastPath,omitempty"`
 	Reachability  PeerReachability `json:"reachability,omitempty"`
 	Activity      PeerActivity     `json:"activity,omitempty"`
+	// BytesPerSecond is locally measured combined send/receive throughput.
+	BytesPerSecond float64 `json:"bytesPerSecond,omitempty"`
 }
 
 // Incoming asks the destination agent to open an accept stream for a flow.

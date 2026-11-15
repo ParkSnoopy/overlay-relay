@@ -99,6 +99,9 @@ type peerObservation struct {
 	activityAt      time.Time
 	activityPath    overlay.FlowPath
 	unansweredSince time.Time
+	rateAt          time.Time
+	rateBytes       uint64
+	bytesPerSecond  float64
 }
 
 const peerActivityDuration = 1500 * time.Millisecond
@@ -119,14 +122,23 @@ func (a *Agent) peerActivityLocked(ip netip.Addr, now time.Time) overlay.PeerAct
 }
 
 // Traffic publishes transitions immediately, never events per packet. The
-// session-owned timer only expires bursts and advances unanswered sends.
+// session-owned timer expires bursts, advances unanswered sends and samples rates.
 func (a *Agent) refreshActivity() {
 	a.mu.Lock()
 	next := make(map[netip.Addr]overlay.PeerActivity, len(a.peers))
 	changed := false
+	now := time.Now()
 	for _, peer := range a.peers {
 		ip, _ := netip.ParseAddr(peer.IP)
-		activity := a.peerActivityLocked(ip, time.Now())
+		if o, ok := a.observations[ip]; ok && !o.rateAt.IsZero() {
+			if elapsed := now.Sub(o.rateAt); elapsed >= time.Second {
+				rate := float64(o.rateBytes) / elapsed.Seconds()
+				changed = changed || rate != o.bytesPerSecond
+				o.bytesPerSecond, o.rateBytes, o.rateAt = rate, 0, now
+				a.observations[ip] = o
+			}
+		}
+		activity := a.peerActivityLocked(ip, now)
 		next[ip] = activity
 		changed = changed || a.activityStates[ip] != activity
 	}
@@ -269,6 +281,10 @@ func (f *peerFlow) recordTraffic(n int, err error, sent bool) {
 		o.activityPath = overlay.PathDirect
 	}
 	if n > 0 {
+		if o.rateAt.IsZero() {
+			o.rateAt = now
+		}
+		o.rateBytes += uint64(n)
 		if !sent {
 			o.unansweredSince = time.Time{}
 		} else if o.unansweredSince.IsZero() {

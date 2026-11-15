@@ -519,6 +519,7 @@ func (a *Agent) emit() {
 		peer.DirectAllowed = a.cfg.Direct != nil && overlay.ValidPeerID(peer.ID) && !a.relayOnlyLocked(peer.ID)
 		peer.DirectStatus, peer.LastPath = "", ""
 		peer.Reachability, peer.Activity = overlay.ReachabilityUnknown, overlay.ActivityIdle
+		peer.BytesPerSecond = 0
 		if ip, err := netip.ParseAddr(peer.IP); err == nil {
 			if observation := a.observations[ip]; observation.id == peer.ID {
 				peer.DirectStatus, peer.LastPath = observation.status, observation.path
@@ -528,6 +529,7 @@ func (a *Agent) emit() {
 					peer.Reachability = overlay.ReachabilityRelay
 				}
 				peer.Activity = a.peerActivityLocked(ip, time.Now())
+				peer.BytesPerSecond = observation.bytesPerSecond
 			}
 			if pl := a.links[ip]; peer.DirectAllowed && pl != nil && pl.peerID == peer.ID {
 				select {
