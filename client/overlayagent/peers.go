@@ -118,8 +118,8 @@ func (a *Agent) peerActivityLocked(ip netip.Addr, now time.Time) overlay.PeerAct
 	return overlay.PeerActivity(o.activityPath)
 }
 
-// Publish transitions, never events per packet. One session-owned timer
-// expires short bursts and advances unanswered sends without network probes.
+// Traffic publishes transitions immediately, never events per packet. The
+// session-owned timer only expires bursts and advances unanswered sends.
 func (a *Agent) refreshActivity() {
 	a.mu.Lock()
 	next := make(map[netip.Addr]overlay.PeerActivity, len(a.peers))
@@ -253,12 +253,13 @@ func (f *peerFlow) recordTraffic(n int, err error, sent bool) {
 	}
 	a := f.agent
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	o, ok := a.observations[f.ip]
 	if !ok || o.id != f.peerID || f.epoch != a.sessionEpoch {
+		a.mu.Unlock()
 		return
 	}
 	if _, active := a.active[f]; !active {
+		a.mu.Unlock()
 		return
 	}
 	now := time.Now()
@@ -275,6 +276,18 @@ func (f *peerFlow) recordTraffic(n int, err error, sent bool) {
 		}
 	}
 	a.observations[f.ip] = o
+	activity := a.peerActivityLocked(f.ip, now)
+	changed := a.activityStates[f.ip] != activity
+	if changed {
+		if a.activityStates == nil {
+			a.activityStates = make(map[netip.Addr]overlay.PeerActivity)
+		}
+		a.activityStates[f.ip] = activity
+	}
+	a.mu.Unlock()
+	if changed {
+		a.emit()
+	}
 }
 
 func (f *peerFlow) Close() error {

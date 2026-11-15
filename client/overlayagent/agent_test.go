@@ -612,7 +612,11 @@ func TestPeerTrafficObservations(t *testing.T) {
 			ip := netip.MustParseAddr("10.77.0.2")
 			id := strings.Repeat("a", 64)
 			var state overlay.State
-			a := New(Config{CIDR: netip.MustParsePrefix("10.77.0.0/24"), Direct: &DirectOptions{}, DirectPeers: []string{id}, OnState: func(s overlay.State) { state = s }})
+			emissions := 0
+			a := New(Config{CIDR: netip.MustParsePrefix("10.77.0.0/24"), Direct: &DirectOptions{}, DirectPeers: []string{id}, OnState: func(s overlay.State) {
+				state = s
+				emissions++
+			}})
 			a.connected = true
 			// The hub cannot manufacture local viability/activity observations.
 			a.setPeers([]overlay.Peer{{ID: id, IP: ip.String(), Reachability: overlay.ReachabilityDirect, Activity: overlay.ActivityDirect}})
@@ -641,9 +645,20 @@ func TestPeerTrafficObservations(t *testing.T) {
 			if err := <-done; err != nil {
 				t.Fatal(err)
 			}
-			a.refreshActivity()
 			if p := state.Peers[0]; p.Activity != overlay.PeerActivity(path) {
-				t.Fatalf("send activity: %+v", p)
+				t.Fatalf("send activity must publish without waiting for the timer: %+v", p)
+			}
+			published := emissions
+			go func() { _, err := io.ReadFull(right, make([]byte, 1)); done <- err }()
+			if _, err := conn.Write([]byte{1}); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			a.refreshActivity()
+			if emissions != published {
+				t.Fatal("unchanged traffic or timer emitted duplicate activity")
 			}
 			// Exercise the same no-reply threshold without a 15-second sleep.
 			a.mu.Lock()
@@ -662,9 +677,8 @@ func TestPeerTrafficObservations(t *testing.T) {
 			if err := <-done; err != nil {
 				t.Fatal(err)
 			}
-			a.refreshActivity()
 			if state.Peers[0].Activity != overlay.PeerActivity(path) {
-				t.Fatal("receive did not recover activity")
+				t.Fatal("receive must recover activity without waiting for the timer")
 			}
 			a.mu.Lock()
 			o = a.observations[ip]

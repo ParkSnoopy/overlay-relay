@@ -33,7 +33,7 @@ Private keys and payloads never enter logs.
 Local peer state separates direct policy (`DirectAllowed`) from the latest real attempt (`DirectStatus`) and established transport (`LastPath`).
 Attempt statuses are `connecting`, `succeeded`, `failed`, `unavailable` and `canceled`; no status is emitted before an attempt.
 `Reachability` independently reports a live approved direct link/flow, an observed relay path, an exhausted connection failure, or unknown before observation. `LastPath` remains historical even while a better direct path becomes available.
-`Activity` reports real flow I/O (`direct`/`relay`) for 1.5 seconds, `waiting` during connection attempts or after 15 seconds of unanswered sends, and `failed` for a recent failure. Any received bytes clear the unanswered timer. One session-owned 250ms timer publishes transitions, not per-packet events; idle flows do not animate. Payloads are neither retained nor probed. Old-session callbacks cannot overwrite replacement-session observations.
+`Activity` reports real flow I/O (`direct`/`relay`) for 1.5 seconds, `waiting` during connection attempts or after 15 seconds of unanswered sends, and `failed` for a recent failure. Any received bytes clear the unanswered timer. Traffic transitions publish immediately, not per packet; the session-owned 250ms timer only expires activity and advances unanswered sends. Idle flows do not animate. Payloads are neither retained nor probed. Old-session callbacks cannot overwrite replacement-session observations.
 Failed attempts remain visible through encrypted relay fallback and after flow closure, but observations clear on peer departure, identity replacement or disconnection.
 These fields are local observations, not hub-supplied reachability guarantees.
 
