@@ -109,11 +109,13 @@ type Agent struct {
 	readyOnce sync.Once
 	started   bool
 	// directBlocked holds peers whose direct connection failed, until when.
-	directBlocked map[netip.Addr]time.Time
-	relayOnly     map[string]bool
-	directPeers   map[string]bool
-	active        map[*peerFlow]struct{}
-	observations  map[netip.Addr]peerObservation
+	directBlocked  map[netip.Addr]time.Time
+	relayOnly      map[string]bool
+	directPeers    map[string]bool
+	active         map[*peerFlow]struct{}
+	observations   map[netip.Addr]peerObservation
+	activityStates map[netip.Addr]overlay.PeerActivity
+	sessionEpoch   uint64
 	// links holds the live direct link per peer; linking holds negotiations in progress.
 	links   map[netip.Addr]*peerLink
 	linking map[netip.Addr]*linkAttempt
@@ -188,11 +190,26 @@ func (a *Agent) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	a.runCtx = runCtx
 	a.mu.Unlock()
+	activityDone := make(chan struct{})
 	defer func() {
 		cancel()
+		<-activityDone
 		a.flows.Wait()
 		if d := a.direct.Load(); d != nil {
 			d.close()
+		}
+	}()
+	go func() {
+		defer close(activityDone)
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				a.refreshActivity()
+			}
 		}
 	}()
 	a.startDirect()
@@ -436,6 +453,7 @@ func (a *Agent) registered(ip netip.Addr, name, roomName string) {
 
 func (a *Agent) disconnected(reason string) {
 	a.mu.Lock()
+	a.sessionEpoch++
 	a.connected, a.reason = false, reason
 	a.peers, a.peerSet = nil, map[netip.Addr]struct{}{}
 	a.observations, a.directBlocked = nil, nil
@@ -500,17 +518,37 @@ func (a *Agent) emit() {
 		peer.DirectFlows, peer.RelayFlows = 0, 0
 		peer.DirectAllowed = a.cfg.Direct != nil && overlay.ValidPeerID(peer.ID) && !a.relayOnlyLocked(peer.ID)
 		peer.DirectStatus, peer.LastPath = "", ""
+		peer.Reachability, peer.Activity = overlay.ReachabilityUnknown, overlay.ActivityIdle
 		if ip, err := netip.ParseAddr(peer.IP); err == nil {
 			if observation := a.observations[ip]; observation.id == peer.ID {
 				peer.DirectStatus, peer.LastPath = observation.status, observation.path
+				if observation.failed {
+					peer.Reachability = overlay.ReachabilityUnavailable
+				} else if observation.path != "" {
+					peer.Reachability = overlay.ReachabilityRelay
+				}
+				peer.Activity = a.peerActivityLocked(ip, time.Now())
+			}
+			if pl := a.links[ip]; peer.DirectAllowed && pl != nil && pl.peerID == peer.ID {
+				select {
+				case <-pl.done():
+				default:
+					peer.Reachability = overlay.ReachabilityDirect
+				}
 			}
 		}
 		for flow := range a.active {
-			if flow.peerID == peer.ID && flow.ip.String() == peer.IP {
+			if flow.epoch == a.sessionEpoch && flow.peerID == peer.ID && flow.ip.String() == peer.IP {
 				if flow.direct {
 					peer.DirectFlows++
+					if peer.DirectAllowed {
+						peer.Reachability = overlay.ReachabilityDirect
+					}
 				} else {
 					peer.RelayFlows++
+					if peer.Reachability != overlay.ReachabilityDirect {
+						peer.Reachability = overlay.ReachabilityRelay
+					}
 				}
 			}
 		}

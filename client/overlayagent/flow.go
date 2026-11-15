@@ -39,6 +39,9 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 	if !peer {
 		return nil, errors.New(overlay.ErrUnavailable)
 	}
+	finish := a.beginAttempt(ip, peerID)
+	succeeded := false
+	defer func() { finish(succeeded) }()
 	var flow net.Conn
 	if pl := a.linkFor(ip, peerID); pl != nil {
 		if linked, err := a.openLinkFlow(ctx, pl, proto, dst.Port()); err == nil {
@@ -67,8 +70,10 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 		flow = overlay.Compressed(flow)
 	}
 	if proto == overlay.ProtoUDP {
+		succeeded = true
 		return &datagramConn{Conn: flow, buffer: make([]byte, 2+overlay.MaxDatagram)}, nil
 	}
+	succeeded = true
 	return flow, nil
 }
 

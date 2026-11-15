@@ -182,6 +182,28 @@ const (
 	PathRelay  FlowPath = "relay"
 )
 
+// PeerReachability is observed transport availability, independent of LastPath.
+type PeerReachability string
+
+const (
+	ReachabilityUnknown     PeerReachability = ""
+	ReachabilityDirect      PeerReachability = "direct"
+	ReachabilityRelay       PeerReachability = "relay"
+	ReachabilityUnavailable PeerReachability = "unavailable"
+)
+
+// PeerActivity describes recent I/O or an outstanding connection attempt.
+// Waiting means no inbound data for 15 seconds after sending, not packet loss.
+type PeerActivity string
+
+const (
+	ActivityIdle    PeerActivity = ""
+	ActivityDirect  PeerActivity = "direct"
+	ActivityRelay   PeerActivity = "relay"
+	ActivityWaiting PeerActivity = "waiting"
+	ActivityFailed  PeerActivity = "failed"
+)
+
 // Peer is one other broadcasting account.
 type Peer struct {
 	// ID is the SHA-256 digest of the device's persistent public key.
@@ -192,9 +214,11 @@ type Peer struct {
 	DirectFlows int `json:"directFlows"`
 	RelayFlows  int `json:"relayFlows"`
 	// These are local observations. The hub's peer table is not their authority.
-	DirectAllowed bool         `json:"directAllowed"`
-	DirectStatus  DirectStatus `json:"directStatus,omitempty"`
-	LastPath      FlowPath     `json:"lastPath,omitempty"`
+	DirectAllowed bool             `json:"directAllowed"`
+	DirectStatus  DirectStatus     `json:"directStatus,omitempty"`
+	LastPath      FlowPath         `json:"lastPath,omitempty"`
+	Reachability  PeerReachability `json:"reachability,omitempty"`
+	Activity      PeerActivity     `json:"activity,omitempty"`
 }
 
 // Incoming asks the destination agent to open an accept stream for a flow.

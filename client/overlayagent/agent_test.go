@@ -601,6 +601,103 @@ func TestTCPFlowWithHalfClose(t *testing.T) {
 	if call.proto != overlay.ProtoTCP || call.port != 8080 || call.src != aIP {
 		t.Fatalf("unexpected local call %+v", call)
 	}
+	a.waitState(t, "real relay traffic activity", func(s overlay.State) bool {
+		return len(s.Peers) == 1 && s.Peers[0].Activity == overlay.ActivityRelay && s.Peers[0].Reachability == overlay.ReachabilityRelay && s.Peers[0].LastPath == overlay.PathRelay
+	})
+}
+
+func TestPeerTrafficObservations(t *testing.T) {
+	for _, direct := range []bool{false, true} {
+		t.Run(fmt.Sprint("direct=", direct), func(t *testing.T) {
+			ip := netip.MustParseAddr("10.77.0.2")
+			id := strings.Repeat("a", 64)
+			var state overlay.State
+			a := New(Config{CIDR: netip.MustParsePrefix("10.77.0.0/24"), Direct: &DirectOptions{}, DirectPeers: []string{id}, OnState: func(s overlay.State) { state = s }})
+			a.connected = true
+			// The hub cannot manufacture local viability/activity observations.
+			a.setPeers([]overlay.Peer{{ID: id, IP: ip.String(), Reachability: overlay.ReachabilityDirect, Activity: overlay.ActivityDirect}})
+			if p := state.Peers[0]; p.Reachability != "" || p.Activity != "" {
+				t.Fatalf("trusted hub telemetry: %+v", p)
+			}
+			left, right := net.Pipe()
+			defer right.Close()
+			conn, err := a.trackFlow(left, ip, id, direct)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			path, reach := overlay.PathRelay, overlay.ReachabilityRelay
+			if direct {
+				path, reach = overlay.PathDirect, overlay.ReachabilityDirect
+			}
+			if p := state.Peers[0]; p.LastPath != path || p.Reachability != reach || p.Activity != "" {
+				t.Fatalf("open flow: %+v", p)
+			}
+			done := make(chan error, 1)
+			go func() { _, err := io.ReadFull(right, make([]byte, 1)); done <- err }()
+			if _, err := conn.Write([]byte{1}); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			a.refreshActivity()
+			if p := state.Peers[0]; p.Activity != overlay.PeerActivity(path) {
+				t.Fatalf("send activity: %+v", p)
+			}
+			// Exercise the same no-reply threshold without a 15-second sleep.
+			a.mu.Lock()
+			o := a.observations[ip]
+			o.unansweredSince = time.Now().Add(-peerUnansweredAfter)
+			a.observations[ip] = o
+			a.mu.Unlock()
+			a.refreshActivity()
+			if p := state.Peers[0]; p.Activity != overlay.ActivityWaiting || p.Reachability != reach {
+				t.Fatalf("no reply confused with viability: %+v", p)
+			}
+			go func() { _, err := right.Write([]byte{2}); done <- err }()
+			if _, err := io.ReadFull(conn, make([]byte, 1)); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			a.refreshActivity()
+			if state.Peers[0].Activity != overlay.PeerActivity(path) {
+				t.Fatal("receive did not recover activity")
+			}
+			a.mu.Lock()
+			o = a.observations[ip]
+			o.activityAt = time.Now().Add(-peerActivityDuration)
+			a.observations[ip] = o
+			a.mu.Unlock()
+			a.refreshActivity()
+			if state.Peers[0].Activity != "" {
+				t.Fatal("idle flow still animated")
+			}
+			if err := conn.Close(); err != nil {
+				t.Fatal(err)
+			}
+			finish := a.beginAttempt(ip, id)
+			if state.Peers[0].Activity != overlay.ActivityWaiting {
+				t.Fatal("attempt not visible")
+			}
+			finish(false)
+			if p := state.Peers[0]; p.Reachability != overlay.ReachabilityUnavailable || p.Activity != overlay.ActivityFailed || p.LastPath != path {
+				t.Fatalf("failure lost path history: %+v", p)
+			}
+			oldFinish := a.beginAttempt(ip, id)
+			a.disconnected("test reconnect")
+			a.connected = true
+			a.setPeers([]overlay.Peer{{ID: id, IP: ip.String()}})
+			newFinish := a.beginAttempt(ip, id)
+			oldFinish(false)
+			if p := state.Peers[0]; p.Activity != overlay.ActivityWaiting || p.Reachability != "" {
+				t.Fatalf("old attempt leaked into new session: %+v", p)
+			}
+			newFinish(true)
+		})
+	}
 }
 
 func TestUDPFlowKeepsDatagramBoundariesAndExpiresWhenIdle(t *testing.T) {
