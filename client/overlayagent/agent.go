@@ -339,37 +339,45 @@ func (a *Agent) handshake(ctx context.Context, conn net.Conn, hello *overlay.Hel
 // assigned range before the application installs its routes. No client range
 // is sent. The temporary control connection closes before the session starts.
 func DiscoverCIDR(ctx context.Context, cfg Config) (netip.Prefix, error) {
+	prefix, _, err := Discover(ctx, cfg)
+	return prefix, err
+}
+
+// Discover is DiscoverCIDR that also returns the address the hub assigned to
+// this identity, so a platform can install it on its tunnel interface before
+// the session starts. The hub keeps that address for the identity.
+func Discover(ctx context.Context, cfg Config) (netip.Prefix, netip.Addr, error) {
 	a := New(cfg)
 	if a.identityErr != nil || cfg.Dial == nil || cfg.Identity == nil {
-		return netip.Prefix{}, errors.New("overlay discovery is not configured")
+		return netip.Prefix{}, netip.Addr{}, errors.New("overlay discovery is not configured")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	conn, err := cfg.Dial(ctx)
 	if err != nil {
-		return netip.Prefix{}, errors.New("overlay hub is unreachable")
+		return netip.Prefix{}, netip.Addr{}, errors.New("overlay hub is unreachable")
 	}
 	defer closeConn(conn)
 	stop := context.AfterFunc(ctx, func() { closeConn(conn) })
 	defer stop()
 	reply, err := a.handshake(ctx, conn, &overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl, Name: cfg.Name})
 	if err != nil {
-		return netip.Prefix{}, errors.New("overlay discovery failed")
+		return netip.Prefix{}, netip.Addr{}, errors.New("overlay discovery failed")
 	}
 	if !reply.OK {
 		if cfg.FallbackPublic && cfg.Room != "" && roomRejected(reply.Error) {
 			closeConn(conn)
 			cfg.Room, cfg.RoomID = "", ""
-			return DiscoverCIDR(ctx, cfg)
+			return Discover(ctx, cfg)
 		}
-		return netip.Prefix{}, errors.New(boundedReason(reply.Error))
+		return netip.Prefix{}, netip.Addr{}, errors.New(boundedReason(reply.Error))
 	}
 	prefix, err := overlay.ParseCIDR(reply.CIDR)
 	ip, ipErr := netip.ParseAddr(reply.IP)
 	if err != nil || reply.CIDR != prefix.String() || ipErr != nil || !overlay.AssignableIn(prefix, ip) {
-		return netip.Prefix{}, errors.New("overlay hub assigned an invalid address")
+		return netip.Prefix{}, netip.Addr{}, errors.New("overlay hub assigned an invalid address")
 	}
-	return prefix, nil
+	return prefix, ip, nil
 }
 
 func roomRejected(reason string) bool {

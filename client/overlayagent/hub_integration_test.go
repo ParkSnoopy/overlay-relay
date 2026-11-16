@@ -73,7 +73,7 @@ func TestServerAssignedRangeWithRustHub(t *testing.T) {
 			}
 			cfg.FallbackPublic = true
 		}
-		prefix, err := DiscoverCIDR(ctx, cfg)
+		prefix, discovered, err := Discover(ctx, cfg)
 		if err != nil || prefix.String() != "192.168.100.0/24" {
 			t.Fatal("did not discover the non-default hub range", prefix, err)
 		}
@@ -87,6 +87,8 @@ func TestServerAssignedRangeWithRustHub(t *testing.T) {
 		a.start(t)
 		if ip := a.waitReady(t); !overlay.AssignableIn(prefix, ip) {
 			t.Fatal("hub assigned an address outside its own range", ip)
+		} else if ip != discovered {
+			t.Fatal("session address differs from the discovered address", ip, discovered)
 		}
 		a.waitState(t, "public fallback state", func(state overlay.State) bool {
 			return state.Connected && state.PublicFallback == (index == 0)
