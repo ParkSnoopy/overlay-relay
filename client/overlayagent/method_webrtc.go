@@ -11,8 +11,8 @@ import (
 
 	"github.com/libp2p/go-yamux/v5"
 	"github.com/pion/datachannel"
-	"github.com/pion/ice/v4"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/ice/v5"
+	"github.com/pion/webrtc/v5"
 )
 
 const (

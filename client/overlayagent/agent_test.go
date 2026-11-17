@@ -621,8 +621,8 @@ func TestPeerTrafficObservations(t *testing.T) {
 				}})
 				a.connected = true
 				// The hub cannot manufacture local viability/activity observations.
-				a.setPeers([]overlay.Peer{{ID: id, IP: ip.String(), Reachability: overlay.ReachabilityDirect, Activity: overlay.ActivityDirect, BytesPerSecond: 123}})
-				if p := state.Peers[0]; p.Reachability != "" || p.Activity != "" || p.BytesPerSecond != 0 {
+				a.setPeers([]overlay.Peer{{ID: id, IP: ip.String(), Reachability: overlay.ReachabilityDirect, Activity: overlay.ActivityDirect, BytesPerSecond: 123, DirectMethod: methodWebRTC}})
+				if p := state.Peers[0]; p.Reachability != "" || p.Activity != "" || p.BytesPerSecond != 0 || p.DirectMethod != "" {
 					t.Fatalf("trusted hub telemetry: %+v", p)
 				}
 				left, right := net.Pipe()

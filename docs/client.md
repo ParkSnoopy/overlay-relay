@@ -36,6 +36,7 @@ Attempt statuses are `connecting`, `succeeded`, `failed`, `unavailable` and `can
 `Activity` reports real flow I/O (`direct`/`relay`) for 1.5 seconds, `waiting` during connection attempts or after 15 seconds of unanswered sends, and `failed` for a recent failure. Any received bytes clear the unanswered timer. Traffic transitions publish immediately, not per packet; the session-owned 250ms timer expires activity, advances unanswered sends and samples throughput. Idle flows do not animate. Payloads are neither retained nor probed. Old-session callbacks cannot overwrite replacement-session observations.
 Failed attempts remain visible through encrypted relay fallback and after flow closure, but observations clear on peer departure, identity replacement or disconnection.
 These fields are local observations, not hub-supplied reachability guarantees.
+`DirectMethod` reports `webrtc`, `ice` or `libp2p` only for a live approved link belonging to the current peer identity. It clears when no such link exists; hub-supplied method claims are ignored.
 `BytesPerSecond` measures combined send/receive flow bytes per peer over elapsed one-second-or-longer sampling intervals, using the existing activity timer. Idle intervals publish zero; peer/session replacement clears counters. Only byte counts are retained, and hub-supplied rates are ignored.
 
 ## Checks

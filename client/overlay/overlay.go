@@ -216,6 +216,7 @@ type Peer struct {
 	// These are local observations. The hub's peer table is not their authority.
 	DirectAllowed bool             `json:"directAllowed"`
 	DirectStatus  DirectStatus     `json:"directStatus,omitempty"`
+	DirectMethod  string           `json:"directMethod,omitempty"`
 	LastPath      FlowPath         `json:"lastPath,omitempty"`
 	Reachability  PeerReachability `json:"reachability,omitempty"`
 	Activity      PeerActivity     `json:"activity,omitempty"`

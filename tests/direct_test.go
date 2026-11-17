@@ -105,8 +105,11 @@ func TestDirectEachMethodAlone(t *testing.T) {
 			env := startSecureEnv(t, secureSide{transport: options[0]}, secureSide{transport: options[1]})
 			establishLink(t, env)
 			for _, proto := range []string{overlay.ProtoTCP, overlay.ProtoUDP} {
-				transferDirect(t, env, false, proto)
-				transferDirect(t, env, true, proto)
+				for _, reverse := range []bool{false, true} {
+					if peer := transferDirect(t, env, reverse, proto); peer.DirectMethod != method {
+						t.Fatalf("direct method = %q, want %q", peer.DirectMethod, method)
+					}
+				}
 			}
 		})
 	}
@@ -141,7 +144,7 @@ func establishLink(t *testing.T, env *secureEnv) {
 }
 
 // transferDirect sends one file over an established link and checks that the hub did not carry it.
-func transferDirect(t *testing.T, env *secureEnv, reverse bool, proto string) {
+func transferDirect(t *testing.T, env *secureEnv, reverse bool, proto string) overlay.Peer {
 	t.Helper()
 	sender, target, states, sink, tap := env.alice, env.bobIP, env.aliceStates, env.bobSink, env.aliceTap
 	if reverse {
@@ -166,6 +169,7 @@ func transferDirect(t *testing.T, env *secureEnv, reverse bool, proto string) {
 	if size := len(tap.snapshot()) - before; size > 32<<10 {
 		t.Fatalf("direct payload went through the hub: %d bytes", size)
 	}
+	return state.Peers[0]
 }
 
 func TestDirectThroughPacketLoss(t *testing.T) {
@@ -194,7 +198,7 @@ func TestUntraversableNATUsesEncryptedRelay(t *testing.T) {
 	state := waitFor(t, env.aliceStates, func(state overlay.State) bool {
 		return len(state.Peers) == 1 && state.Peers[0].LastPath == overlay.PathRelay && state.Peers[0].DirectStatus == overlay.DirectFailed
 	})
-	if state.Peers[0].DirectFlows != 0 {
+	if state.Peers[0].DirectFlows != 0 || state.Peers[0].DirectMethod != "" {
 		t.Fatal("a failed traversal must leave no direct flow", state)
 	}
 	seen := env.aliceTap.snapshot()

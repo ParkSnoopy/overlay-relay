@@ -526,6 +526,7 @@ func (a *Agent) emit() {
 		peer.DirectFlows, peer.RelayFlows = 0, 0
 		peer.DirectAllowed = a.cfg.Direct != nil && overlay.ValidPeerID(peer.ID) && !a.relayOnlyLocked(peer.ID)
 		peer.DirectStatus, peer.LastPath = "", ""
+		peer.DirectMethod = ""
 		peer.Reachability, peer.Activity = overlay.ReachabilityUnknown, overlay.ActivityIdle
 		peer.BytesPerSecond = 0
 		if ip, err := netip.ParseAddr(peer.IP); err == nil {
@@ -544,6 +545,7 @@ func (a *Agent) emit() {
 				case <-pl.done():
 				default:
 					peer.Reachability = overlay.ReachabilityDirect
+					peer.DirectMethod = pl.method()
 				}
 			}
 		}
