@@ -25,10 +25,13 @@ mod hub;
 mod open;
 mod protocol;
 mod rooms;
+mod signaling;
 mod splice;
 mod state;
 mod verifier;
+mod version;
 
+pub use version::{AUTH_DOMAIN, RELEASE_VERSION};
 pub use address::{AddressSpace, FIRST_ADDRESS, LAST_ADDRESS, assignable, lowest_free};
 pub use config::Config;
 pub use dns::{Resolver, SystemResolver, admitted};
@@ -48,6 +51,7 @@ pub use protocol::{
     KIND_ACCEPT,
     KIND_CONTROL,
     KIND_OPEN,
+    KIND_SIGNAL,
     LISTEN_ADDRESS,
     MAX_ACCOUNTS,
     MAX_DATAGRAM,
@@ -69,10 +73,13 @@ pub use rooms::{
     Listing,
     ROOMS_FILE,
     admit,
+    configure,
     create,
     key,
     listing,
+    relay_allowed,
     remove,
     replace,
+    set_relay,
 };
 pub use verifier::Verifier;

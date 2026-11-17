@@ -55,6 +55,8 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 		}
 	}
 	if flow == nil {
+		// Start direct setup even if the hub refuses payload relay.
+		a.maybeLink(ip, peerID)
 		relayed, _, err := a.openFlow(ctx, proto, ip, dst.Port(), peerID)
 		if err != nil {
 			return nil, err
@@ -81,6 +83,9 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 // when encryption is on, and the peer's flow certificate fingerprint.
 func (a *Agent) openFlow(ctx context.Context, proto string, ip netip.Addr, port uint16, peerID string) (net.Conn, string, error) {
 	hello := &overlay.Hello{Version: overlay.Version, Kind: overlay.KindOpen, Proto: proto, Dst: ip.String(), Port: port, PeerID: peerID}
+	if port == overlay.LinkPort {
+		hello.Kind = overlay.KindSignal
+	}
 	a.offer(hello)
 	conn, err := a.cfg.Dial(ctx)
 	if err != nil {
@@ -94,6 +99,13 @@ func (a *Agent) openFlow(ctx context.Context, proto string, ip netip.Addr, port 
 	if !reply.OK {
 		closeConn(conn)
 		return nil, "", errors.New(boundedReason(reply.Error))
+	}
+	if hello.Kind == overlay.KindSignal {
+		if !reply.Secure || reply.Fingerprint == "" {
+			closeConn(conn)
+			return nil, "", errors.New("direct signaling requires peer fingerprints")
+		}
+		return conn, reply.Fingerprint, nil
 	}
 	flow, err := a.seal(ctx, conn, &reply, true)
 	return flow, reply.Fingerprint, err
@@ -161,14 +173,21 @@ func (a *Agent) serveIncoming(ctx context.Context, in *overlay.Incoming, src net
 		closeConn(hub)
 		return errors.Join(err, errors.New("hub refused the accept stream"))
 	}
+	if in.Signal {
+		if in.Port != overlay.LinkPort || in.Proto != overlay.ProtoTCP || !reply.Secure || reply.Fingerprint == "" {
+			closeConn(hub)
+			return errors.New("invalid direct signaling request")
+		}
+		a.answerLink(ctx, hub, src, in.PeerID, reply.Fingerprint)
+		return nil
+	}
 	flow, err := a.seal(ctx, hub, &reply, false)
 	if err != nil {
 		return err
 	}
 	if in.Port == overlay.LinkPort && in.Proto == overlay.ProtoTCP {
-		// The peer negotiates a direct link; no local service sees this flow.
-		a.answerLink(ctx, flow, src, in.PeerID, reply.Fingerprint)
-		return nil
+		closeConn(flow)
+		return errors.New("direct signaling requires the signal stream kind")
 	}
 	flow, err = a.trackFlow(flow, src, in.PeerID, false)
 	if err != nil {

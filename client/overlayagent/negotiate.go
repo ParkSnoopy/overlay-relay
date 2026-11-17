@@ -12,8 +12,8 @@ import (
 	"github.com/ParkSnoopy/overlay-relay/client/overlay"
 )
 
-// Messages on the negotiation stream, which is an encrypted relayed flow to
-// overlay.LinkPort. Each is one length-prefixed JSON frame.
+// Messages on the hub-validated, bounded signaling stream. Signaling travels
+// inside the authenticated VPN; application data uses encrypted direct links.
 const (
 	msgHello  = "hello"  // both: the methods this side supports, in preference order
 	msgOffer  = "offer"  // initiator: a method and its offer
@@ -210,7 +210,7 @@ func (r *responder) await(ctx context.Context) (link, error) {
 }
 
 // answerLink serves a negotiation stream as the responder. The stream is
-// already sealed and its peer pinned; answerLink owns closing it.
+// authenticated by the hub and its peer pinned; answerLink owns closing it.
 func (a *Agent) answerLink(ctx context.Context, conn net.Conn, ip netip.Addr, peerID, fingerprint string) {
 	defer closeConn(conn)
 	d := a.direct.Load()

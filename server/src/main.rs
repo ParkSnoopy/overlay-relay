@@ -48,6 +48,28 @@ async fn main() -> ExitCode {
 async fn rooms_command(arguments: &[String]) -> Result<()> {
     let data_dir = env::var(DATA_DIR_ENV).map_or_else(|_| PathBuf::from(DATA_DIR), PathBuf::from);
     match arguments {
+        [flag] if flag == "--version" => {
+            writeln!(
+                std::io::stdout(),
+                "overlay-hub {} (protocol v{})",
+                env!("CARGO_PKG_VERSION"),
+                overlay_relay::VERSION
+            )?;
+            Ok(())
+        }
+        [group, action, room, relay] if group == "rooms" && action == "relay" => {
+            overlay_relay::set_relay(&data_dir, room, parse_relay(relay)?).await
+        }
+        [group, action, id, name, proof, relay] if group == "rooms" && action == "create" => {
+            overlay_relay::configure(&data_dir, id, name, proof, false, Some(parse_relay(relay)?))
+                .await
+        }
+        [group, action, confirm, id, name, proof, relay]
+            if group == "rooms" && action == "replace" && confirm == "--confirm" =>
+        {
+            overlay_relay::configure(&data_dir, id, name, proof, true, Some(parse_relay(relay)?))
+                .await
+        }
         [group, action] if group == "rooms" && action == "list" => {
             let listing = serde_json::to_string(&overlay_relay::listing(&data_dir).await?)?;
             writeln!(std::io::stdout(), "{listing}")?;
@@ -66,10 +88,15 @@ async fn rooms_command(arguments: &[String]) -> Result<()> {
         }
         _ => {
             Err(Error::Config(
-                "usage: overlay-hub [rooms list|rooms create <id> <name> <proof>|rooms replace --confirm <id> <name> <proof>|rooms remove <key>]",
+                "usage: overlay-hub [--version|rooms list|rooms create <id> <name> <proof> [true|false]|rooms replace --confirm <id> <name> <proof> [true|false]|rooms relay <public|key> <true|false>|rooms remove <key>]",
             ))
         }
     }
+}
+
+fn parse_relay(raw: &str) -> Result<bool> {
+    raw.parse()
+        .map_err(|_| Error::Config("relay must be true or false"))
 }
 
 async fn run() -> Result<()> {

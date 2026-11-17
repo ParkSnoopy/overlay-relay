@@ -13,7 +13,7 @@ The module has no daemon and no platform code. Your application supplies the net
 go get github.com/ParkSnoopy/overlay-relay/client@latest
 ```
 
-Check that the published client supports wire version 2 before use.  
+Client and hub must both support wire version 4. `overlay.ReleaseVersion`, `overlay.Version` and `overlay.AuthDomain` are generated from `server/Cargo.toml` by `python3 scripts/bump_version.py --sync`; `--check` detects drift without writing.
 
 Module versions follow the server release. Tags are `client/vX.Y.Z`.
 
@@ -114,10 +114,10 @@ cfg.Direct = &overlayagent.DirectOptions{
 }
 ```
 
-- The agents negotiate over an encrypted relayed flow and try three methods in turn: Pion WebRTC (ICE with a data channel), Pion ICE with QUIC, and go-libp2p over QUIC. `DirectOptions.Methods` changes the list or order.
-- Every flow starts on the relay. The first one starts the negotiation in the background; flows opened after the link is up use it.
+- The agents negotiate through bounded, hub-validated signaling over the authenticated VPN and try three methods in turn: Pion WebRTC (ICE with a data channel), Pion ICE with QUIC, and go-libp2p over QUIC. `DirectOptions.Methods` changes the list or order. The hub sees negotiation metadata, not direct payloads.
+- An outbound attempt starts negotiation in the background; flows opened after the link is up use it. If the hub blocks room relay, earlier flows fail instead of relaying, while negotiation continues.
 - Each method pins the same certificate fingerprints, so the link is authenticated and encrypted. STUN queries run over the sockets from `ListenPacket`; use sockets that bypass the VPN.
-- If only one side enables `Direct`, or no method connects, flows stay on the encrypted relay and the peer is not offered a link again for five minutes. No TURN relay is used.
+- If only one side enables `Direct`, or no method connects, flows use the encrypted relay only when room policy permits it, and the peer is not offered a link again for five minutes. No TURN relay is used.
 - `DirectOptions.Timeout` bounds each method (default 10 seconds).
 
 ## Account identities

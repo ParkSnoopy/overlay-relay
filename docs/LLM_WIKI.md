@@ -88,10 +88,10 @@ All field names are lowercase JSON keys.
 
 | Field | Type | Used by | Meaning |
 |---|---|---|---|
-| `version` | integer | all | Must be `3`. Otherwise the hub closes the stream silently. Coordinated client/hub updates are required; existing keys remain valid. |
+| `version` | integer | all | Must be `4`, generated from `server/Cargo.toml` (minor before 1.0, major thereafter). Otherwise the hub closes the stream silently. Coordinated client/hub updates are required; existing keys and room proofs remain valid. |
 | `room` | string | all | Private room password proof, empty for public membership. Derive it locally from the room ID and password. Never log it. |
 | `room_id` | string | all | Private room ID, empty for public membership. Required with `room`. A known ID admits only the proof its first requester used. |
-| `kind` | string | all | `"control"`, `"open"` or `"accept"`. Anything else gets reply `invalid request`. |
+| `kind` | string | all | `"control"`, `"open"`, `"signal"` or `"accept"`. Anything else gets reply `invalid request`. |
 | `public_key` | string | all | Hex-encoded uncompressed P-384 public key (section 4). |
 | `name` | string | control | Optional advertised name for the authenticated device. Empty uses the identity-derived default; invalid names receive `invalid request` without replacing an existing control. |
 | `proto` | string | open | `"tcp"` or `"udp"`. |
@@ -109,7 +109,7 @@ Private membership is the lowercase hex of PBKDF2-HMAC-SHA256(password, `overlay
 
 Both devices must explicitly approve the other's ID in `DirectPeers` before direct offers or connections. Empty approvals permit relay only. Revocation closes affected direct flows and negotiations.
 
-After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The signed transcript is UTF-8 `overlay-relay/auth/v3:`, followed by the 32 raw nonce bytes and the UTF-8 room proof without a separator. A private room also appends one `0` byte and the UTF-8 room ID; a public room appends nothing. The client signs using ECDSA P-384 with SHA-384. It sends `{"signature":"<hex>"}` with the ASN.1 DER signature. The hub verifies the proof before issuing the reply; a valid proof of any key is accepted, and a key seen for the first time receives an address. A malformed public key can receive an unauthorized reply without a challenge.
+After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The signed transcript is UTF-8 `overlay-relay/auth/v4:`, followed by the 32 raw nonce bytes and the UTF-8 room proof without a separator. A private room also appends one `0` byte and the UTF-8 room ID; a public room appends nothing. The client signs using ECDSA P-384 with SHA-384. It sends `{"signature":"<hex>"}` with the ASN.1 DER signature. The hub verifies the proof before issuing the reply; a valid proof of any key is accepted, and a key seen for the first time receives an address. A malformed public key can receive an unauthorized reply without a challenge.
 
 ### 7.2 Reply (hub to client)
 
@@ -138,7 +138,7 @@ Each event is one frame with exactly one of these top-level keys:
 ```
 
 - `peers`: the full current list of **other** broadcasting accounts, sorted by IP ascending. It is sent once after registration and again on every change. Each change replaces the previous list; it is not a delta.
-- `incoming`: a request that the receiving account must answer on a new accept stream (section 8.3). It also carries the requester's `fingerprint` and `endpoint` when the requester made those offers.
+- `incoming`: a request that the receiving account must answer on a new accept stream (section 8.3). It also carries the requester's `fingerprint` and `endpoint` when the requester made those offers. `signal:true` identifies bounded direct negotiation, never a local payload-service request.
 - `pong`: reply to a ping (section 8.1).
 
 ### 7.4 Ping (client to hub, on a control stream)
@@ -153,7 +153,7 @@ Any other content on a control stream ends the control stream (see section 8.1).
 
 ### 8.1 Control stream
 
-1. Client dials through the authenticated VPN, sends `Hello{version:3, kind:"control", public_key, room}`, and completes the challenge exchange.
+1. Client dials through the authenticated VPN, sends `Hello{version:4, kind:"control", public_key, room}`, and completes the challenge exchange.
 2. Hub replies:
    - Success: `Reply{ok:true, ip, name}`. The account is now registered. The client's address is `ip`.
    - Failure: `Reply{ok:false, error:"unauthorized"}` and the stream closes.
@@ -168,7 +168,7 @@ Writes from the hub to a control stream have a `10` second write deadline. A sta
 
 Preconditions the hub enforces: the requester has an active control stream; the destination has an active control stream; the destination is not the requester; each side has fewer than `256` active flows; the destination has fewer than `4` pending requests.
 
-1. Client dials through the authenticated VPN, sends `Hello{version:3, kind:"open", public_key, room, proto, dst, port}`, and completes the challenge exchange.
+1. Client dials through the authenticated VPN, sends `Hello{version:4, kind:"open", public_key, room, proto, dst, port}`, and completes the challenge exchange.
 2. The hub validates `proto`, `dst`, `port`. Any invalid value gets `Reply{ok:false, error:"peer unavailable"}`.
 3. The hub looks up the destination. If the destination is missing, hidden, not connected, the requester itself, or a precondition fails, the reply is `peer unavailable`. This is intentionally identical for every case, so a requester cannot discover hidden accounts.
 4. The hub sends an `incoming` event to the destination's control stream with a fresh random `id` (16 random bytes, 32 hex digits) and waits up to `10` seconds for the destination to answer.
@@ -178,7 +178,7 @@ Preconditions the hub enforces: the requester has an active control stream; the 
 ### 8.3 Accept stream (destination side)
 
 1. The destination receives an `incoming` event `{id, proto, src, port}` on its control stream. `src` is the requester's overlay address. `port` is the destination port requested.
-2. The destination dials through the authenticated VPN, sends `Hello{version:3, kind:"accept", public_key, room, id}`, and completes the challenge exchange. The `id` must be the one from the event.
+2. The destination dials through the authenticated VPN, sends `Hello{version:4, kind:"accept", public_key, room, id}`, and completes the challenge exchange. The `id` must be the one from the event.
 3. The hub pairs the stream with the pending request only if the authenticated identity belongs to the destination account that was asked. Otherwise: `Reply{ok:false, error:"unauthorized"}`.
 4. The accept stream waits (up to the `10` second accept timeout measured from the incoming event). When the open side is accepted, the accept stream receives `Reply{ok:true}` and switches to relay mode.
 5. If the pending request expired or was refused, the accept stream is closed without a successful reply.
@@ -217,14 +217,14 @@ Trust: the fingerprints reach each agent through the hub. A relaying hub and a n
 
 ### 8.7 Direct connection (client-side, opt-in)
 
-The reference agent builds a direct link to a peer when `Config.Direct` is set and encryption is on. The hub takes no part: the agents negotiate over an encrypted relayed flow, and the hub never sees an endpoint. Agents send no `endpoint` offer. The hub still accepts and pairs one for compatibility, but no reference agent uses it.
+The reference agent builds a direct link to a peer when `Config.Direct` is set and encryption is on. Negotiation uses authenticated, hub-validated `signal` frames over the mandatory VPN transport; the hub can see negotiation candidates but not direct payloads. Agents send no `endpoint` offer. The hub still accepts and pairs one, but no reference agent uses it.
 
 A link is one authenticated, encrypted, multiplexed path to one peer. Every flow is one stream on it. A flow that opens while no link exists uses the relay from its first byte, so traffic never waits for traversal. Flows that open after the link is up use it. Flows already open stay on the relay.
 
-1. The first relayed flow to a peer starts a negotiation in the background, unless direct is denied for that device or failed less than five minutes ago. The requester opens a relayed TCP flow to the reserved port `65535` (`overlay.LinkPort`). The destination agent answers that port itself; no local service sees it. The flow is sealed as in section 8.6, so both flow certificates are pinned. An agent that cannot negotiate closes it, and the requester records `unavailable`.
+1. The first outbound flow to a peer starts a negotiation in the background, unless direct is denied for that device or failed less than five minutes ago. The requester opens `kind:"signal"`, TCP port `65535` (`overlay.LinkPort`), with its certificate fingerprint and no endpoint. The destination answers only `incoming.signal`; no local service sees it. The signaling frames are not sealed as payload TLS: the hub validates message types and method-specific fields, rejects unknown fields, limits each direction to 32 frames and 64 KiB, permits each method once, and closes the exchange after 90 seconds. Signaling remains available with relay disabled; ordinary `open` never bypasses relay policy by choosing the reserved port.
 2. Each message on that flow is one length-prefixed JSON frame. `hello` carries the sender's methods in preference order, and the requester tries the methods both sides share, in its own order, until one works. The defaults are `webrtc`, `ice` and `libp2p`.
 3. For each method the requester sends `offer`, and the destination answers with `answer` after it has gathered its candidates (at most 3 s). The requester sends `sync`. Both sides then connect for at most `DirectOptions.Timeout` (default 10 s). A method that needs both sides to start together (`libp2p`) first measures the round trip with `ping` and `pong`, and the requester delays its own start by half of it. On success the requester sends `done`. On failure it sends `next` and tries the next method, or `end` when none is left. All attempts failing is `failed`, and the peer is not offered a link again for five minutes.
-4. `webrtc`: a Pion WebRTC peer connection with one detached data channel. The offer and answer are SDP with all candidates, gathered through the STUN servers of `DirectOptions.STUNServers`. DTLS secures the channel and a yamux session multiplexes the flows. The SDP travels over the pinned flow, so the DTLS fingerprints are authentic.
+4. `webrtc`: a Pion WebRTC peer connection with one detached data channel. The offer and answer are SDP with all candidates, gathered through the STUN servers of `DirectOptions.STUNServers`. DTLS secures the channel and a yamux session multiplexes the flows. SDP authenticity relies on the authenticated VPN and trusted hub, as does the certificate-fingerprint exchange.
 5. `ice`: a bare Pion ICE agent. The offer and answer carry the ICE credentials and candidates. Over the nominated pair, QUIC with ALPN `overlay-relay/direct-1` runs between the two flow certificates, pinned as in section 8.6. The requester is the QUIC client.
 6. `libp2p`: a libp2p host with the QUIC transport and no relay. It listens on one UDP socket from `DirectOptions.ListenPacket` and learns that socket's public mapping from the STUN servers. The offer and answer carry a random per-attempt peer ID and addresses, which are that mapping and the interface addresses. The host accepts only the named peer ID. After `sync` both hosts dial each other, once per second, until a connection forms in either direction. This replaces the circuit relay that libp2p's DCUtR would use to coordinate its hole punch.
 7. Every stream starts with a three-byte header: protocol (`1` TCP, `2` UDP) and the destination port in big-endian order. After that it carries the flow bytes exactly as a relayed flow would, so UDP flows use datagram records and compression, if enabled, sits on top.
@@ -232,7 +232,7 @@ A link is one authenticated, encrypted, multiplexed path to one peer. Every flow
 
 All sockets must bypass the VPN (`DirectOptions.ListenPacket`). Only IPv4 UDP is used.
 When both NATs use endpoint-dependent mappings with strict filtering, when UDP is blocked, or when hairpinning is missing, every method fails and flows keep the encrypted relay.
-The hub's version-2 frames are unchanged.
+Wire version 4 adds the signaling kind and incoming marker. Room relay policy is enforced on the hub at open and pairing, and active relay streams are revoked after policy-file changes. Direct payload links are unaffected. When relay is blocked, outbound requests made before direct negotiation completes fail rather than use the hub as a payload fallback.
 
 ### 8.4 Relay mode
 
@@ -359,7 +359,7 @@ Then: dial the hub, send the open Hello, read the reply. On `ok:true` the stream
 `overlayagent.Probe(ctx, address)` proves that a hub admits this source and parses frames without registering a peer:
 
 1. Dial the hub.
-2. Send a version 2 control Hello with a malformed public key (`00`). The hub refuses it before any challenge, so no peer is created.
+2. Send a version 4 control Hello with a malformed public key (`00`). The hub refuses it before any challenge, so no peer is created.
 3. Expect `Reply{ok:false, error:"unauthorized"}`. Route the probe through the authenticated VPN.
 
 Use it as a health check. Any other reply means a misconfigured hub or an unexpected source.

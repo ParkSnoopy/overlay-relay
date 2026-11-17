@@ -18,6 +18,58 @@ import (
 	"github.com/ParkSnoopy/overlay-relay/client/overlayagent"
 )
 
+func TestVersionSynchronization(t *testing.T) {
+	script, err := os.ReadFile("../scripts/bump_version.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ release, protocol string }{{"0.4.7", "4"}, {"0.5.0", "5"}, {"4.2.1-rc.1", "4"}} {
+		t.Run(test.release, func(t *testing.T) {
+			root := t.TempDir()
+			for _, directory := range []string{"scripts", "server/src", "client/overlay"} {
+				if err := os.MkdirAll(filepath.Join(root, directory), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path := filepath.Join(root, "scripts/bump_version.py")
+			if err := os.WriteFile(path, script, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "server/Cargo.toml"), []byte("[package]\nversion = \""+test.release+"\"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := exec.Command("python3", path, "--check").Run(); err == nil {
+				t.Fatal("missing generated versions accepted")
+			}
+			for _, mode := range []string{"--sync", "--check", "--sync", "--check"} {
+				if output, err := exec.Command("python3", path, mode).CombinedOutput(); err != nil {
+					t.Fatalf("%s: %v: %s", mode, err, output)
+				}
+			}
+			client := filepath.Join(root, "client/overlay/version.go")
+			data, err := os.ReadFile(client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), `ReleaseVersion = "`+test.release+`"`) || !strings.Contains(string(data), "const Version = "+test.protocol) {
+				t.Fatalf("incorrect generated version: %s", data)
+			}
+			if err := os.WriteFile(client, []byte("DUMMY drift"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := exec.Command("python3", path, "--check").Run(); err == nil {
+				t.Fatal("drift accepted")
+			}
+			if after, err := os.ReadFile(client); err != nil || string(after) != "DUMMY drift" {
+				t.Fatal("check changed the client version")
+			}
+			if output, err := exec.Command("python3", path, "--sync").CombinedOutput(); err != nil {
+				t.Fatalf("repair: %v: %s", err, output)
+			}
+		})
+	}
+}
+
 // The Rust hub is built from the sibling server crate and run as a real process,
 // so the Go agent and the Rust relay meet over loopback TCP with the shipped wire format.
 const serverManifest = "../server/Cargo.toml"

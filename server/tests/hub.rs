@@ -87,6 +87,126 @@ macro_rules! ensure_eq {
     };
 }
 
+#[tokio::test]
+async fn relay_policy_is_enforced_for_public_and_private_rooms() -> TestResult {
+    for id in ["", "DUMMY private"] {
+        let f = fixture(|_| {}).await?;
+        let proof = if id.is_empty() {
+            String::new()
+        } else {
+            "ab".repeat(32)
+        };
+        let room = if id.is_empty() {
+            "public".to_owned()
+        } else {
+            overlay_relay::key(id)
+        };
+        if !id.is_empty() {
+            overlay_relay::configure(f.dir.path(), id, "DUMMY", &proof, false, Some(false)).await?;
+        }
+        overlay_relay::set_relay(f.dir.path(), &room, false).await?;
+        let mut ah = control_hello("alice");
+        ah.room.clone_from(&proof);
+        ah.room_id = id.to_owned();
+        let (_alice, ar) = dial(f.address, &ah).await?;
+        let mut bh = control_hello("bob");
+        bh.room.clone_from(&proof);
+        bh.room_id = id.to_owned();
+        let (mut bob, br) = dial(f.address, &bh).await?;
+        ensure!(ar.ok && br.ok, "relay block must not block discovery");
+        for proto in [PROTO_TCP, PROTO_UDP] {
+            let mut hello = open_hello("alice", &br.ip, proto, Some(80));
+            hello.room.clone_from(&proof);
+            hello.room_id = id.to_owned();
+            refused(f.address, hello).await?;
+        }
+        overlay_relay::set_relay(f.dir.path(), &room, true).await?;
+        let mut hello = open_hello("alice", &br.ip, PROTO_TCP, Some(80));
+        hello.room.clone_from(&proof);
+        hello.room_id = id.to_owned();
+        let opened = tokio::spawn(open_flow(f.address, hello));
+        let incoming = next_incoming(&mut bob).await?;
+        let mut accept = accept_hello("bob", &incoming.id);
+        accept.room.clone_from(&proof);
+        accept.room_id = id.to_owned();
+        let (mut sink, accepted) = dial(f.address, &accept).await?;
+        let (mut source, reply) = opened.await??;
+        ensure!(
+            accepted.ok && reply.ok,
+            "enabling relay must apply without restart"
+        );
+        source.write_all(b"DUMMY").await?;
+        let mut bytes = [0; 5];
+        timeout(IO_WAIT, sink.read_exact(&mut bytes)).await??;
+        ensure_eq!(&bytes, b"DUMMY");
+        overlay_relay::set_relay(f.dir.path(), &room, false).await?;
+        expect_closed(&mut source).await?;
+        expect_closed(&mut sink).await?;
+        tokio::fs::write(f.dir.path().join(overlay_relay::ROOMS_FILE), b"{").await?;
+        let mut hello = open_hello("alice", &br.ip, PROTO_TCP, Some(80));
+        hello.room = proof;
+        hello.room_id = id.to_owned();
+        let (_, reply) = dial(f.address, &hello).await?;
+        ensure!(!reply.ok, "unreadable policy must fail closed");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn signaling_cannot_be_used_as_an_unrestricted_relay() -> TestResult {
+    let f = fixture(|_| {}).await?;
+    overlay_relay::set_relay(f.dir.path(), "public", false).await?;
+    let (_alice, _) = register(f.address, "alice").await?;
+    let (mut bob, reply) = register(f.address, "bob").await?;
+    refused(
+        f.address,
+        open_hello("alice", &reply.ip, PROTO_TCP, Some(u16::MAX)),
+    )
+    .await?;
+    for malicious in [
+        serde_json::json!({"t":"payload", "d":"DUMMY"}),
+        serde_json::json!({"t":"offer", "s":"ice", "d":{"payload":"DUMMY"}}),
+        serde_json::json!({"t":"ping", "payload":"DUMMY"}),
+    ] {
+        let mut hello = open_hello("alice", &reply.ip, PROTO_TCP, Some(u16::MAX));
+        hello.kind = overlay_relay::KIND_SIGNAL.to_owned();
+        hello.fingerprint = "ab".repeat(32);
+        let opened = tokio::spawn(open_flow(f.address, hello));
+        let incoming = next_incoming(&mut bob).await?;
+        ensure!(incoming.signal, "signaling must be identified by the hub");
+        let mut accept = accept_hello("bob", &incoming.id);
+        accept.fingerprint = "cd".repeat(32);
+        let (mut sink, accepted) = dial(f.address, &accept).await?;
+        let (mut source, paired) = opened.await??;
+        ensure!(accepted.ok && paired.ok, "signaling must remain available");
+        let greeting = serde_json::json!({"t":"hello", "m":["ice"]});
+        write_frame(&mut source, &greeting).await?;
+        let received: serde_json::Value = timeout(IO_WAIT, read_frame(&mut sink)).await??;
+        ensure_eq!(received, greeting);
+        write_frame(&mut source, &malicious).await?;
+        let mut byte = [0];
+        let read = timeout(IO_WAIT, sink.read(&mut byte)).await?;
+        ensure!(
+            matches!(read, Ok(0) | Err(_)),
+            "payload escaped the signaling boundary"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn generated_protocol_matches_the_manifest() -> TestResult {
+    ensure_eq!(overlay_relay::RELEASE_VERSION, env!("CARGO_PKG_VERSION"));
+    let major: u32 = env!("CARGO_PKG_VERSION_MAJOR").parse()?;
+    let expected = if major == 0 {
+        env!("CARGO_PKG_VERSION_MINOR").parse()?
+    } else {
+        major
+    };
+    ensure_eq!(VERSION, expected);
+    Ok(())
+}
+
 const IO_WAIT: Duration = Duration::from_secs(5);
 const ALLOWED: &str = "engine";
 
@@ -223,7 +343,7 @@ async fn dial(address: SocketAddr, hello: &Hello) -> TestResult<(TcpStream, Repl
             .find(|name| public_of(name) == hello.public_key)
             .and_then(key_of)
             .ok_or("unknown test identity")?;
-        let mut message = b"overlay-relay/auth/v3:".to_vec();
+        let mut message = overlay_relay::AUTH_DOMAIN.as_bytes().to_vec();
         message.extend_from_slice(&hex::decode(nonce)?);
         message.extend_from_slice(hello.room.as_bytes());
         if !hello.room.is_empty() {
@@ -400,7 +520,7 @@ async fn rejects_wrong_key_and_replayed_proof() -> TestResult {
         let signature = if signer == "replay" {
             saved.clone()
         } else {
-            let mut message = b"overlay-relay/auth/v3:".to_vec();
+            let mut message = overlay_relay::AUTH_DOMAIN.as_bytes().to_vec();
             message.extend_from_slice(&hex::decode(challenge.nonce)?);
             let key = key_of(signer).ok_or("invalid test key")?;
             let signature: Signature = key.sign(&message);

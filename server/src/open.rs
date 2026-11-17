@@ -18,7 +18,19 @@ use tracing::debug;
 use crate::{
     frame::send_frame,
     hub::Shared,
-    protocol::{ERR_UNAVAILABLE, Event, Hello, Incoming, Offer, PROTO_TCP, PROTO_UDP, Reply},
+    protocol::{
+        ERR_UNAVAILABLE,
+        Event,
+        Hello,
+        Incoming,
+        KIND_SIGNAL,
+        Offer,
+        PROTO_TCP,
+        PROTO_UDP,
+        Reply,
+    },
+    rooms,
+    signaling,
     splice::splice,
     state::{Accepted, Requester},
 };
@@ -57,6 +69,11 @@ pub async fn serve(
         refuse(&mut stream).await;
         return;
     };
+    let signal = hello.kind == KIND_SIGNAL;
+    if !permitted(shared, hello).await {
+        refuse(&mut stream).await;
+        return;
+    }
     let id = request_id();
     let (accept_tx, accept_rx) = oneshot::channel();
     let admitted =
@@ -75,6 +92,7 @@ pub async fn serve(
         return;
     }
     let incoming = Incoming {
+        signal,
         peer_id: requester.verifier.to_hex(),
         id: id.clone(),
         proto: hello.proto.clone(),
@@ -102,18 +120,15 @@ pub async fn serve(
         }
         Answer::Shutdown => return,
     };
-    if request.offer.direct() && accepted.direct() {
+    if !signal && request.offer.direct() && accepted.direct() {
         // Both sides continue on a direct connection; the hub relays nothing.
-        send_frame(&mut stream, &Reply::paired(&id, &request.offer, &accepted))
-            .await
-            .ok();
-        send_frame(
-            &mut acceptor,
-            &Reply::paired(&id, &accepted, &request.offer),
-        )
-        .await
-        .ok();
+        pair(&mut stream, &mut acceptor, &id, &request.offer, &accepted).await;
         debug!("overlay flow handed to a direct connection");
+        return;
+    }
+    if !permitted(shared, hello).await {
+        refuse(&mut stream).await;
+        refuse(&mut acceptor).await;
         return;
     }
     let cancel = session.child_token();
@@ -127,29 +142,52 @@ pub async fn serve(
         refuse(&mut acceptor).await;
         return;
     };
-    let opened = send_frame(&mut stream, &Reply::paired(&id, &request.offer, &accepted))
-        .await
-        .is_ok()
-        && send_frame(
-            &mut acceptor,
-            &Reply::paired(&id, &accepted, &request.offer),
-        )
-        .await
-        .is_ok();
-    if opened {
+    if pair(&mut stream, &mut acceptor, &id, &request.offer, &accepted).await {
+        if signal {
+            signaling::exchange(stream, acceptor, cancel).await;
+            shared.state.lock().await.remove_flow(flow_id);
+            return;
+        }
         let proto = if request.udp { PROTO_UDP } else { PROTO_TCP };
         debug!(proto, "overlay flow opened");
-        splice(
-            stream,
-            acceptor,
-            request.udp,
-            shared.config.udp_idle,
-            cancel,
-        )
-        .await;
+        select! {
+            () = revoked(shared, hello) => {},
+            () = splice(stream, acceptor, request.udp, shared.config.udp_idle, cancel) => {},
+        }
         debug!(proto, "overlay flow closed");
     }
     shared.state.lock().await.remove_flow(flow_id);
+}
+
+async fn revoked(shared: &Shared, hello: &Hello) {
+    let mut changes = shared.policy_changes.subscribe();
+    while permitted(shared, hello).await {
+        if changes.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn permitted(shared: &Shared, hello: &Hello) -> bool {
+    hello.kind == KIND_SIGNAL
+        || rooms::relay_allowed(&shared.config.data_dir, &hello.room_id)
+            .await
+            .unwrap_or(false)
+}
+
+async fn pair(
+    left: &mut TcpStream,
+    right: &mut TcpStream,
+    id: &str,
+    own: &Offer,
+    peer: &Offer,
+) -> bool {
+    send_frame(left, &Reply::paired(id, own, peer))
+        .await
+        .is_ok()
+        && send_frame(right, &Reply::paired(id, peer, own))
+            .await
+            .is_ok()
 }
 
 /// Validates the fields of an open request. Any failure is a refusal.
@@ -162,6 +200,13 @@ fn parse_open(hello: &Hello) -> Option<OpenRequest> {
     };
     let destination = hello.dst.parse().ok()?;
     let offer = Offer::parse(&hello.fingerprint, &hello.endpoint)?;
+    if hello.kind == KIND_SIGNAL {
+        if port != u16::MAX || udp || !offer.secure() || offer.direct() {
+            return None;
+        }
+    } else if port == u16::MAX {
+        return None;
+    }
     Some(OpenRequest {
         destination,
         port,

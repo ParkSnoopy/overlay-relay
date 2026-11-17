@@ -32,6 +32,9 @@ pub struct Room {
     pub name: String,
     /// Password proof fixed at creation; never listed.
     pub proof: String,
+    /// Whether new payload relay flows may be opened in this room.
+    #[serde(default = "relay_default")]
+    pub relay: bool,
 }
 
 /// A listed room without its password proof.
@@ -41,11 +44,15 @@ pub struct Listed {
     pub id: String,
     /// Display name.
     pub name: String,
+    /// Whether payload relay is permitted.
+    pub relay: bool,
 }
 
 /// What `overlay-hub rooms list` prints, keyed by room key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Listing {
+    /// Public-room payload relay policy.
+    pub public_relay: bool,
     /// Created rooms.
     pub rooms: BTreeMap<String, Listed>,
 }
@@ -123,7 +130,7 @@ fn decode_room(room_key: &str, value: serde_json::Value) -> Result<Room> {
     Ok(room)
 }
 
-async fn save<T: Serialize>(directory: &Path, rooms: &BTreeMap<String, T>) -> Result<()> {
+async fn save<T: Serialize + Sync>(directory: &Path, rooms: &BTreeMap<String, T>) -> Result<()> {
     let suffix: [u8; 8] = rand::random();
     let temporary = directory.join(format!(".rooms-{}", hex::encode(suffix)));
     let result = write_then_rename(
@@ -154,9 +161,9 @@ pub async fn admit(directory: &Path, id: &str, proof: &str) -> Result<Admission>
         None => Admission::Unknown,
         Some(room) if same(&room.proof, proof) => {
             Admission::Admitted(if room.name.is_empty() {
-                room.id.clone()
+                room.id
             } else {
-                room.name.clone()
+                room.name
             })
         }
         Some(_) => Admission::Denied,
@@ -168,8 +175,9 @@ pub async fn admit(directory: &Path, id: &str, proof: &str) -> Result<Admission>
 /// # Errors
 /// Returns an error when the room file cannot be read or parsed.
 pub async fn listing(directory: &Path) -> Result<Listing> {
-    let rooms = load(directory)
-        .await?
+    let mut records = load(directory).await?;
+    let public_relay = public_policy(records.remove("public"))?;
+    let rooms = records
         .into_iter()
         .map(|(room, entry)| {
             let Ok(entry) = decode_room(&room, entry) else {
@@ -178,6 +186,7 @@ pub async fn listing(directory: &Path) -> Result<Listing> {
                     Listed {
                         id: String::new(),
                         name: "Invalid room record — replace or remove".to_owned(),
+                        relay: false,
                     },
                 );
             };
@@ -186,10 +195,20 @@ pub async fn listing(directory: &Path) -> Result<Listing> {
             } else {
                 entry.name
             };
-            (room, Listed { id: entry.id, name })
+            (
+                room,
+                Listed {
+                    id: entry.id,
+                    name,
+                    relay: entry.relay,
+                },
+            )
         })
         .collect();
-    Ok(Listing { rooms })
+    Ok(Listing {
+        public_relay,
+        rooms,
+    })
 }
 
 /// Creates a room. A room ID is unique, so creating a known ID fails.
@@ -198,7 +217,7 @@ pub async fn listing(directory: &Path) -> Result<Listing> {
 /// Returns an error when the ID, name or proof is malformed, when the room
 /// exists, or when the room file cannot be read or written.
 pub async fn create(directory: &Path, id: &str, name: &str, proof: &str) -> Result<()> {
-    write_room(directory, id, name, proof, false).await
+    configure(directory, id, name, proof, false, None).await
 }
 
 /// Replaces one existing room after explicit operator confirmation.
@@ -206,15 +225,20 @@ pub async fn create(directory: &Path, id: &str, name: &str, proof: &str) -> Resu
 /// # Errors
 /// Rejects invalid input, missing rooms and unreadable or unwritable storage.
 pub async fn replace(directory: &Path, id: &str, name: &str, proof: &str) -> Result<()> {
-    write_room(directory, id, name, proof, true).await
+    configure(directory, id, name, proof, true, None).await
 }
 
-async fn write_room(
+/// Creates or explicitly replaces a room with an optional relay policy.
+///
+/// # Errors
+/// Rejects invalid input, conflicting existence or inaccessible storage.
+pub async fn configure(
     directory: &Path,
     id: &str,
     name: &str,
     proof: &str,
     replace: bool,
+    relay: Option<bool>,
 ) -> Result<()> {
     if id.is_empty() || !valid_name(id) {
         return Err(Error::Config("room ID is not valid"));
@@ -235,14 +259,80 @@ async fn write_room(
     if !rooms.contains_key(&room) && replace {
         return Err(Error::Config("room is unknown"));
     }
+    let relay = relay.unwrap_or_else(|| {
+        rooms
+            .get(&room)
+            .and_then(|entry| entry.get("relay"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true)
+    });
     rooms.insert(
         room,
         serde_json::to_value(Room {
             id: id.to_owned(),
             name: name.to_owned(),
             proof: proof.to_owned(),
+            relay,
         })?,
     );
+    save(directory, &rooms).await
+}
+
+const fn relay_default() -> bool {
+    true
+}
+
+fn public_policy(value: Option<serde_json::Value>) -> Result<bool> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Policy {
+        relay: bool,
+    }
+    value.map_or(Ok(true), |value| {
+        serde_json::from_value::<Policy>(value)
+            .map(|policy| policy.relay)
+            .map_err(Into::into)
+    })
+}
+
+/// Reads the current payload relay policy. Empty ID denotes the public room.
+///
+/// # Errors
+/// Unknown, malformed or unreadable room policy fails closed.
+pub async fn relay_allowed(directory: &Path, id: &str) -> Result<bool> {
+    let mut rooms = load(directory).await?;
+    if id.is_empty() {
+        return public_policy(rooms.remove("public"));
+    }
+    let room_key = key(id);
+    let value = rooms
+        .remove(&room_key)
+        .ok_or(Error::Config("room is unknown"))?;
+    Ok(decode_room(&room_key, value)?.relay)
+}
+
+/// Changes only relay policy, preserving passwords and unrelated records.
+/// `public` names the public room; private rooms use their hashed key.
+///
+/// # Errors
+/// Rejects malformed or missing room keys and inaccessible storage.
+pub async fn set_relay(directory: &Path, room: &str, relay: bool) -> Result<()> {
+    if room != "public" && !valid_room(room) {
+        return Err(Error::Config("room is not a valid key"));
+    }
+    let mut rooms = load(directory).await?;
+    let value = if room == "public" {
+        serde_json::json!({"relay": relay})
+    } else {
+        let value = rooms
+            .get(room)
+            .cloned()
+            .ok_or(Error::Config("room is unknown"))?;
+        let mut record = decode_room(room, value)?;
+        record.relay = relay;
+        serde_json::to_value(record)?
+    };
+    rooms.insert(room.to_owned(), value);
     save(directory, &rooms).await
 }
 

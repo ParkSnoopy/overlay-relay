@@ -5,7 +5,7 @@ use std::{
     fmt,
     net::Ipv4Addr,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use ring::{
@@ -15,8 +15,8 @@ use ring::{
 use tokio::{
     net::{TcpListener, TcpStream},
     select,
-    sync::Mutex,
-    time::timeout,
+    sync::{Mutex, watch},
+    time::{interval, timeout},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -40,6 +40,7 @@ use crate::{
         KIND_ACCEPT,
         KIND_CONTROL,
         KIND_OPEN,
+        KIND_SIGNAL,
         Proof,
         Reply,
         VERSION,
@@ -59,6 +60,25 @@ pub struct Shared {
     pub state: Mutex<State>,
     /// Serializes writes of the persisted identities.
     pub store: Mutex<()>,
+    /// Notifies active relay streams after room policy files change.
+    pub policy_changes: watch::Sender<()>,
+}
+
+async fn watch_policy(shared: &Shared, cancel: CancellationToken) {
+    let mut tick = interval(Duration::from_millis(250));
+    let mut previous = None;
+    loop {
+        select! {
+            () = cancel.cancelled() => return,
+            _ = tick.tick() => {
+                let current = tokio::fs::metadata(shared.config.data_dir.join(rooms::ROOMS_FILE)).await.ok().and_then(|entry| entry.modified().ok().map(|modified| (modified, entry.len())));
+                if current != previous {
+                    shared.policy_changes.send_replace(());
+                    previous = current;
+                }
+            }
+        }
+    }
 }
 
 /// Seconds since the Unix epoch.
@@ -110,6 +130,7 @@ impl Hub {
                 config,
                 state: Mutex::new(state),
                 store: Mutex::new(()),
+                policy_changes: watch::channel(()).0,
             }),
         };
         persist(&hub.shared).await;
@@ -129,6 +150,9 @@ impl Hub {
     pub async fn serve(&self, listener: TcpListener, shutdown: CancellationToken) -> Result<()> {
         let session = shutdown.child_token();
         let _stop_on_return = session.clone().drop_guard();
+        let shared = Arc::clone(&self.shared);
+        let token = session.clone();
+        tokio::spawn(async move { watch_policy(&shared, token).await });
         loop {
             let accepted = select! {
                 biased;
@@ -176,7 +200,10 @@ impl Hub {
         let mut requester = requester;
         if !requester.room.is_empty() {
             match self.admit_room(&requester, &hello).await {
-                Admission::Admitted(name) => requester.room_name = name,
+                Admission::Admitted(name) => {
+                    requester.room_name = name;
+                    requester.room = format!("{}:{}", rooms::key(&hello.room_id), requester.room);
+                }
                 Admission::Unavailable => {
                     send_frame(&mut stream, &Reply::failed("rooms are unavailable"))
                         .await
@@ -201,7 +228,9 @@ impl Hub {
             KIND_CONTROL => {
                 control::serve(&self.shared, stream, requester, &hello.name, session).await;
             }
-            KIND_OPEN => open::serve(&self.shared, stream, requester, &hello, session).await,
+            KIND_OPEN | KIND_SIGNAL => {
+                open::serve(&self.shared, stream, requester, &hello, session).await;
+            }
             KIND_ACCEPT => {
                 accept::serve(&self.shared, stream, requester.verifier, &hello).await;
             }
@@ -261,7 +290,7 @@ impl Hub {
         .ok()?;
         let proof: Proof = read_frame(stream).await.ok()?;
         let signature = hex::decode(proof.signature).ok()?;
-        let mut message = b"overlay-relay/auth/v3:".to_vec();
+        let mut message = crate::AUTH_DOMAIN.as_bytes().to_vec();
         message.extend_from_slice(&nonce);
         message.extend_from_slice(room.as_bytes());
         if !room.is_empty() {

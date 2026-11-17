@@ -149,7 +149,7 @@ func (h *fakeHub) serve(conn net.Conn) {
 		return
 	}
 	signature, err := hex.DecodeString(proof.Signature)
-	digest := sha512.Sum384(append(append([]byte("overlay-relay/auth/v3:"), nonce...), []byte(hello.Room)...))
+	digest := sha512.Sum384(append(append([]byte(overlay.AuthDomain), nonce...), []byte(hello.Room)...))
 	if err != nil || !ecdsa.VerifyASN1(publicKey, digest[:], signature) {
 		_ = conn.Close()
 		return

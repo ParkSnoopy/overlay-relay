@@ -33,8 +33,7 @@ const (
 	Address = Hostname + ":" + Port
 	// ListenAddress binds the hub inside its private container network.
 	ListenAddress = "0.0.0.0:" + Port
-	// Version is the only wire version.
-	Version = 3
+
 	// MaxFrame bounds one control frame (JSON payload) in bytes.
 	MaxFrame = 16 << 10
 	// MaxDatagram bounds one UDP payload carried inside a UDP stream.
@@ -60,6 +59,7 @@ var CIDR = netip.MustParsePrefix("10.77.0.0/16")
 const (
 	KindControl = "control" // register as broadcasting; receive peers and incoming requests
 	KindOpen    = "open"    // open a relayed flow to a broadcasting peer
+	KindSignal  = "signal"  // bounded direct-link signaling, never payload relay
 	KindAccept  = "accept"  // answer an Incoming request received on the control stream
 )
 
@@ -226,6 +226,7 @@ type Peer struct {
 
 // Incoming asks the destination agent to open an accept stream for a flow.
 type Incoming struct {
+	Signal bool   `json:"signal,omitempty"`
 	PeerID string `json:"peer_id,omitempty"`
 	ID     string `json:"id"`
 	Proto  string `json:"proto"`

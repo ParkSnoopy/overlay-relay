@@ -314,7 +314,7 @@ func (a *Agent) handshake(ctx context.Context, conn net.Conn, hello *overlay.Hel
 	if err != nil || len(nonce) != 32 {
 		return reply, errors.New("invalid overlay challenge")
 	}
-	message := append(append([]byte("overlay-relay/auth/v3:"), nonce...), []byte(hello.Room)...)
+	message := append(append([]byte(overlay.AuthDomain), nonce...), []byte(hello.Room)...)
 	if hello.Room != "" {
 		message = append(append(message, 0), []byte(hello.RoomID)...)
 	}

@@ -136,6 +136,7 @@ func (c natConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 }
 
 type secureEnv struct {
+	hub                    hubProcess
 	alice, bob             *overlayagent.Agent
 	aliceStates, bobStates chan overlay.State
 	aliceIP, bobIP         netip.Addr
@@ -200,6 +201,7 @@ func startSecureEnv(t *testing.T, alice, bob secureSide) *secureEnv {
 	stun := startSTUN(t)
 
 	env := &secureEnv{aliceTap: &hubTap{}, bobTap: &hubTap{}, aliceSink: startSink(t, t.TempDir()), bobSink: startSink(t, t.TempDir())}
+	env.hub = hub
 	aliceStates := make(chan overlay.State, 64)
 	bobStates := make(chan overlay.State, 64)
 	env.aliceStates, env.bobStates = aliceStates, bobStates

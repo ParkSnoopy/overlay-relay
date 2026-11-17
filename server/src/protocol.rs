@@ -3,8 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The only accepted wire version, carried in `Hello.version`.
-pub const VERSION: u32 = 3;
+pub use crate::version::VERSION;
 
 /// Port the hub listens on inside its private container network.
 pub const PORT: u16 = 6697;
@@ -42,6 +41,9 @@ pub const KIND_CONTROL: &str = "control";
 
 /// Hello kind that opens a relayed flow to a broadcasting peer.
 pub const KIND_OPEN: &str = "open";
+
+/// Bounded direct-link signaling; never raw payload relay.
+pub const KIND_SIGNAL: &str = "signal";
 
 /// Hello kind that answers an incoming request.
 pub const KIND_ACCEPT: &str = "accept";
@@ -242,6 +244,9 @@ pub struct Peer {
 /// A request asking the destination agent to open an accept stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Incoming {
+    /// The request is bounded direct-link signaling rather than payload relay.
+    #[serde(default)]
+    pub signal: bool,
     /// Stable identifier of the authenticated requesting device.
     pub peer_id: String,
     /// Identifier to echo in the accept Hello.

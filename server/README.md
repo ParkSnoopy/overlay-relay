@@ -34,6 +34,22 @@ The hub needs no configuration. Every variable below is optional.
 
 The hub logs to standard error through `tracing`. Set the level in code, not by environment. Stop it with `SIGTERM` or `Ctrl+C`.
 
+## Room relay policy
+
+Run these against the hub's `OVERLAY_DATA_DIR`:
+
+```text
+overlay-hub rooms list
+overlay-hub rooms relay public false
+overlay-hub rooms create <id> <name> <password-proof> false
+overlay-hub rooms relay <room-key> true
+overlay-hub rooms replace --confirm <id> <name> <password-proof> false
+```
+
+`rooms list` returns `public_relay` and each private room's `relay` flag. Room keys are SHA-256 hashes of IDs. Omitted policy defaults to enabled for new or legacy rooms; replacement without a policy preserves the existing setting. Toggling policy leaves the room's credentials unchanged.
+
+The hub rejects new TCP/UDP relay flows when disabled and closes existing relay streams after detecting the policy change (checked every 250 ms). Invalid policy fails closed. Discovery and bounded direct-link signaling remain available; WebRTC, ICE and P2P payloads continue directly between peers. Direct links still require mutual device approval. Room policy is persisted in `rooms.json`.
+
 ## Identities
 
 There is no account table and no enrollment. A client generates its own P-384 key pair and keeps the private key. On every connection the hub sends a fresh challenge and the client signs it with that key.

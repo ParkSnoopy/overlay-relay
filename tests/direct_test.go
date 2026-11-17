@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -77,6 +79,37 @@ func directNetwork(t *testing.T, nats [2]vnet.NATType, filter vnet.ChunkFilter) 
 		}
 	})
 	return options
+}
+
+func TestDirectWithPublicRelayBlocked(t *testing.T) {
+	for _, method := range []string{"webrtc", "ice", "libp2p"} {
+		t.Run(method, func(t *testing.T) {
+			nat := vnet.NATType{MappingBehavior: vnet.EndpointIndependent, FilteringBehavior: vnet.EndpointAddrPortDependent}
+			options := directNetwork(t, [2]vnet.NATType{nat, nat}, nil)
+			for _, option := range options {
+				option.Methods = []string{method}
+			}
+			env := startSecureEnv(t, secureSide{transport: options[0]}, secureSide{transport: options[1]})
+			command := exec.Command(env.hub.cmd.Path, "rooms", "relay", "public", "false")
+			command.Env = append(os.Environ(), "OVERLAY_DATA_DIR="+env.hub.dir)
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("block relay: %v: %s", err, output)
+			}
+			if _, err := sendFromAlice(t, env, 1024); err == nil {
+				t.Fatal("hub permitted a relay flow")
+			}
+			for _, states := range []<-chan overlay.State{env.aliceStates, env.bobStates} {
+				waitFor(t, states, func(state overlay.State) bool {
+					return len(state.Peers) == 1 && state.Peers[0].DirectStatus == overlay.DirectSucceeded
+				})
+			}
+			for _, proto := range []string{overlay.ProtoTCP, overlay.ProtoUDP} {
+				for _, reverse := range []bool{false, true} {
+					transferDirect(t, env, reverse, proto)
+				}
+			}
+		})
+	}
 }
 
 func TestDirectThroughNAT(t *testing.T) {

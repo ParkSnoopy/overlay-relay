@@ -22,11 +22,16 @@ pub async fn serve(shared: &Shared, mut stream: TcpStream, acceptor: Verifier, h
             .ok();
         return;
     };
+    let room = if hello.room.is_empty() {
+        String::new()
+    } else {
+        format!("{}:{}", crate::rooms::key(&hello.room_id), hello.room)
+    };
     let claimed = shared
         .state
         .lock()
         .await
-        .claim_pending(&hello.id, &acceptor, &hello.room);
+        .claim_pending(&hello.id, &acceptor, &room);
     let Some(pending) = claimed else {
         send_frame(&mut stream, &Reply::failed(ERR_UNAUTHORIZED))
             .await

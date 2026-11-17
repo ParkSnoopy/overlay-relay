@@ -1,5 +1,16 @@
 //! Confirmed room replacement, including stale schemas.
-use overlay_relay::{Admission, ROOMS_FILE, admit, create, key, listing, remove, replace};
+use overlay_relay::{
+    Admission,
+    ROOMS_FILE,
+    admit,
+    create,
+    key,
+    listing,
+    relay_allowed,
+    remove,
+    replace,
+    set_relay,
+};
 
 #[tokio::test]
 async fn replacement_preserves_other_rooms_and_requires_valid_input()
@@ -9,6 +20,8 @@ async fn replacement_preserves_other_rooms_and_requires_valid_input()
     let new = "cd".repeat(32);
     create(directory.path(), "DUMMY", "Old", &old).await?;
     create(directory.path(), "OTHER", "Other", &old).await?;
+    set_relay(directory.path(), "public", false).await?;
+    set_relay(directory.path(), &key("DUMMY"), false).await?;
     if create(directory.path(), "DUMMY", "New", &new).await.is_ok()
         || replace(directory.path(), "MISSING", "New", &new)
             .await
@@ -20,6 +33,11 @@ async fn replacement_preserves_other_rooms_and_requires_valid_input()
         return Err("unsafe replacement accepted".into());
     }
     replace(directory.path(), "DUMMY", "New", &new).await?;
+    if relay_allowed(directory.path(), "DUMMY").await?
+        || listing(directory.path()).await?.public_relay
+    {
+        return Err("replacement reset relay policy".into());
+    }
     if admit(directory.path(), "DUMMY", &old).await? != Admission::Denied
         || admit(directory.path(), "DUMMY", &new).await? != Admission::Admitted("New".into())
         || admit(directory.path(), "OTHER", &old).await? != Admission::Admitted("Other".into())
@@ -28,8 +46,12 @@ async fn replacement_preserves_other_rooms_and_requires_valid_input()
     }
     let path = directory.path().join(ROOMS_FILE);
     let mut data: serde_json::Value = serde_json::from_slice(&tokio::fs::read(&path).await?)?;
+    data[key("OTHER")] = serde_json::json!({"id":"OTHER", "name":"Other", "proof":old});
     data[key("DUMMY")] = serde_json::json!({"legacy": true});
     tokio::fs::write(&path, serde_json::to_vec(&data)?).await?;
+    if !relay_allowed(directory.path(), "OTHER").await? {
+        return Err("legacy room lost its default relay permission".into());
+    }
     if admit(directory.path(), "OTHER", &old).await? != Admission::Admitted("Other".into())
         || admit(directory.path(), "DUMMY", &old).await.is_ok()
         || listing(directory.path()).await?.rooms.len() != 2
