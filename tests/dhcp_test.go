@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -155,7 +156,9 @@ func TestRelayFirewallOverRealHub(t *testing.T) {
 				defer cancel()
 				astates, bstates := make(chan overlay.State, 64), make(chan overlay.State, 64)
 				a := newAgent(t, hub.address, alice, astates, func(uint16) string { return service.Addr().String() })
+				logged := make(chan string, 8)
 				b := newAgent(t, hub.address, bob, bstates, func(uint16) string { return service.Addr().String() }, func(c *overlayagent.Config) {
+					c.LogRelay = func(line string) { logged <- line }
 					c.RelayFirewall = []overlay.FirewallRule{{Action: "allow", Peer: peer, Protocol: proto, Start: 4001, End: 4001}, {Action: "deny", Peer: peer, Protocol: proto, Start: 4000, End: 4001}}
 					c.DialLocal = func(ctx context.Context, protocol string, _ uint16, _ netip.Addr) (net.Conn, error) {
 						address := service.Addr().String()
@@ -171,7 +174,20 @@ func TestRelayFirewallOverRealHub(t *testing.T) {
 				go func() { done <- b.Run(ctx) }()
 				defer func() { cancel(); <-done; <-done }()
 				ip := <-b.Ready()
-				<-a.Ready()
+				src := <-a.Ready()
+				checkLog := func(port uint16, result, reason string) {
+					t.Helper()
+					want := fmt.Sprintf("Overlay relay incoming: peer=%s device=%s protocol=%s port=%d result=%s%s",
+						src, hex.EncodeToString(digest[:])[:7], proto, port, result, reason)
+					select {
+					case got := <-logged:
+						if got != want {
+							t.Fatalf("relay log = %q, want %q", got, want)
+						}
+					case <-ctx.Done():
+						t.Fatalf("no log for port %d (%s)", port, result)
+					}
+				}
 				waitFor(t, astates, func(s overlay.State) bool { return len(s.Peers) == 1 })
 				conn, err := a.Outbound(ctx, proto, netip.AddrPortFrom(ip, 4000))
 				if scope != "other-device" {
@@ -186,6 +202,11 @@ func TestRelayFirewallOverRealHub(t *testing.T) {
 					}
 				} else if err != nil {
 					t.Fatalf("unrelated peer denied: %v", err)
+				}
+				if scope == "other-device" {
+					checkLog(4000, "allowed", "")
+				} else {
+					checkLog(4000, "blocked", " reason=relay firewall")
 				}
 				if conn != nil {
 					conn.Close()
@@ -202,6 +223,7 @@ func TestRelayFirewallOverRealHub(t *testing.T) {
 				if _, err := io.ReadFull(allowed, buf); err != nil || string(buf) != "ok" {
 					t.Fatalf("allowed payload: %q %v", buf, err)
 				}
+				checkLog(4001, "allowed", "")
 			})
 		}
 	}

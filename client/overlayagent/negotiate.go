@@ -291,7 +291,7 @@ func (a *Agent) answerLink(ctx context.Context, conn net.Conn, ip netip.Addr, pe
 			l, err := current.await(ctx)
 			current = nil
 			if err == nil {
-				a.installLink(l, ip, peerID)
+				a.installLink(l, ip, attempt)
 			}
 			return
 		case msgNext:

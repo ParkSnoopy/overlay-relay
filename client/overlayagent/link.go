@@ -119,11 +119,12 @@ func (a *Agent) openLinkFlow(ctx context.Context, pl *peerLink, proto string, po
 
 // installLink registers an established link unless the peer is gone, denied or
 // already linked, and starts serving the peer's flows on it.
-func (a *Agent) installLink(l link, ip netip.Addr, peerID string) bool {
+func (a *Agent) installLink(l link, ip netip.Addr, attempt *linkAttempt) bool {
+	peerID := attempt.peerID
 	pl := &peerLink{link: l, ip: ip, peerID: peerID}
 	a.mu.Lock()
 	ctx := a.runCtx
-	if ctx == nil || ctx.Err() != nil || !a.connected || a.peerIDLocked(ip) != peerID || a.relayOnlyLocked(peerID) {
+	if ctx == nil || ctx.Err() != nil || !a.connected || a.linking[ip] != attempt || a.peerIDLocked(ip) != peerID || a.relayOnlyLocked(peerID) {
 		a.mu.Unlock()
 		l.close()
 		return false
@@ -133,6 +134,7 @@ func (a *Agent) installLink(l link, ip netip.Addr, peerID string) bool {
 	}
 	previous := a.links[ip]
 	a.links[ip] = pl
+	delete(a.directRetries, ip)
 	a.flows.Add(1)
 	a.mu.Unlock()
 	if previous != nil {
@@ -266,16 +268,41 @@ type linkAttempt struct {
 	cancel    context.CancelFunc
 }
 
+var directRetryDelays = [...]time.Duration{10 * time.Second, 30 * time.Second, time.Minute, 10 * time.Minute}
+
+type directRetry struct {
+	peerID string
+	until  time.Time
+	next   int
+}
+
+func (a *Agent) backOffDirectLocked(ip netip.Addr, peerID string, now time.Time) {
+	retry := a.directRetries[ip]
+	if retry.peerID != peerID {
+		retry = directRetry{peerID: peerID}
+	}
+	retry.until = now.Add(directRetryDelays[retry.next])
+	if retry.next < len(directRetryDelays)-1 {
+		retry.next++
+	}
+	if a.directRetries == nil {
+		a.directRetries = make(map[netip.Addr]directRetry)
+	}
+	a.directRetries[ip] = retry
+}
+
 // maybeLink starts a link negotiation to ip in the background when direct
 // connections are on and neither a link nor a recent failure exists. Flows
 // keep using the relay meanwhile.
 func (a *Agent) maybeLink(ip netip.Addr, peerID string) {
 	d := a.direct.Load()
-	if d == nil || !overlay.ValidPeerID(peerID) || !a.directAllowed(ip) {
+	if d == nil || !overlay.ValidPeerID(peerID) {
 		return
 	}
 	a.mu.Lock()
-	if a.runCtx == nil || a.runCtx.Err() != nil || !a.connected || a.links[ip] != nil || a.linking[ip] != nil {
+	retry := a.directRetries[ip]
+	if a.runCtx == nil || a.runCtx.Err() != nil || !a.connected || a.links[ip] != nil || a.linking[ip] != nil ||
+		a.peerIDLocked(ip) != peerID || a.relayOnlyLocked(peerID) || (retry.peerID == peerID && time.Now().Before(retry.until)) {
 		a.mu.Unlock()
 		return
 	}
@@ -292,27 +319,28 @@ func (a *Agent) maybeLink(ip netip.Addr, peerID string) {
 		defer a.flows.Done()
 		defer cancel()
 		l, err := a.negotiate(ctx, d, ip, peerID)
+		if err == nil {
+			a.installLink(l, ip, attempt)
+		}
 		a.mu.Lock()
-		if a.linking[ip] == attempt {
-			delete(a.linking, ip)
+		if a.linking[ip] != attempt {
+			a.mu.Unlock()
+			return
+		}
+		delete(a.linking, ip)
+		canceled := ctx.Err() != nil || !a.connected || a.peerIDLocked(ip) != peerID || a.relayOnlyLocked(peerID)
+		if err != nil && !canceled {
+			a.backOffDirectLocked(ip, peerID, time.Now())
 		}
 		a.mu.Unlock()
-		a.finishAttempt(ctx, ip, peerID, l, err)
+		switch {
+		case err == nil:
+		case canceled:
+			a.recordDirect(ip, peerID, overlay.DirectCanceled)
+		case errors.Is(err, errNoMethod) || errors.Is(err, errNoLink):
+			a.recordDirect(ip, peerID, overlay.DirectUnavailable)
+		default:
+			a.recordDirect(ip, peerID, overlay.DirectFailed)
+		}
 	}()
-}
-
-// finishAttempt records the outcome of a negotiation. A failure is not retried for directRetryAfter.
-func (a *Agent) finishAttempt(ctx context.Context, ip netip.Addr, peerID string, l link, err error) {
-	switch {
-	case err == nil:
-		a.installLink(l, ip, peerID)
-	case ctx.Err() != nil:
-		a.recordDirect(ip, peerID, overlay.DirectCanceled)
-	case errors.Is(err, errNoMethod) || errors.Is(err, errNoLink):
-		a.blockDirect(ip)
-		a.recordDirect(ip, peerID, overlay.DirectUnavailable)
-	default:
-		a.blockDirect(ip)
-		a.recordDirect(ip, peerID, overlay.DirectFailed)
-	}
 }

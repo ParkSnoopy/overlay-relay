@@ -25,11 +25,8 @@ import (
 const (
 	// maxIncoming bounds concurrently handled incoming flows, including their handshakes.
 	maxIncoming = 128
-	// directRetryAfter is how long a peer whose direct connection failed is
-	// served by the relay before a direct connection is offered again.
-	directRetryAfter = 5 * time.Minute
-	maxPeers         = 4096
-	maxReason        = 128
+	maxPeers    = 4096
+	maxReason   = 128
 )
 
 // Config wires an Agent to its platform.
@@ -77,6 +74,8 @@ type Config struct {
 
 	// RelayFirewall denies incoming relayed service flows. Direct links are unaffected.
 	RelayFirewall []overlay.FirewallRule
+	// LogRelay receives a diagnostic line per payload relay request, possibly concurrently.
+	LogRelay func(string)
 }
 
 type timing struct {
@@ -100,19 +99,18 @@ type Agent struct {
 
 	emitMu sync.Mutex // serializes snapshot-and-publish so states stay ordered
 
-	mu        sync.Mutex
-	ip        netip.Addr
-	name      string
-	roomName  string
-	connected bool
-	reason    string
-	peers     []overlay.Peer
-	peerSet   map[netip.Addr]struct{}
-	ready     chan netip.Addr
-	readyOnce sync.Once
-	started   bool
-	// directBlocked holds peers whose direct connection failed, until when.
-	directBlocked  map[netip.Addr]time.Time
+	mu             sync.Mutex
+	ip             netip.Addr
+	name           string
+	roomName       string
+	connected      bool
+	reason         string
+	peers          []overlay.Peer
+	peerSet        map[netip.Addr]struct{}
+	ready          chan netip.Addr
+	readyOnce      sync.Once
+	started        bool
+	directRetries  map[netip.Addr]directRetry
 	relayOnly      map[string]bool
 	directPeers    map[string]bool
 	active         map[*peerFlow]struct{}
@@ -468,7 +466,7 @@ func (a *Agent) disconnected(reason string) {
 	a.sessionEpoch++
 	a.connected, a.reason = false, reason
 	a.peers, a.peerSet = nil, map[netip.Addr]struct{}{}
-	a.observations, a.directBlocked = nil, nil
+	a.observations, a.directRetries = nil, nil
 	a.mu.Unlock()
 	a.closeLinks(nil)
 	a.emit()
@@ -493,7 +491,11 @@ func (a *Agent) setPeers(peers []overlay.Peer) {
 	for ip, observation := range a.observations {
 		if _, exists := set[ip]; !exists || a.peerIDLocked(ip) != observation.id {
 			delete(a.observations, ip)
-			delete(a.directBlocked, ip)
+		}
+	}
+	for ip, retry := range a.directRetries {
+		if _, exists := set[ip]; !exists || a.peerIDLocked(ip) != retry.peerID {
+			delete(a.directRetries, ip)
 		}
 	}
 	a.mu.Unlock()

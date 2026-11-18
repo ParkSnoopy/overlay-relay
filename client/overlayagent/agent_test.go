@@ -24,6 +24,62 @@ import (
 	"github.com/ParkSnoopy/overlay-relay/client/overlay"
 )
 
+type testDirectLink struct{ *linkBase }
+
+func (*testDirectLink) open(context.Context) (net.Conn, error) { return nil, net.ErrClosed }
+
+func (l *testDirectLink) accept(ctx context.Context) (net.Conn, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestDirectRetryBackoffResetsAfterLink(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		id, ip := strings.Repeat("1", 64), netip.MustParseAddr("10.77.0.2")
+		attempts := 0
+		a := &Agent{
+			cfg: Config{Dial: func(context.Context) (net.Conn, error) {
+				attempts++
+				return nil, errors.New("test direct signaling failure")
+			}},
+			runCtx: ctx, connected: true,
+			peers:       []overlay.Peer{{ID: id, IP: ip.String()}},
+			directPeers: map[string]bool{id: true},
+		}
+		a.direct.Store(&directState{})
+		for i, delay := range []time.Duration{10 * time.Second, 30 * time.Second, time.Minute, 10 * time.Minute, 10 * time.Minute} {
+			a.maybeLink(ip, id)
+			synctest.Wait()
+			if attempts != i+1 {
+				t.Fatalf("after cooldown %d: %d attempts, want %d", i, attempts, i+1)
+			}
+			time.Sleep(delay - time.Millisecond)
+			a.maybeLink(ip, id)
+			synctest.Wait()
+			if attempts != i+1 {
+				t.Fatalf("attempt started before %v cooldown expired", delay)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		attempt := &linkAttempt{peerID: id, cancel: func() {}}
+		a.linking[ip] = attempt
+		l := &testDirectLink{newLinkBase("test", func() {})}
+		if !a.installLink(l, ip, attempt) {
+			t.Fatal("test direct link was refused")
+		}
+		delete(a.linking, ip)
+		l.close()
+		synctest.Wait()
+		a.maybeLink(ip, id)
+		synctest.Wait()
+		if attempts != 6 || a.directRetries[ip].until.Sub(time.Now()) != 10*time.Second {
+			t.Fatal("successful direct link did not reset the backoff to 10 seconds")
+		}
+	})
+}
+
 // fakeHub speaks the contract in overlay.go over loopback TCP. It relays
 // flows between control-registered accounts and nothing more.
 type fakeHub struct {

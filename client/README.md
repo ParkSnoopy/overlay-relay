@@ -117,7 +117,7 @@ cfg.Direct = &overlayagent.DirectOptions{
 - The agents negotiate through bounded, hub-validated signaling over the authenticated VPN and try three methods in turn: Pion WebRTC (ICE with a data channel), Pion ICE with QUIC, and go-libp2p over QUIC. `DirectOptions.Methods` changes the list or order. The hub sees negotiation metadata, not direct payloads.
 - An outbound attempt starts negotiation in the background; flows opened after the link is up use it. If the hub blocks room relay, earlier flows fail instead of relaying, while negotiation continues.
 - Each method pins the same certificate fingerprints, so the link is authenticated and encrypted. STUN queries run over the sockets from `ListenPacket`; use sockets that bypass the VPN.
-- If only one side enables `Direct`, or no method connects, flows use the encrypted relay only when room policy permits it, and the peer is not offered a link again for five minutes. No TURN relay is used.
+- If only one side enables `Direct`, or no method connects, flows use the encrypted relay only when room policy permits it. Outgoing traffic can trigger a new direct attempt after a per-peer cooldown of 10s, 30s, 1m, then 10m for further failures. An established direct link resets the cooldown. No TURN relay is used.
 - `DirectOptions.Timeout` bounds each method (default 10 seconds).
 
 ## Account identities

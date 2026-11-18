@@ -59,11 +59,14 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 		a.maybeLink(ip, peerID)
 		relayed, _, err := a.openFlow(ctx, proto, ip, dst.Port(), peerID)
 		if err != nil {
+			a.logRelay("outbound", ip, peerID, proto, dst.Port(), "failed", "relay setup")
 			return nil, err
 		}
 		if flow, err = a.trackFlow(relayed, ip, peerID, false); err != nil {
+			a.logRelay("outbound", ip, peerID, proto, dst.Port(), "failed", "peer unavailable")
 			return nil, err
 		}
+		a.logRelay("outbound", ip, peerID, proto, dst.Port(), "opened", "")
 		// The relay carries this flow from the first byte while a direct link
 		// comes up; later flows use the link once it exists.
 		a.maybeLink(ip, peerID)
@@ -111,30 +114,23 @@ func (a *Agent) openFlow(ctx context.Context, proto string, ip netip.Addr, port 
 	return flow, reply.Fingerprint, err
 }
 
-// directAllowed reports whether a direct connection to ip may be offered: it
-// is not when one failed recently.
-func (a *Agent) directAllowed(ip netip.Addr) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.relayOnlyLocked(a.peerIDLocked(ip)) {
-		return false
+// logRelay records only validated endpoints, protocol and a fixed outcome. Never
+// print stream IDs, keys, raw remote errors, or bytes from the flow.
+func (a *Agent) logRelay(direction string, peer netip.Addr, id, proto string, port uint16, result, reason string) {
+	if overlay.ValidPeerID(id) {
+		id = id[:7]
+	} else {
+		id = "unknown"
 	}
-	until, blocked := a.directBlocked[ip]
-	if blocked && time.Now().After(until) {
-		delete(a.directBlocked, ip)
-		return true
+	line := fmt.Sprintf("Overlay relay %s: peer=%s device=%s protocol=%s port=%d result=%s", direction, peer, id, proto, port, result)
+	if reason != "" {
+		line += " reason=" + reason
 	}
-	return !blocked
-}
-
-// blockDirect stops offering direct connections to ip for directRetryAfter.
-func (a *Agent) blockDirect(ip netip.Addr) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.directBlocked == nil {
-		a.directBlocked = map[netip.Addr]time.Time{}
+	if a.cfg.LogRelay != nil {
+		a.cfg.LogRelay(line)
+	} else {
+		slog.Debug(line)
 	}
-	a.directBlocked[ip] = time.Now().Add(directRetryAfter)
 }
 
 // accept starts handling one Incoming request unless the concurrency bound is reached.
@@ -147,7 +143,9 @@ func (a *Agent) accept(ctx context.Context, in *overlay.Incoming) {
 	select {
 	case a.inflight <- struct{}{}:
 	default:
-		slog.Debug("Overlay dropped an incoming request over the concurrency bound")
+		if !in.Signal {
+			a.logRelay("incoming", src.Unmap(), in.PeerID, in.Proto, in.Port, "dropped", "concurrency limit")
+		}
 		return
 	}
 	a.flows.Add(1)
@@ -162,6 +160,14 @@ func (a *Agent) accept(ctx context.Context, in *overlay.Incoming) {
 }
 
 func (a *Agent) serveIncoming(ctx context.Context, in *overlay.Incoming, src netip.Addr) error {
+	result, reason := "failed", "relay setup"
+	if !in.Signal {
+		defer func() {
+			if result != "allowed" {
+				a.logRelay("incoming", src, in.PeerID, in.Proto, in.Port, result, reason)
+			}
+		}()
+	}
 	hello := &overlay.Hello{Version: overlay.Version, Kind: overlay.KindAccept, ID: in.ID}
 	a.offer(hello)
 	hub, err := a.cfg.Dial(ctx)
@@ -182,9 +188,11 @@ func (a *Agent) serveIncoming(ctx context.Context, in *overlay.Incoming, src net
 		return nil
 	}
 	if overlay.FirewallBlocked(a.cfg.RelayFirewall, in.PeerID, in.Proto, in.Port) {
+		result, reason = "blocked", "relay firewall"
 		closeConn(hub)
-		return errors.New("overlay relay firewall blocked incoming flow")
+		return nil
 	}
+	reason = "peer stream"
 	flow, err := a.seal(ctx, hub, &reply, false)
 	if err != nil {
 		return err
@@ -202,9 +210,12 @@ func (a *Agent) serveIncoming(ctx context.Context, in *overlay.Incoming, src net
 	}
 	local, err := a.cfg.DialLocal(ctx, in.Proto, in.Port, src)
 	if err != nil {
+		reason = "local service unavailable"
 		closeConn(flow)
 		return err
 	}
+	result = "allowed"
+	a.logRelay("incoming", src, in.PeerID, in.Proto, in.Port, result, "")
 	if in.Proto == overlay.ProtoUDP {
 		return spliceUDP(ctx, flow, local, a.timing.udpIdle)
 	}
