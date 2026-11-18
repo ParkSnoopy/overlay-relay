@@ -7,4 +7,4 @@ pub const VERSION: u32 = 5;
 pub const AUTH_DOMAIN: &str = "overlay-relay/auth/v5:";
 
 /// Release that generated these protocol constants.
-pub const RELEASE_VERSION: &str = "0.5.1";
+pub const RELEASE_VERSION: &str = "0.5.2";

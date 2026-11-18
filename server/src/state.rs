@@ -70,10 +70,15 @@ struct Entry {
     seen: u64,
 }
 
-/// The display name every identity gets: a prefix of its verifier.
-fn display_name(verifier: &Verifier) -> String {
-    let hex = verifier.to_hex();
-    format!("peer-{}", hex.get(..8).unwrap_or(&hex))
+impl Entry {
+    fn wire_name(&self, verifier: &Verifier) -> String {
+        if self.name.is_empty() {
+            let id = verifier.to_hex();
+            format!("peer-{}", id.get(..8).unwrap_or(&id))
+        } else {
+            self.name.clone()
+        }
+    }
 }
 
 /// The hub's mutable state.
@@ -115,9 +120,7 @@ impl State {
         let reservations: HashMap<Verifier, Ipv4Addr> = dhcp
             .bindings
             .iter()
-            .filter_map(|binding| {
-                Verifier::from_public_key(&binding.public_key).map(|key| (key, binding.ip))
-            })
+            .filter_map(|binding| binding.verifier().map(|key| (key, binding.ip)))
             .collect();
         let reserved_ips: HashSet<Ipv4Addr> = reservations.values().copied().collect();
         let mut state = Self {
@@ -127,27 +130,23 @@ impl State {
             ..Self::default()
         };
         for (verifier, record) in records {
-            let eligible = state.reservations.get(verifier).map_or_else(
-                || {
-                    record.ip >= state.dhcp.start
-                        && record.ip <= state.dhcp.end
-                        && !state.reserved_ips.contains(&record.ip)
-                },
-                |reserved| *reserved == record.ip,
-            );
-            if !eligible
-                || !address_space.assignable(record.ip)
-                || state.by_ip.contains_key(&record.ip)
-            {
+            let reserved = state.reservations.get(verifier);
+            let ip = reserved.copied().unwrap_or(record.ip);
+            let eligible = reserved.is_some()
+                || (ip >= state.dhcp.start
+                    && ip <= state.dhcp.end
+                    && !state.reserved_ips.contains(&ip));
+            state.dirty |= ip != record.ip;
+            if !eligible || !address_space.assignable(ip) || state.by_ip.contains_key(&ip) {
                 state.dirty = true;
                 continue;
             }
-            state.by_ip.insert(record.ip, *verifier);
+            state.by_ip.insert(ip, *verifier);
             state.accounts.insert(
                 *verifier,
                 Entry {
-                    name: display_name(verifier),
-                    ip: record.ip,
+                    name: record.name.clone(),
+                    ip,
                     seen: record.seen,
                 },
             );
@@ -176,6 +175,7 @@ impl State {
                         Record {
                             ip: entry.ip,
                             seen: entry.seen,
+                            name: entry.name.clone(),
                         },
                     )
                 })
@@ -237,7 +237,7 @@ impl State {
             self.accounts.insert(
                 verifier,
                 Entry {
-                    name: display_name(&verifier),
+                    name: String::new(),
                     ip,
                     seen: now,
                 },
@@ -249,7 +249,7 @@ impl State {
             room: String::new(),
             room_name: String::new(),
             verifier,
-            name: entry.name.clone(),
+            name: entry.wire_name(&verifier),
             ip: entry.ip,
         })
     }
@@ -302,15 +302,15 @@ impl State {
         self.accounts.get(verifier).map(|entry| entry.ip)
     }
 
-    /// Updates only the authenticated device's transient advertised name.
+    /// Updates the authenticated device's advertised display name.
     pub fn set_name(&mut self, verifier: &Verifier, name: &str) -> Option<String> {
         let entry = self.accounts.get_mut(verifier)?;
-        entry.name = if name.is_empty() {
-            display_name(verifier)
-        } else {
-            name.to_owned()
-        };
-        Some(entry.name.clone())
+        if entry.name != name {
+            entry.name.clear();
+            entry.name.push_str(name);
+            self.dirty = true;
+        }
+        Some(entry.wire_name(verifier))
     }
 
     /// Lists every other broadcasting account, sorted by overlay address.
@@ -333,7 +333,7 @@ impl State {
                 let peer = Peer {
                     id: verifier.to_hex(),
                     ip: entry.ip.to_string(),
-                    name: entry.name.clone(),
+                    name: entry.wire_name(verifier),
                 };
                 listed.push((entry.ip, peer));
             }
@@ -632,6 +632,7 @@ mod tests {
             Record {
                 ip: shared,
                 seen: 1,
+                name: String::new(),
             },
         );
         let mut state = State::load(&records);
@@ -641,6 +642,7 @@ mod tests {
             Record {
                 ip: shared,
                 seen: 1,
+                name: String::new(),
             },
         );
         state = State::load(&records);

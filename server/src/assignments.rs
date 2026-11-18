@@ -1,7 +1,7 @@
 //! Persistence of known identities in `ips.json`.
 //!
-//! The file maps verifier hex to the identity's address and the Unix time it
-//! was last seen. Writes go through a temporary file created with mode 0600,
+//! The file maps verifier hex to address, last-seen time and advertised name.
+//! Writes go through a temporary file created with mode 0600,
 //! fsynced, then renamed over the old file.
 
 use std::{
@@ -16,6 +16,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::{
     error::{Error, Result},
+    protocol::valid_name,
     verifier::Verifier,
 };
 
@@ -23,12 +24,14 @@ use crate::{
 pub const FILE_NAME: &str = "ips.json";
 
 /// One persisted identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
     /// The identity's overlay address.
     pub ip: Ipv4Addr,
     /// Unix time in seconds when the identity last authenticated or disconnected.
     pub seen: u64,
+    /// Last name advertised by the authenticated device, or empty if unnamed.
+    pub name: String,
 }
 
 /// File form of a [`Record`]. A bare address is the older form and counts as
@@ -36,7 +39,12 @@ pub struct Record {
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 enum Stored {
-    Record { ip: IpAddr, seen: u64 },
+    Record {
+        ip: IpAddr,
+        seen: u64,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        name: String,
+    },
     Address(IpAddr),
 }
 
@@ -56,14 +64,17 @@ pub async fn load(path: &Path, now: u64) -> Result<HashMap<Verifier, Record>> {
         serde_json::from_slice(&raw).map_err(|_| Error::CorruptAssignments)?;
     let mut records = HashMap::new();
     for (key, value) in stored.unwrap_or_default() {
-        let (ip, seen) = match value {
-            Stored::Record { ip, seen } => (ip, seen),
-            Stored::Address(ip) => (ip, now),
+        let (ip, seen, mut name) = match value {
+            Stored::Record { ip, seen, name } => (ip, seen, name),
+            Stored::Address(ip) => (ip, now, String::new()),
         };
         let (Some(verifier), IpAddr::V4(ip)) = (Verifier::from_hex(&key), ip) else {
             continue;
         };
-        records.insert(verifier, Record { ip, seen });
+        if !valid_name(&name) {
+            name.clear();
+        }
+        records.insert(verifier, Record { ip, seen, name });
     }
     Ok(records)
 }
@@ -82,6 +93,7 @@ pub async fn save(path: &Path, records: &HashMap<Verifier, Record>) -> Result<()
                 Stored::Record {
                     ip: IpAddr::V4(record.ip),
                     seen: record.seen,
+                    name: record.name.clone(),
                 },
             )
         })
@@ -129,6 +141,7 @@ mod tests {
         let record = Record {
             ip: Ipv4Addr::new(10, 77, 0, 7),
             seen: 1_700_000_000,
+            name: "Test laptop".to_owned(),
         };
         let mut records = HashMap::new();
         records.insert(verifier, record);
@@ -153,6 +166,7 @@ mod tests {
         let expected = Record {
             ip: Ipv4Addr::new(10, 77, 0, 4),
             seen: 42,
+            name: String::new(),
         };
         ensure_eq!(
             records.get(&verifier),

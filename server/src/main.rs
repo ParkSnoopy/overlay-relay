@@ -72,6 +72,8 @@ enum Command {
 enum DhcpCommand {
     /// Print the validated DHCP policy as JSON.
     Show,
+    /// Print editable policy and known devices, using only device identifiers.
+    Editor,
     /// Read and validate a complete JSON policy from standard input, then save atomically.
     Set,
 }
@@ -193,6 +195,11 @@ async fn dhcp_command(arguments: &Arguments, command: DhcpCommand) -> Result<()>
         DhcpCommand::Show => {
             let policy = overlay_relay::dhcp::load(&arguments.data_dir, space).await?;
             writeln!(std::io::stdout(), "{}", serde_json::to_string(&policy)?)?;
+            Ok(())
+        }
+        DhcpCommand::Editor => {
+            let document = overlay_relay::dhcp::editor(&arguments.data_dir, space).await?;
+            writeln!(std::io::stdout(), "{document}")?;
             Ok(())
         }
         DhcpCommand::Set => {

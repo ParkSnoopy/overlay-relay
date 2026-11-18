@@ -3,6 +3,7 @@ use std::{error::Error, fs, os::unix::fs::PermissionsExt};
 
 use overlay_relay::{
     AddressSpace,
+    Verifier,
     dhcp::{self, Binding, Dhcp},
 };
 
@@ -63,7 +64,8 @@ fn reservations_are_validated_before_mutation() -> Result<(), Box<dyn Error>> {
     let mut policy = Dhcp::for_space(space);
     policy.lease_seconds = 60;
     policy.bindings.push(Binding {
-        public_key: KEY.to_owned(),
+        device_id: None,
+        public_key: Some(KEY.to_owned()),
         ip: reserved_ip,
     });
     policy.validate(space)?;
@@ -72,9 +74,60 @@ fn reservations_are_validated_before_mutation() -> Result<(), Box<dyn Error>> {
         return Err("duplicate binding was accepted".into());
     }
     policy.bindings.pop();
-    policy.bindings[0].public_key = "04".repeat(97);
+    let id = Verifier::from_public_key(KEY)
+        .ok_or("invalid fixture key")?
+        .to_hex();
+    policy.bindings.push(Binding {
+        device_id: Some(id.clone()),
+        public_key: None,
+        ip: "10.77.0.2".parse()?,
+    });
+    if policy.validate(space).is_ok() {
+        return Err("legacy key and its device ID were accepted as distinct".into());
+    }
+    policy.bindings.remove(0);
+    policy.validate(space)?;
+    policy.bindings[0].device_id = Some(id.to_ascii_uppercase());
+    if policy.validate(space).is_ok() {
+        return Err("noncanonical device ID was accepted".into());
+    }
+    policy.bindings[0].device_id = None;
+    policy.bindings[0].public_key = Some("04".repeat(97));
     if policy.validate(space).is_ok() {
         return Err("invalid public key was accepted".into());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn editor_names_devices_without_exposing_legacy_keys() -> Result<(), Box<dyn Error>> {
+    let dir = tempfile::tempdir()?;
+    let space: AddressSpace = "10.77.0.0/29".parse()?;
+    let id = Verifier::from_public_key(KEY)
+        .ok_or("invalid fixture key")?
+        .to_hex();
+    let unnamed = Verifier::from_digest([1; 32]).to_hex();
+    let path = dir.path();
+    tokio::fs::write(
+        path.join("ips.json"),
+        serde_json::to_vec(&serde_json::json!({
+            id.clone(): {"ip": "10.77.0.2", "seen": 1, "name": "Test laptop"},
+            unnamed.clone(): {"ip": "10.77.0.3", "seen": 1},
+        }))?,
+    )
+    .await?;
+    let policy = serde_json::json!({
+        "start": "10.77.0.1", "end": "10.77.0.6", "lease_seconds": 0,
+        "bindings": [{"public_key": KEY, "ip": "10.77.0.5"}],
+    });
+    dhcp::save(path, space, &serde_json::to_vec(&policy)?).await?;
+    let editor = dhcp::editor(path, space).await?;
+    if editor["devices"][&id] != serde_json::json!({"name": "Test laptop", "ip": "10.77.0.5"})
+        || editor["devices"][&unnamed] != serde_json::json!({"name": "", "ip": "10.77.0.3"})
+        || editor["policy"]["bindings"][0]
+            != serde_json::json!({"device_id": id, "ip": "10.77.0.5"})
+    {
+        return Err("DHCP editor did not resolve devices to names, addresses and IDs".into());
     }
     Ok(())
 }

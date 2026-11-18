@@ -97,6 +97,7 @@ pub async fn serve(
         return;
     }
     debug!("overlay control registered");
+    persist(shared).await;
     shared.state.lock().await.notify_all();
     let idle = shared.config.control_idle;
     tokio::join!(

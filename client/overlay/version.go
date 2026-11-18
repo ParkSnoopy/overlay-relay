@@ -2,7 +2,7 @@
 package overlay
 
 // ReleaseVersion is inherited from server/Cargo.toml.
-const ReleaseVersion = "0.5.1"
+const ReleaseVersion = "0.5.2"
 
 // Version is the compatibility generation: minor before 1.0, major thereafter.
 const Version = 5

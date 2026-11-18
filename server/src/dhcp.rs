@@ -1,6 +1,11 @@
-//! Hub-owned address pool, idle lease lifetime and public-key reservations.
+//! Hub-owned address pool, idle lease lifetime and device reservations.
 
-use std::{collections::HashSet, io::ErrorKind, net::Ipv4Addr, path::Path};
+use std::{
+    collections::{BTreeMap, HashSet},
+    io::ErrorKind,
+    net::Ipv4Addr,
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
@@ -12,14 +17,34 @@ pub const DHCP_FILE: &str = "dhcp.json";
 /// Maximum serialized policy size, enforced before parsing or writing.
 pub const MAX_DHCP_BYTES: usize = 64 * 1024;
 
-/// A fixed address reserved for a validated P-384 public key.
+/// A fixed address reserved for an authenticated device identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
-    /// Uncompressed SEC1 public key encoded as lowercase hex.
-    pub public_key: String,
+    /// SHA-256 identifier already used by the hub's assignment table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    /// Legacy uncompressed SEC1 public key. New editors never submit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
     /// Reserved usable address, which may be outside the dynamic pool.
     pub ip: Ipv4Addr,
+}
+
+impl Binding {
+    pub(crate) fn verifier(&self) -> Option<Verifier> {
+        match (&self.device_id, &self.public_key) {
+            (Some(id), None)
+                if id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+            {
+                Verifier::from_hex(id)
+            }
+            (None, Some(key)) if *key == key.to_ascii_lowercase() => Verifier::from_public_key(key),
+            _ => None,
+        }
+    }
 }
 
 /// Administrative policy; never supplied or overridden by a connecting client.
@@ -32,7 +57,7 @@ pub struct Dhcp {
     pub end: Ipv4Addr,
     /// Idle lease lifetime in seconds; zero retains capacity-based reclamation.
     pub lease_seconds: u64,
-    /// Permanent public-key reservations; neither leased nor evicted.
+    /// Permanent device reservations; neither leased nor evicted.
     pub bindings: Vec<Binding>,
 }
 
@@ -58,7 +83,7 @@ impl Dhcp {
     /// Validate the entire policy before changing persisted or runtime state.
     ///
     /// # Errors
-    /// Rejects noncanonical keys, duplicate keys/addresses, unusable addresses,
+    /// Rejects noncanonical identities, duplicate identities/addresses, unusable addresses,
     /// reversed/out-of-subnet pools, excessive leases and oversized binding lists.
     pub fn validate(&self, space: AddressSpace) -> Result<()> {
         if !space.assignable(self.start) || !space.assignable(self.end) || self.start > self.end {
@@ -77,18 +102,15 @@ impl Dhcp {
         let mut keys = HashSet::new();
         let mut addresses = HashSet::new();
         for binding in &self.bindings {
-            let Some(verifier) = Verifier::from_public_key(&binding.public_key) else {
-                return Err(Error::Config(
-                    "DHCP binding requires a valid uncompressed P-384 public key",
-                ));
-            };
-            if binding.public_key != binding.public_key.to_ascii_lowercase()
-                || !space.assignable(binding.ip)
+            let verifier = binding.verifier().ok_or(Error::Config(
+                "DHCP binding requires one valid device identity",
+            ))?;
+            if !space.assignable(binding.ip)
                 || !keys.insert(verifier)
                 || !addresses.insert(binding.ip)
             {
                 return Err(Error::Config(
-                    "DHCP bindings must have canonical unique keys and unique usable addresses",
+                    "DHCP bindings must have unique device identities and unique usable addresses",
                 ));
             }
         }
@@ -112,6 +134,35 @@ pub async fn load(directory: &Path, space: AddressSpace) -> Result<Dhcp> {
         .read_to_end(&mut raw)
         .await?;
     decode(&raw, space)
+}
+
+/// Read the editor's policy and known devices without exposing raw keys.
+///
+/// # Errors
+/// Returns a read or validation error for corrupt hub state.
+pub async fn editor(directory: &Path, space: AddressSpace) -> Result<serde_json::Value> {
+    let mut policy = load(directory, space).await?;
+    let mut devices = BTreeMap::new();
+    for (id, record) in assignments::load(&directory.join(assignments::FILE_NAME), 0).await? {
+        devices.insert(id.to_hex(), (record.ip, record.name));
+    }
+    for binding in &mut policy.bindings {
+        let id = binding
+            .verifier()
+            .ok_or(Error::Config("invalid DHCP binding"))?
+            .to_hex();
+        devices
+            .entry(id.clone())
+            .and_modify(|(ip, _)| *ip = binding.ip)
+            .or_insert_with(|| (binding.ip, String::new()));
+        binding.device_id = Some(id);
+        binding.public_key = None;
+    }
+    let devices: BTreeMap<_, _> = devices
+        .into_iter()
+        .map(|(id, (ip, name))| (id, serde_json::json!({"ip": ip, "name": name})))
+        .collect();
+    Ok(serde_json::json!({"policy": policy, "devices": devices}))
 }
 
 /// Decode and validate bounded administrative input.
@@ -141,6 +192,30 @@ pub async fn save(directory: &Path, space: AddressSpace, raw: &[u8]) -> Result<(
             Err(error) if error.kind() != ErrorKind::NotFound => Err(error.into()),
             _ => Ok(()),
         };
+    }
+    if policy
+        .bindings
+        .iter()
+        .any(|binding| binding.device_id.is_some())
+    {
+        let assignments = assignments::load(&directory.join(assignments::FILE_NAME), 0).await?;
+        let existing: HashSet<_> = load(directory, space)
+            .await?
+            .bindings
+            .iter()
+            .filter_map(Binding::verifier)
+            .collect();
+        for binding in &policy.bindings {
+            if binding.device_id.is_some()
+                && !binding
+                    .verifier()
+                    .is_some_and(|id| assignments.contains_key(&id) || existing.contains(&id))
+            {
+                return Err(Error::Config(
+                    "DHCP binding requires a device known to this hub",
+                ));
+            }
+        }
     }
     tokio::fs::create_dir_all(directory).await?;
     let temporary = directory.join(format!(".dhcp-{}", hex::encode(rand::random::<[u8; 8]>())));
