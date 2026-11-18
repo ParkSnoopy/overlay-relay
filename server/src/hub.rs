@@ -186,8 +186,9 @@ impl Hub {
         };
         let domain = match hello.version {
             VERSION => crate::AUTH_DOMAIN,
-            // Release 0.4.x used wire v3 before release-derived numbering.
-            3 if VERSION == 5 => "overlay-relay/auth/v3:",
+            crate::version::PREVIOUS_WIRE_VERSION if hello.version != 0 => {
+                crate::version::PREVIOUS_AUTH_DOMAIN
+            }
             _ => return,
         };
         let Ok(Some(requester)) =

@@ -28,9 +28,6 @@ const (
 	maxIncoming = 128
 	maxPeers    = 4096
 	maxReason   = 128
-
-	// The 0.4.x releases used wire v3, before release-derived numbering.
-	previousWireVersion = 3
 )
 
 var errNoHubChallenge = errors.New("overlay hub closed before sending a challenge")
@@ -295,7 +292,7 @@ func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
 }
 
 func canRetryPreviousWire(ctx context.Context, version int) bool {
-	return overlay.Version == 5 && version == overlay.Version && ctx.Err() == nil
+	return overlay.PreviousWireVersion != 0 && version == overlay.Version && ctx.Err() == nil
 }
 
 func (a *Agent) wireVersion() int {
@@ -320,7 +317,7 @@ func (a *Agent) dialControl(ctx context.Context) (net.Conn, overlay.Reply, int, 
 		if !errors.Is(err, errNoHubChallenge) || !canRetryPreviousWire(ctx, version) {
 			return nil, reply, version, err
 		}
-		version = previousWireVersion
+		version = overlay.PreviousWireVersion
 	}
 }
 
@@ -353,8 +350,8 @@ func (a *Agent) handshake(ctx context.Context, conn net.Conn, hello *overlay.Hel
 		return reply, errors.New("invalid overlay challenge")
 	}
 	domain := overlay.AuthDomain
-	if hello.Version == previousWireVersion && overlay.Version == 5 {
-		domain = "overlay-relay/auth/v3:"
+	if hello.Version == overlay.PreviousWireVersion {
+		domain = overlay.PreviousAuthDomain
 	}
 	message := append(append([]byte(domain), nonce...), []byte(hello.Room)...)
 	if hello.Room != "" {

@@ -562,13 +562,16 @@ async fn oversized_and_wrong_version_frames_are_dropped() -> TestResult {
     let mut raw = TcpStream::connect(f.address).await?;
     raw.write_all(&[0xff, 0xff]).await?;
     expect_closed(&mut raw).await?;
-    let mut wrong = TcpStream::connect(f.address).await?;
-    let hello = Hello {
-        version: 9,
-        ..control_hello("alice")
-    };
-    write_frame(&mut wrong, &hello).await?;
-    expect_closed(&mut wrong).await
+    for version in [0, VERSION.saturating_sub(2), VERSION + 1] {
+        let mut wrong = TcpStream::connect(f.address).await?;
+        let hello = Hello {
+            version,
+            ..control_hello("alice")
+        };
+        write_frame(&mut wrong, &hello).await?;
+        expect_closed(&mut wrong).await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]

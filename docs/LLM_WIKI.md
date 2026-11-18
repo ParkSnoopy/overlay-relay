@@ -88,7 +88,7 @@ All field names are lowercase JSON keys.
 
 | Field | Type | Used by | Meaning |
 |---|---|---|---|
-| `version` | integer | all | Use `5` by default. The hub also supports `3` for 0.4.7 compatibility without direct signaling. It closes the stream silently for other versions. |
+| `version` | integer | all | Use `5` by default. The hub also supports `4` for 0.4.8 compatibility without direct signaling. It closes the stream silently for other versions. |
 | `room` | string | all | Private room password proof, empty for public membership. Derive it locally from the room ID and password. Never log it. |
 | `room_id` | string | all | Private room ID, empty for public membership. Required with `room`. A known ID admits only the proof its first requester used. |
 | `kind` | string | all | `"control"`, `"open"`, `"signal"` or `"accept"`. Anything else gets reply `invalid request`. |
@@ -109,7 +109,7 @@ Private membership is the lowercase hex of PBKDF2-HMAC-SHA256(password, `overlay
 
 Both devices must explicitly approve the other's ID in `DirectPeers` before direct offers or connections. Empty approvals permit relay only. Revocation closes affected direct flows and negotiations.
 
-After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The signed transcript is UTF-8 `overlay-relay/auth/v5:` (or `overlay-relay/auth/v3:` for a v3 Hello), followed by the 32 raw nonce bytes and the UTF-8 room proof without a separator. A private room also appends one `0` byte and the UTF-8 room ID; a public room appends nothing. The client signs using ECDSA P-384 with SHA-384. It sends `{"signature":"<hex>"}` with the ASN.1 DER signature. The hub verifies the proof before issuing the reply; a valid proof of any key is accepted, and a key seen for the first time receives an address. A malformed public key can receive an unauthorized reply without a challenge.
+After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The signed transcript is UTF-8 `overlay-relay/auth/v5:` (or `overlay-relay/auth/v4:` for a v4 Hello), followed by the 32 raw nonce bytes and the UTF-8 room proof without a separator. A private room also appends one `0` byte and the UTF-8 room ID; a public room appends nothing. The client signs using ECDSA P-384 with SHA-384. It sends `{"signature":"<hex>"}` with the ASN.1 DER signature. The hub verifies the proof before issuing the reply; a valid proof of any key is accepted, and a key seen for the first time receives an address. A malformed public key can receive an unauthorized reply without a challenge.
 
 ### 7.2 Reply (hub to client)
 

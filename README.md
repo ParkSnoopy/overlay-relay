@@ -43,12 +43,15 @@ go get github.com/ParkSnoopy/overlay-relay/client@latest
 ```
 
 Update the hub and clients separately if needed.  
-The 0.5.x implementation prefers wire v5 and supports discovery, registration, and relayed traffic with 0.4.7 (wire v3).  
+The 0.5.x implementation prefers wire v5 and supports discovery, registration, and relayed traffic with 0.4.8 (wire v4).  
 Both peers need v5 for direct connections on the new hub.  
 Mixed-version traffic needs relay to be allowed by the hub.  
-Upgrade the hub first if you need the newer room relay controls.  
 
-`server/Cargo.toml` is the release-version source. Run `python3 scripts/bump_version.py --sync` after changing it; `--check` verifies generated server/client metadata without writing. The generator uses the minor component before 1.0 and the major component thereafter. The 0.4.7 release predates the generator. The script does not increment versions or publish Go module tags.
+`server/Cargo.toml` is the release-version source.  
+Run `python3 scripts/bump_version.py --sync` after changing it; `--check` verifies generated server/client metadata without writing.  
+Set `wire` in `[package.metadata.overlay-relay]` independently of the release version.  
+The generator derives the fallback as `wire - 1`; wire v1 has no fallback.  
+The script does not increment versions or publish Go module tags.  
 
 ```go
 agent := overlayagent.New(overlayagent.Config{
@@ -95,7 +98,11 @@ Go modules are joined by the root [`go.work`](go.work). Run Go commands from a m
 
 ## Versioning
 
-The release version is the `version` field in [`server/Cargo.toml`](server/Cargo.toml). Go module tags follow it as `client/vX.Y.Z`. Each stream declares its wire version in `Hello.version`. The previous release predates the generated mapping: 0.4.7 sends v3, not v4. Only v5 and the explicit v3 compatibility path are accepted by this implementation.
+The release version is the `version` field in [`server/Cargo.toml`](server/Cargo.toml).  
+Go module tags follow it as `client/vX.Y.Z`.  
+Each stream declares its wire version in `Hello.version`.  
+The hub accepts wire v5 and v4; wire v3 (0.4.7) is outside the compatibility window.  
+`TestPreviousReleaseInterop` uses hub and client binaries built from `00a8fd51fb93acfe31a51ea20a1d34e12fd4487d`.  
 
 Version 2 is incompatible with token-based clients. Hub 0.2 reads no peers table: any key that signs the challenge is a peer, so remove the old `peers.json` mount. An `ips.json` from an older hub still loads, and addresses of keys that were already listed stay.
 

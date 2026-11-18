@@ -22,7 +22,7 @@ func Probe(ctx context.Context, address string) error {
 	version := overlay.Version
 	err := probeVersion(ctx, address, version)
 	if err == io.EOF && canRetryPreviousWire(ctx, version) {
-		return probeVersion(ctx, address, previousWireVersion)
+		return probeVersion(ctx, address, overlay.PreviousWireVersion)
 	}
 	return err
 }

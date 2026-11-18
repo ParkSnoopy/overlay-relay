@@ -34,7 +34,6 @@ const EVENT_QUEUE: usize = 16;
 pub struct ControlHandle {
     /// Opaque room membership, never exposed in snapshots or diagnostics.
     pub room: String,
-    /// Wire format accepted by this control stream.
     pub version: u32,
     /// Serial that distinguishes this registration from a later replacement.
     pub generation: u64,

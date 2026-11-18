@@ -20,11 +20,19 @@ import (
 )
 
 func TestVersionSynchronization(t *testing.T) {
+	if output, err := exec.Command("python3", "../scripts/bump_version.py", "--check").CombinedOutput(); err != nil {
+		t.Fatalf("checked-in version metadata: %v: %s", err, output)
+	}
 	script, err := os.ReadFile("../scripts/bump_version.py")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, test := range []struct{ release, protocol string }{{"0.4.7", "4"}, {"0.5.0", "5"}, {"4.2.1-rc.1", "4"}} {
+	for _, test := range []struct{ release, protocol, previous string }{
+		{"0.3.0", "1", "0"},
+		{"0.5.3", "5", "4"},
+		{"0.6.0", "6", "5"},
+		{"1.0.0-rc.1", "6", "5"},
+	} {
 		t.Run(test.release, func(t *testing.T) {
 			root := t.TempDir()
 			for _, directory := range []string{"scripts", "server/src", "client/overlay"} {
@@ -36,7 +44,9 @@ func TestVersionSynchronization(t *testing.T) {
 			if err := os.WriteFile(path, script, 0600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(root, "server/Cargo.toml"), []byte("[package]\nversion = \""+test.release+"\"\n"), 0600); err != nil {
+			manifest := filepath.Join(root, "server/Cargo.toml")
+			header := "[package]\nversion = \"" + test.release + "\"\n[package.metadata.overlay-relay]\n"
+			if err := os.WriteFile(manifest, []byte(header+"wire = "+test.protocol+"\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
 			if err := exec.Command("python3", path, "--check").Run(); err == nil {
@@ -52,7 +62,10 @@ func TestVersionSynchronization(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(string(data), `ReleaseVersion = "`+test.release+`"`) || !strings.Contains(string(data), "const Version = "+test.protocol) {
+			if !strings.Contains(string(data), `ReleaseVersion = "`+test.release+`"`) ||
+				!strings.Contains(string(data), "const Version = "+test.protocol+"\n") ||
+				!strings.Contains(string(data), "const PreviousWireVersion = "+test.previous+"\n") ||
+				!strings.Contains(string(data), `const PreviousAuthDomain = "overlay-relay/auth/v`+test.previous+`:"`) {
 				t.Fatalf("incorrect generated version: %s", data)
 			}
 			if err := os.WriteFile(client, []byte("DUMMY drift"), 0600); err != nil {
@@ -66,6 +79,31 @@ func TestVersionSynchronization(t *testing.T) {
 			}
 			if output, err := exec.Command("python3", path, "--sync").CombinedOutput(); err != nil {
 				t.Fatalf("repair: %v: %s", err, output)
+			}
+			server := filepath.Join(root, "server/src/version.rs")
+			hubData, err := os.ReadFile(server)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(hubData), "const VERSION: u32 = "+test.protocol+";") ||
+				!strings.Contains(string(hubData), "const PREVIOUS_WIRE_VERSION: u32 = "+test.previous+";") ||
+				!strings.Contains(string(hubData), `const PREVIOUS_AUTH_DOMAIN: &str = "overlay-relay/auth/v`+test.previous+`:";`) {
+				t.Fatalf("incorrect generated hub version: %s", hubData)
+			}
+			for _, rejected := range []string{"0", "2147483648", "true"} {
+				if err := os.WriteFile(manifest, []byte(header+"wire = "+rejected+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				for _, mode := range []string{"--check", "--sync"} {
+					if output, err := exec.Command("python3", path, mode).CombinedOutput(); err == nil || !strings.Contains(string(output), "wire must be a positive signed 32-bit integer") {
+						t.Fatalf("%s accepted invalid compatibility metadata or failed unexpectedly: %v: %s", mode, err, output)
+					}
+				}
+				for filename, want := range map[string][]byte{client: data, server: hubData} {
+					if after, err := os.ReadFile(filename); err != nil || string(after) != string(want) {
+						t.Fatalf("rejected synchronization changed %s: %v", filename, err)
+					}
+				}
 			}
 		})
 	}
@@ -83,7 +121,7 @@ type hubProcess struct {
 
 func buildHub(t *testing.T) string {
 	t.Helper()
-	build := exec.Command("cargo", "build", "--quiet", "--manifest-path", serverManifest, "--bin", "overlay-hub")
+	build := exec.Command("cargo", "build", "--locked", "--quiet", "--manifest-path", serverManifest, "--bin", "overlay-hub")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		t.Fatalf("build overlay-hub: %v", err)
@@ -326,7 +364,7 @@ func TestProbeNeedsNoEnrollment(t *testing.T) {
 func TestPreviousReleaseInterop(t *testing.T) {
 	legacyHub, legacyClient := os.Getenv("OVERLAY_TEST_LEGACY_HUB"), os.Getenv("OVERLAY_TEST_LEGACY_CLIENT")
 	if legacyHub == "" || legacyClient == "" {
-		t.Skip("set OVERLAY_TEST_LEGACY_HUB and OVERLAY_TEST_LEGACY_CLIENT to the 0.4.7 binaries")
+		t.Skip("set OVERLAY_TEST_LEGACY_HUB and OVERLAY_TEST_LEGACY_CLIENT to binaries built from 00a8fd5 (0.4.8, wire v4)")
 	}
 	for _, host := range []struct{ name, binary string }{{"updated-hub", buildHub(t)}, {"previous-hub", legacyHub}} {
 		t.Run(host.name, func(t *testing.T) {
