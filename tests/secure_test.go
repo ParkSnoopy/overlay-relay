@@ -177,9 +177,10 @@ func newSecureAgent(hub string, account account, side secureSide, stun string, t
 	if side.direct {
 		config.Direct = &overlayagent.DirectOptions{
 			STUNServers: []string{stun},
-			// Bind loopback so the endpoint the STUN server reports is reachable.
+			// Pion advertises non-loopback host candidates. Bind IPv4 wildcard
+			// so the candidate's actual interface can receive packets.
 			ListenPacket: func(context.Context) (net.PacketConn, error) {
-				socket, err := net.ListenPacket("udp", "127.0.0.1:0")
+				socket, err := net.ListenPacket("udp4", "0.0.0.0:0")
 				if err != nil || !side.nat {
 					return socket, err
 				}

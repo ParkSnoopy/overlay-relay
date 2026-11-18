@@ -13,7 +13,10 @@ The module has no daemon and no platform code. Your application supplies the net
 go get github.com/ParkSnoopy/overlay-relay/client@latest
 ```
 
-Client and hub must both support wire version 4. `overlay.ReleaseVersion`, `overlay.Version` and `overlay.AuthDomain` are generated from `server/Cargo.toml` by `python3 scripts/bump_version.py --sync`; `--check` detects drift without writing.
+Use matching client and hub versions.  
+The hub rejects old direct greetings that still advertise the removed transport.  
+`overlay.ReleaseVersion`, `overlay.Version` and `overlay.AuthDomain` are generated from `server/Cargo.toml` by `python3 scripts/bump_version.py --sync`.  
+Use `--check` to detect drift without writing.  
 
 Module versions follow the server release. Tags are `client/vX.Y.Z`.
 
@@ -114,7 +117,9 @@ cfg.Direct = &overlayagent.DirectOptions{
 }
 ```
 
-- The agents negotiate through bounded, hub-validated signaling over the authenticated VPN and try three methods in turn: Pion WebRTC (ICE with a data channel), Pion ICE with QUIC, and go-libp2p over QUIC. `DirectOptions.Methods` changes the list or order. The hub sees negotiation metadata, not direct payloads.
+- The agents try Pion WebRTC v5 first and Pion ICE with QUIC if it fails.  
+  `DirectOptions.Methods` changes the list or order.  
+  The hub validates signaling over the authenticated VPN and does not carry direct payloads.  
 - An outbound attempt starts negotiation in the background; flows opened after the link is up use it. If the hub blocks room relay, earlier flows fail instead of relaying, while negotiation continues.
 - Each method pins the same certificate fingerprints, so the link is authenticated and encrypted. STUN queries run over the sockets from `ListenPacket`; use sockets that bypass the VPN.
 - If only one side enables `Direct`, or no method connects, flows use the encrypted relay only when room policy permits it. Outgoing traffic can trigger a new direct attempt after a per-peer cooldown of 10s, 30s, 1m, then 10m for further failures. An established direct link resets the cooldown. No TURN relay is used.

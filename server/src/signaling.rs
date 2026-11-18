@@ -31,7 +31,7 @@ struct Message {
 }
 
 fn method(name: &str) -> bool {
-    matches!(name, "webrtc" | "ice" | "libp2p")
+    matches!(name, "webrtc" | "ice")
 }
 
 impl Message {
@@ -69,7 +69,7 @@ impl Message {
                     })
             }
             "ice" => data.len() == 3 && text("u", 256) && text("p", 256) && list("c"),
-            "libp2p" => data.len() == 2 && text("i", 128) && list("a"),
+
             _ => false,
         }
     }
@@ -78,7 +78,7 @@ impl Message {
         match self.t.as_str() {
             "hello" => {
                 !self.m.is_empty()
-                    && self.m.len() <= 3
+                    && self.m.len() <= 2
                     && self.m.iter().all(|name| method(name))
                     && self.s.is_empty()
                     && self.d.is_none()
@@ -94,7 +94,7 @@ impl Message {
                     && self.d.is_none()
                     && self.m.is_empty()
             }
-            "ping" | "pong" | "sync" | "next" | "end" => {
+            "sync" | "next" | "end" => {
                 self.s.is_empty() && self.d.is_none() && self.m.is_empty() && self.e.is_empty()
             }
             _ => false,
@@ -112,6 +112,7 @@ async fn forward(
         let message: Message = read_frame(reader).await?;
         if !message.valid()
             || (index == 0 && !matches!(message.t.as_str(), "hello" | "fail"))
+            || (index == 0 && message.e == "method failed")
             || (index > 0 && message.t == "hello")
         {
             return Err(Error::Config("invalid direct signaling"));
@@ -127,7 +128,9 @@ async fn forward(
             return Err(Error::Config("direct signaling budget exceeded"));
         }
         send_frame(writer, &message).await?;
-        if matches!(message.t.as_str(), "done" | "end" | "fail") {
+        if matches!(message.t.as_str(), "done" | "end")
+            || (message.t == "fail" && message.e != "method failed")
+        {
             return Ok(());
         }
     }

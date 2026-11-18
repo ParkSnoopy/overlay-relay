@@ -166,7 +166,8 @@ async fn signaling_cannot_be_used_as_an_unrestricted_relay() -> TestResult {
     for malicious in [
         serde_json::json!({"t":"payload", "d":"DUMMY"}),
         serde_json::json!({"t":"offer", "s":"ice", "d":{"payload":"DUMMY"}}),
-        serde_json::json!({"t":"ping", "payload":"DUMMY"}),
+        serde_json::json!({"t":"ping"}),
+        serde_json::json!({"t":"offer", "s":"libp2p", "d":{"i":"DUMMY", "a":["DUMMY"]}}),
     ] {
         let mut hello = open_hello("alice", &reply.ip, PROTO_TCP, Some(u16::MAX));
         hello.kind = overlay_relay::KIND_SIGNAL.to_owned();

@@ -42,7 +42,7 @@ There is no enrollment. Each client generates its own key pair and keeps the pri
 go get github.com/ParkSnoopy/overlay-relay/client@latest
 ```
 
-Client and hub must both support wire version 4; update them together.
+Update the hub and its clients together to keep direct connections working.  
 
 `server/Cargo.toml` is the release-version source. Run `python3 scripts/bump_version.py --sync` after changing it; `--check` verifies generated server/client metadata without writing. Protocol generation follows the minor component for `0.x` releases (`0.4.7` → `v4`), and the major component from `1.0` onward. The script does not increment versions or publish Go module tags.
 

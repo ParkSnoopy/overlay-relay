@@ -2,10 +2,10 @@
 package overlay
 
 // ReleaseVersion is inherited from server/Cargo.toml.
-const ReleaseVersion = "0.4.8"
+const ReleaseVersion = "0.5.1"
 
 // Version is the compatibility generation: minor before 1.0, major thereafter.
-const Version = 4
+const Version = 5
 
 // AuthDomain binds authentication to the wire generation.
-const AuthDomain = "overlay-relay/auth/v4:"
+const AuthDomain = "overlay-relay/auth/v5:"

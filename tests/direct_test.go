@@ -82,7 +82,7 @@ func directNetwork(t *testing.T, nats [2]vnet.NATType, filter vnet.ChunkFilter) 
 }
 
 func TestDirectWithPublicRelayBlocked(t *testing.T) {
-	for _, method := range []string{"webrtc", "ice", "libp2p"} {
+	for _, method := range []string{"webrtc", "ice"} {
 		t.Run(method, func(t *testing.T) {
 			nat := vnet.NATType{MappingBehavior: vnet.EndpointIndependent, FilteringBehavior: vnet.EndpointAddrPortDependent}
 			options := directNetwork(t, [2]vnet.NATType{nat, nat}, nil)
@@ -128,7 +128,7 @@ func TestDirectThroughNAT(t *testing.T) {
 
 // Each method must bring up a link by itself, or the later ones would hide a broken earlier one.
 func TestDirectEachMethodAlone(t *testing.T) {
-	for _, method := range []string{"webrtc", "ice", "libp2p"} {
+	for _, method := range []string{"webrtc", "ice"} {
 		t.Run(method, func(t *testing.T) {
 			nat := vnet.NATType{MappingBehavior: vnet.EndpointIndependent, FilteringBehavior: vnet.EndpointAddrPortDependent}
 			options := directNetwork(t, [2]vnet.NATType{nat, nat}, nil)
@@ -145,6 +145,32 @@ func TestDirectEachMethodAlone(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDirectFallsBackToICEWhenWebRTCFails(t *testing.T) {
+	nat := vnet.NATType{MappingBehavior: vnet.EndpointIndependent, FilteringBehavior: vnet.EndpointAddrPortDependent}
+	var dropped atomic.Bool
+	options := directNetwork(t, [2]vnet.NATType{nat, nat}, func(chunk vnet.Chunk) bool {
+		// Block DTLS records without interfering with STUN or QUIC's fixed bit.
+		data := chunk.UserData()
+		if len(data) >= 13 && data[0] >= 20 && data[0] <= 25 && data[1] == 0xfe {
+			dropped.Store(true)
+			return false
+		}
+		return true
+	})
+	env := startSecureEnv(t, secureSide{transport: options[0]}, secureSide{transport: options[1]})
+	establishLink(t, env)
+	if !dropped.Load() {
+		t.Fatal("WebRTC was not attempted before ICE")
+	}
+	for _, proto := range []string{overlay.ProtoTCP, overlay.ProtoUDP} {
+		for _, reverse := range []bool{false, true} {
+			if peer := transferDirect(t, env, reverse, proto); peer.DirectMethod != "ice" {
+				t.Fatalf("direct method after WebRTC failure = %q, want ice", peer.DirectMethod)
+			}
+		}
 	}
 }
 

@@ -16,7 +16,6 @@ import (
 const (
 	methodWebRTC = "webrtc"
 	methodICE    = "ice"
-	methodLibp2p = "libp2p"
 
 	// defaultDirectTimeout bounds how long one method may take to come up.
 	defaultDirectTimeout = 10 * time.Second
@@ -37,7 +36,7 @@ var (
 )
 
 // defaultMethods is the order in which direct methods are tried.
-var defaultMethods = []string{methodWebRTC, methodICE, methodLibp2p}
+var defaultMethods = []string{methodWebRTC, methodICE}
 
 // DirectOptions configures direct links. Two peers that both enable it
 // negotiate a link over the encrypted relay and, once it is up, carry new
@@ -53,8 +52,7 @@ type DirectOptions struct {
 	ListenPacket func(ctx context.Context) (net.PacketConn, error)
 	// Timeout bounds each method's connection attempt. Zero means ten seconds.
 	Timeout time.Duration
-	// Methods lists the methods to try, in order: "webrtc", "ice" and "libp2p".
-	// Nil tries all of them in that order.
+	// Methods lists the methods to try. Nil tries "webrtc" then "ice".
 	Methods []string
 	// Net replaces the operating system network stack of the ICE based methods.
 	// It exists for network simulation; nil uses ListenPacket and the host stack.
@@ -81,8 +79,7 @@ type linkPeer struct {
 // method is one way to bring up a direct link.
 type method interface {
 	name() string
-	// syncs reports whether both sides must start at (nearly) the same moment.
-	syncs() bool
+
 	// offer starts the initiator's side and returns its offer.
 	offer(ctx context.Context, peer *linkPeer) (session, json.RawMessage, error)
 	// answer starts the responder's side and returns its answer.
@@ -93,7 +90,6 @@ type method interface {
 
 // directState holds what every direct method shares.
 type directState struct {
-	options  *DirectOptions
 	identity *identity
 	timeout  time.Duration
 	network  transport.Net
@@ -102,7 +98,7 @@ type directState struct {
 }
 
 func newDirectState(options *DirectOptions, id *identity) (*directState, error) {
-	d := &directState{options: options, identity: id, timeout: options.Timeout}
+	d := &directState{identity: id, timeout: options.Timeout}
 	if d.timeout <= 0 {
 		d.timeout = defaultDirectTimeout
 	}
@@ -134,8 +130,7 @@ func newDirectState(options *DirectOptions, id *identity) (*directState, error) 
 			d.methods = append(d.methods, &webrtcMethod{state: d})
 		case methodICE:
 			d.methods = append(d.methods, &iceMethod{state: d})
-		case methodLibp2p:
-			d.methods = append(d.methods, &libp2pMethod{state: d})
+
 		}
 	}
 	return d, nil

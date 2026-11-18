@@ -18,13 +18,12 @@ const (
 	msgHello  = "hello"  // both: the methods this side supports, in preference order
 	msgOffer  = "offer"  // initiator: a method and its offer
 	msgAnswer = "answer" // responder: the same method and its answer
-	msgPing   = "ping"   // initiator: measure the round trip
-	msgPong   = "pong"   // responder: reply to ping
-	msgSync   = "sync"   // initiator: both sides start connecting now
-	msgDone   = "done"   // initiator: the link is up
-	msgNext   = "next"   // initiator: the method failed; drop it
-	msgEnd    = "end"    // initiator: no method is left
-	msgFail   = "fail"   // responder: refuses the request
+
+	msgSync = "sync" // initiator: both sides start connecting now
+	msgDone = "done" // initiator: the link is up
+	msgNext = "next" // initiator: the method failed; drop it
+	msgEnd  = "end"  // initiator: no method is left
+	msgFail = "fail" // responder: refuses the request or fails one method
 )
 
 var errNoLink = errors.New("overlay peer does not answer direct link negotiation")
@@ -122,26 +121,8 @@ func (a *Agent) attempt(ctx context.Context, d *directState, conn net.Conn, peer
 	if err := sess.apply(reply.Data); err != nil {
 		return nil, err
 	}
-	var delay time.Duration
-	if m.syncs() {
-		start := time.Now()
-		if err := writeLinkMessage(conn, &linkMessage{Type: msgPing}); err != nil {
-			return nil, err
-		}
-		if err := readLinkMessage(conn, &reply, a.timing.handshake); err != nil || reply.Type != msgPong {
-			return nil, errors.New("overlay peer did not answer the round trip probe")
-		}
-		delay = time.Since(start) / 2
-	}
 	if err := writeLinkMessage(conn, &linkMessage{Type: msgSync}); err != nil {
 		return nil, err
-	}
-	if delay > 0 {
-		select {
-		case <-time.After(delay):
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
 	}
 	connectCtx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
@@ -274,17 +255,16 @@ func (a *Agent) answerLink(ctx context.Context, conn net.Conn, ip netip.Addr, pe
 			}
 			sess, answer, err := m.answer(ctx, peer, message.Data)
 			if err != nil {
-				_ = writeLinkMessage(conn, &linkMessage{Type: msgFail, Error: "method failed"})
-				return
+				if writeLinkMessage(conn, &linkMessage{Type: msgFail, Error: "method failed"}) != nil {
+					return
+				}
+				continue
 			}
 			current = &responder{sess: sess}
 			if err := writeLinkMessage(conn, &linkMessage{Type: msgAnswer, Method: m.name(), Data: answer}); err != nil {
 				return
 			}
-		case msgPing:
-			if err := writeLinkMessage(conn, &linkMessage{Type: msgPong}); err != nil {
-				return
-			}
+
 		case msgSync:
 			current.start(ctx, d.timeout)
 		case msgDone:

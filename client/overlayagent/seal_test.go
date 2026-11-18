@@ -3,12 +3,12 @@ package overlayagent
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
+
 	"encoding/hex"
 	"errors"
 	"io"
 	"net"
-	"net/netip"
+
 	"testing"
 	"time"
 
@@ -164,83 +164,4 @@ func TestOfferCarriesTheFingerprintOnly(t *testing.T) {
 	if hello.Fingerprint != a.identity.fingerprint || hello.Endpoint != "" {
 		t.Fatalf("offer must carry the fingerprint only, got %+v", hello)
 	}
-}
-
-func TestStunRoundTrip(t *testing.T) {
-	var tx stunTransaction
-	copy(tx[:], "0123456789ab")
-	request := stunRequest(tx)
-	if len(request) != stunHeaderSize || binary.BigEndian.Uint32(request[4:8]) != stunMagicCookie {
-		t.Fatalf("malformed request: % x", request)
-	}
-	want := netip.MustParseAddrPort("203.0.113.7:54321")
-	got, endpoint, err := parseSTUN(stunResponse(tx, want, true))
-	if err != nil || got != tx || endpoint != want {
-		t.Fatalf("xor response: %v %v %v", got, endpoint, err)
-	}
-	_, endpoint, err = parseSTUN(stunResponse(tx, want, false))
-	if err != nil || endpoint != want {
-		t.Fatalf("plain mapped response: %v %v", endpoint, err)
-	}
-	v6 := netip.MustParseAddrPort("[2001:db8::1]:4242")
-	_, endpoint, err = parseSTUN(stunResponse(tx, v6, true))
-	if err != nil || endpoint != v6 {
-		t.Fatalf("ipv6 response: %v %v", endpoint, err)
-	}
-}
-
-func TestStunRejectsGarbage(t *testing.T) {
-	var tx stunTransaction
-	good := stunResponse(tx, netip.MustParseAddrPort("203.0.113.7:1"), true)
-	cases := map[string][]byte{
-		"empty":     nil,
-		"short":     good[:10],
-		"request":   stunRequest(tx),
-		"truncated": good[:len(good)-3],
-		"no attrs":  append(append([]byte(nil), good[:2]...), append([]byte{0, 0}, good[4:stunHeaderSize]...)...),
-	}
-	for name, packet := range cases {
-		if _, _, err := parseSTUN(packet); err == nil {
-			t.Errorf("%s: garbage must not parse", name)
-		}
-	}
-}
-
-// stunResponse builds a Binding success response carrying endpoint.
-func stunResponse(tx stunTransaction, endpoint netip.AddrPort, xor bool) []byte {
-	var value []byte
-	port := endpoint.Port()
-	var mask [16]byte
-	binary.BigEndian.PutUint32(mask[0:4], stunMagicCookie)
-	copy(mask[4:], tx[:])
-	if xor {
-		port ^= uint16(stunMagicCookie >> 16)
-	}
-	addr := endpoint.Addr()
-	family := byte(stunFamilyIPv4)
-	raw := addr.AsSlice()
-	if addr.Is6() {
-		family = stunFamilyIPv6
-	}
-	if xor {
-		for i := range raw {
-			raw[i] ^= mask[i]
-		}
-	}
-	value = append(value, 0, family)
-	value = binary.BigEndian.AppendUint16(value, port)
-	value = append(value, raw...)
-	kind := uint16(stunAttrMapped)
-	if xor {
-		kind = stunAttrXORMapped
-	}
-	attribute := binary.BigEndian.AppendUint16(nil, kind)
-	attribute = binary.BigEndian.AppendUint16(attribute, uint16(len(value)))
-	attribute = append(attribute, value...)
-	packet := make([]byte, stunHeaderSize)
-	binary.BigEndian.PutUint16(packet[0:2], stunBindingSuccess)
-	binary.BigEndian.PutUint16(packet[2:4], uint16(len(attribute)))
-	binary.BigEndian.PutUint32(packet[4:8], stunMagicCookie)
-	copy(packet[8:], tx[:])
-	return append(packet, attribute...)
 }

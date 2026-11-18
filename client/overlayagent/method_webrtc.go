@@ -31,8 +31,8 @@ type webrtcMethod struct {
 }
 
 func (m *webrtcMethod) name() string { return methodWebRTC }
-func (m *webrtcMethod) syncs() bool  { return false }
-func (m *webrtcMethod) close()       {}
+
+func (m *webrtcMethod) close() {}
 
 func (m *webrtcMethod) newConnection() (*webrtc.PeerConnection, error) {
 	engine := webrtc.SettingEngine{}

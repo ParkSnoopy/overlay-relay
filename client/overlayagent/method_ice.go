@@ -24,8 +24,8 @@ type iceMethod struct {
 }
 
 func (m *iceMethod) name() string { return methodICE }
-func (m *iceMethod) syncs() bool  { return false }
-func (m *iceMethod) close()       {}
+
+func (m *iceMethod) close() {}
 
 // iceOffer is what each side sends: ICE credentials and gathered candidates.
 type iceOffer struct {
