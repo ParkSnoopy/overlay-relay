@@ -42,9 +42,13 @@ There is no enrollment. Each client generates its own key pair and keeps the pri
 go get github.com/ParkSnoopy/overlay-relay/client@latest
 ```
 
-Update the hub and its clients together to keep direct connections working.  
+Update the hub and clients separately if needed.  
+The 0.5.x implementation prefers wire v5 and supports discovery, registration, and relayed traffic with 0.4.7 (wire v3).  
+Both peers need v5 for direct connections on the new hub.  
+Mixed-version traffic needs relay to be allowed by the hub.  
+Upgrade the hub first if you need the newer room relay controls.  
 
-`server/Cargo.toml` is the release-version source. Run `python3 scripts/bump_version.py --sync` after changing it; `--check` verifies generated server/client metadata without writing. Protocol generation follows the minor component for `0.x` releases (`0.4.7` → `v4`), and the major component from `1.0` onward. The script does not increment versions or publish Go module tags.
+`server/Cargo.toml` is the release-version source. Run `python3 scripts/bump_version.py --sync` after changing it; `--check` verifies generated server/client metadata without writing. The generator uses the minor component before 1.0 and the major component thereafter. The 0.4.7 release predates the generator. The script does not increment versions or publish Go module tags.
 
 ```go
 agent := overlayagent.New(overlayagent.Config{
@@ -91,7 +95,7 @@ Go modules are joined by the root [`go.work`](go.work). Run Go commands from a m
 
 ## Versioning
 
-The release version is the `version` field in [`server/Cargo.toml`](server/Cargo.toml). Go module tags follow it as `client/vX.Y.Z`. The wire version is separate: messages carry `"version": 2`.
+The release version is the `version` field in [`server/Cargo.toml`](server/Cargo.toml). Go module tags follow it as `client/vX.Y.Z`. Each stream declares its wire version in `Hello.version`. The previous release predates the generated mapping: 0.4.7 sends v3, not v4. Only v5 and the explicit v3 compatibility path are accepted by this implementation.
 
 Version 2 is incompatible with token-based clients. Hub 0.2 reads no peers table: any key that signs the challenge is a peer, so remove the old `peers.json` mount. An `ips.json` from an older hub still loads, and addresses of keys that were already listed stay.
 

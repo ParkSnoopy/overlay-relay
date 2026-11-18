@@ -85,8 +85,11 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 // openFlow asks the hub for one relayed flow to ip. It returns the flow, sealed
 // when encryption is on, and the peer's flow certificate fingerprint.
 func (a *Agent) openFlow(ctx context.Context, proto string, ip netip.Addr, port uint16, peerID string) (net.Conn, string, error) {
-	hello := &overlay.Hello{Version: overlay.Version, Kind: overlay.KindOpen, Proto: proto, Dst: ip.String(), Port: port, PeerID: peerID}
+	hello := &overlay.Hello{Version: a.wireVersion(), Kind: overlay.KindOpen, Proto: proto, Dst: ip.String(), Port: port, PeerID: peerID}
 	if port == overlay.LinkPort {
+		if hello.Version != overlay.Version {
+			return nil, "", errors.New("legacy overlay hub supports relay only")
+		}
 		hello.Kind = overlay.KindSignal
 	}
 	a.offer(hello)
@@ -168,7 +171,11 @@ func (a *Agent) serveIncoming(ctx context.Context, in *overlay.Incoming, src net
 			}
 		}()
 	}
-	hello := &overlay.Hello{Version: overlay.Version, Kind: overlay.KindAccept, ID: in.ID}
+	version := a.wireVersion()
+	if version != overlay.Version && (in.Signal || in.Port == overlay.LinkPort) {
+		return errors.New("legacy overlay hub supports relay only")
+	}
+	hello := &overlay.Hello{Version: version, Kind: overlay.KindAccept, ID: in.ID}
 	a.offer(hello)
 	hub, err := a.cfg.Dial(ctx)
 	if err != nil {

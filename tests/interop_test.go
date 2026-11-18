@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"errors"
@@ -319,5 +320,94 @@ func TestProbeNeedsNoEnrollment(t *testing.T) {
 	hub := startHub(t, buildHub(t))
 	if err := overlayagent.Probe(context.Background(), hub.address); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPreviousReleaseInterop(t *testing.T) {
+	legacyHub, legacyClient := os.Getenv("OVERLAY_TEST_LEGACY_HUB"), os.Getenv("OVERLAY_TEST_LEGACY_CLIENT")
+	if legacyHub == "" || legacyClient == "" {
+		t.Skip("set OVERLAY_TEST_LEGACY_HUB and OVERLAY_TEST_LEGACY_CLIENT to the 0.4.7 binaries")
+	}
+	for _, host := range []struct{ name, binary string }{{"updated-hub", buildHub(t)}, {"previous-hub", legacyHub}} {
+		t.Run(host.name, func(t *testing.T) {
+			hub := startHub(t, host.binary)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			if err := overlayagent.Probe(ctx, hub.address); err != nil {
+				t.Fatal(err)
+			}
+			service, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = service.Close() }()
+			go func() {
+				for range 2 {
+					conn, err := service.Accept()
+					if err != nil {
+						return
+					}
+					_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+					_, _ = io.Copy(conn, conn)
+					_ = conn.Close()
+				}
+			}()
+			port := uint16(service.Addr().(*net.TCPAddr).Port)
+			current := newAccount(t, "current")
+			discover := overlayagent.Config{Identity: current.key, Dial: func(ctx context.Context) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "tcp", hub.address)
+			}}
+			_, ip, err := overlayagent.Discover(ctx, discover)
+			if err != nil {
+				t.Fatal(err)
+			}
+			states := make(chan overlay.State, 64)
+			currentAgent := newAgent(t, hub.address, current, states, func(uint16) string { return service.Addr().String() })
+			go func() { _ = currentAgent.Run(ctx) }()
+			waitFor(t, states, func(state overlay.State) bool { return state.Connected })
+			if registered := <-currentAgent.Ready(); registered != ip {
+				t.Fatalf("registered address %s differs from discovery %s", registered, ip)
+			}
+			old := exec.CommandContext(ctx, legacyClient)
+			old.Env = append(os.Environ(), "OVERLAY_HUB="+hub.address,
+				"OVERLAY_IDENTITY="+filepath.Join(t.TempDir(), "identity.pem"), "OVERLAY_LOCAL=127.0.0.1",
+				"OVERLAY_CONNECT="+netip.AddrPortFrom(ip, port).String())
+			old.Stderr = os.Stderr
+			stdout, err := old.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := old.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { cancel(); _ = old.Wait() }()
+			lines := bufio.NewScanner(stdout)
+			want := "reply from " + netip.AddrPortFrom(ip, port).String() + ": hello over overlay"
+			for lines.Scan() && lines.Text() != want {
+			}
+			if lines.Text() != want {
+				t.Fatalf("previous client did not receive an echo: %q (%v)", lines.Text(), lines.Err())
+			}
+			state := waitFor(t, states, func(state overlay.State) bool { return len(state.Peers) == 1 })
+			previous, err := netip.ParseAddr(state.Peers[0].IP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			flow, err := currentAgent.Outbound(ctx, overlay.ProtoTCP, netip.AddrPortFrom(previous, port))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = flow.Close() }()
+			_ = flow.SetDeadline(time.Now().Add(5 * time.Second))
+			const message = "reverse direction"
+			if _, err := io.WriteString(flow, message); err != nil {
+				t.Fatal(err)
+			}
+			got := make([]byte, len(message))
+			if _, err := io.ReadFull(flow, got); err != nil || string(got) != message {
+				t.Fatalf("unexpected echo %q: %v", got, err)
+			}
+		})
 	}
 }

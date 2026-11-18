@@ -3,6 +3,7 @@ package overlayagent
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 
 	"time"
@@ -18,15 +19,26 @@ const errUnauthorized = "unauthorized"
 func Probe(ctx context.Context, address string) error {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
+	version := overlay.Version
+	err := probeVersion(ctx, address, version)
+	if err == io.EOF && canRetryPreviousWire(ctx, version) {
+		return probeVersion(ctx, address, previousWireVersion)
+	}
+	return err
+}
+
+func probeVersion(ctx context.Context, address string, version int) error {
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
+	stop := context.AfterFunc(ctx, func() { closeConn(conn) })
+	defer stop()
 	deadline, _ := ctx.Deadline()
 	_ = conn.SetDeadline(deadline)
-	hello := overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl, PublicKey: "00"}
+	hello := overlay.Hello{Version: version, Kind: overlay.KindControl, PublicKey: "00"}
 	if err := overlay.WriteFrame(conn, hello); err != nil {
 		return err
 	}

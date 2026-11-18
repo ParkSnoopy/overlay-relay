@@ -21,7 +21,7 @@ use tracing::debug;
 use crate::{
     frame::{read_frame, send_frame},
     hub::{Shared, persist, unix_now},
-    protocol::{ERR_INVALID_REQUEST, Event, Ping, Reply, valid_name},
+    protocol::{ERR_INVALID_REQUEST, Event, Hello, Ping, Reply, valid_name},
     state::Requester,
     verifier::Verifier,
 };
@@ -34,6 +34,8 @@ const EVENT_QUEUE: usize = 16;
 pub struct ControlHandle {
     /// Opaque room membership, never exposed in snapshots or diagnostics.
     pub room: String,
+    /// Wire format accepted by this control stream.
+    pub version: u32,
     /// Serial that distinguishes this registration from a later replacement.
     pub generation: u64,
     /// Queue of events for the writer. A full queue drops the control.
@@ -49,10 +51,10 @@ pub async fn serve(
     shared: &Shared,
     mut stream: TcpStream,
     mut requester: Requester,
-    name: &str,
+    hello: &Hello,
     session: CancellationToken,
 ) {
-    if !valid_name(name) {
+    if !valid_name(&hello.name) {
         send_frame(&mut stream, &Reply::failed(ERR_INVALID_REQUEST))
             .await
             .ok();
@@ -64,13 +66,14 @@ pub async fn serve(
     let dirty = Arc::new(Notify::new());
     let (generation, replaced) = {
         let mut state = shared.state.lock().await;
-        let Some(name) = state.set_name(&requester.verifier, name) else {
+        let Some(name) = state.set_name(&requester.verifier, &hello.name) else {
             return;
         };
         requester.name = name;
         let generation = state.next_serial();
         let handle = ControlHandle {
             room: requester.room.clone(),
+            version: hello.version,
             generation,
             outbound: outbound.clone(),
             dirty: Arc::clone(&dirty),

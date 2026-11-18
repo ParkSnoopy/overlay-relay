@@ -79,9 +79,9 @@ pub fn valid_name(name: &str) -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Hello {
-    /// Wire version; must equal [`VERSION`].
+    /// Wire version; the hub accepts the current and supported previous release.
     pub version: u32,
-    /// Stream kind: [`KIND_CONTROL`], [`KIND_OPEN`] or [`KIND_ACCEPT`].
+    /// Stream kind: control, open, accept, or signal on the current wire.
     pub kind: String,
     /// Hex-encoded uncompressed P-384 public key.
     pub public_key: String,

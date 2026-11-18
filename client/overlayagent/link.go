@@ -301,7 +301,7 @@ func (a *Agent) maybeLink(ip netip.Addr, peerID string) {
 	}
 	a.mu.Lock()
 	retry := a.directRetries[ip]
-	if a.runCtx == nil || a.runCtx.Err() != nil || !a.connected || a.links[ip] != nil || a.linking[ip] != nil ||
+	if a.wireVersion() != overlay.Version || a.runCtx == nil || a.runCtx.Err() != nil || !a.connected || a.links[ip] != nil || a.linking[ip] != nil ||
 		a.peerIDLocked(ip) != peerID || a.relayOnlyLocked(peerID) || (retry.peerID == peerID && time.Now().Before(retry.until)) {
 		a.mu.Unlock()
 		return

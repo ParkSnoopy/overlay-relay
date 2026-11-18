@@ -86,7 +86,9 @@ pub async fn serve(
         refuse(&mut stream).await;
         return;
     };
-    if !hello.peer_id.is_empty() && hello.peer_id != destination.to_hex() {
+    if (signal && target.version != hello.version)
+        || (!hello.peer_id.is_empty() && hello.peer_id != destination.to_hex())
+    {
         shared.state.lock().await.remove_pending(&id);
         refuse(&mut stream).await;
         return;

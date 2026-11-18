@@ -12,6 +12,7 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -27,7 +28,12 @@ const (
 	maxIncoming = 128
 	maxPeers    = 4096
 	maxReason   = 128
+
+	// The 0.4.x releases used wire v3, before release-derived numbering.
+	previousWireVersion = 3
 )
+
+var errNoHubChallenge = errors.New("overlay hub closed before sending a challenge")
 
 // Config wires an Agent to its platform.
 type Config struct {
@@ -130,6 +136,7 @@ type Agent struct {
 	identityErr error
 	direct      atomic.Pointer[directState]
 	publicRoom  atomic.Bool
+	hubWire     atomic.Uint32
 }
 
 // New builds an idle agent using its enrolled identity.
@@ -242,17 +249,12 @@ func (a *Agent) Run(ctx context.Context) error {
 // session runs one control connection and reports whether the hub accepted it
 // and, if not, a short nonsecret reason.
 func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
-	conn, err := a.cfg.Dial(ctx)
+	conn, reply, version, err := a.dialControl(ctx)
 	if err != nil {
-		slog.Debug("Overlay hub dial failed")
+		slog.Debug("Overlay control connection failed")
 		return false, "overlay hub is unreachable"
 	}
 	defer closeConn(conn)
-	reply, err := a.handshake(ctx, conn, &overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl, Name: a.cfg.Name})
-	if err != nil {
-		slog.Debug("Overlay control handshake failed")
-		return false, "overlay hub is unreachable"
-	}
 	if !reply.OK {
 		if a.cfg.FallbackPublic && a.cfg.Room != "" && !a.publicRoom.Load() && roomRejected(reply.Error) {
 			closeConn(conn)
@@ -272,6 +274,7 @@ func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
 	if !a.pinRange(prefix) {
 		return false, "overlay hub changed its address range"
 	}
+	a.hubWire.Store(uint32(version))
 	a.registered(ip, reply.Name, reply.RoomName)
 
 	sctx, cancel := context.WithCancel(ctx)
@@ -283,12 +286,42 @@ func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
 		defer cancel()
 		a.ping(sctx, conn)
 	}()
-	a.readEvents(ctx, conn)
+	a.readEvents(sctx, conn)
 	cancel()
 	stopClose()
 	closeConn(conn)
 	pinger.Wait()
 	return true, "overlay hub connection was lost"
+}
+
+func canRetryPreviousWire(ctx context.Context, version int) bool {
+	return overlay.Version == 5 && version == overlay.Version && ctx.Err() == nil
+}
+
+func (a *Agent) wireVersion() int {
+	if version := a.hubWire.Load(); version != 0 {
+		return int(version)
+	}
+	return overlay.Version
+}
+
+func (a *Agent) dialControl(ctx context.Context) (net.Conn, overlay.Reply, int, error) {
+	version := overlay.Version
+	for {
+		conn, err := a.cfg.Dial(ctx)
+		if err != nil {
+			return nil, overlay.Reply{}, version, err
+		}
+		reply, err := a.handshake(ctx, conn, &overlay.Hello{Version: version, Kind: overlay.KindControl, Name: a.cfg.Name})
+		if err == nil {
+			return conn, reply, version, nil
+		}
+		closeConn(conn)
+		if !errors.Is(err, errNoHubChallenge) || !canRetryPreviousWire(ctx, version) {
+			return nil, reply, version, err
+		}
+		version = previousWireVersion
+	}
 }
 
 // handshake sends hello and reads the hub's reply within the handshake bound.
@@ -310,13 +343,20 @@ func (a *Agent) handshake(ctx context.Context, conn net.Conn, hello *overlay.Hel
 	}
 	var challenge overlay.Challenge
 	if err := overlay.ReadFrame(conn, &challenge); err != nil {
+		if err == io.EOF {
+			return reply, errNoHubChallenge
+		}
 		return reply, err
 	}
 	nonce, err := hex.DecodeString(challenge.Nonce)
 	if err != nil || len(nonce) != 32 {
 		return reply, errors.New("invalid overlay challenge")
 	}
-	message := append(append([]byte(overlay.AuthDomain), nonce...), []byte(hello.Room)...)
+	domain := overlay.AuthDomain
+	if hello.Version == previousWireVersion && overlay.Version == 5 {
+		domain = "overlay-relay/auth/v3:"
+	}
+	message := append(append([]byte(domain), nonce...), []byte(hello.Room)...)
 	if hello.Room != "" {
 		message = append(append(message, 0), []byte(hello.RoomID)...)
 	}
@@ -355,17 +395,11 @@ func Discover(ctx context.Context, cfg Config) (netip.Prefix, netip.Addr, error)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	conn, err := cfg.Dial(ctx)
-	if err != nil {
-		return netip.Prefix{}, netip.Addr{}, errors.New("overlay hub is unreachable")
-	}
-	defer closeConn(conn)
-	stop := context.AfterFunc(ctx, func() { closeConn(conn) })
-	defer stop()
-	reply, err := a.handshake(ctx, conn, &overlay.Hello{Version: overlay.Version, Kind: overlay.KindControl, Name: cfg.Name})
+	conn, reply, _, err := a.dialControl(ctx)
 	if err != nil {
 		return netip.Prefix{}, netip.Addr{}, errors.New("overlay discovery failed")
 	}
+	defer closeConn(conn)
 	if !reply.OK {
 		if cfg.FallbackPublic && cfg.Room != "" && roomRejected(reply.Error) {
 			closeConn(conn)

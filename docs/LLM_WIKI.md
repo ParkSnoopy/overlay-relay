@@ -88,7 +88,7 @@ All field names are lowercase JSON keys.
 
 | Field | Type | Used by | Meaning |
 |---|---|---|---|
-| `version` | integer | all | Must be `4`, generated from `server/Cargo.toml` (minor before 1.0, major thereafter). Otherwise the hub closes the stream silently. Coordinated client/hub updates are required; existing keys and room proofs remain valid. |
+| `version` | integer | all | Use `5` by default. The hub also supports `3` for 0.4.7 compatibility without direct signaling. It closes the stream silently for other versions. |
 | `room` | string | all | Private room password proof, empty for public membership. Derive it locally from the room ID and password. Never log it. |
 | `room_id` | string | all | Private room ID, empty for public membership. Required with `room`. A known ID admits only the proof its first requester used. |
 | `kind` | string | all | `"control"`, `"open"`, `"signal"` or `"accept"`. Anything else gets reply `invalid request`. |
@@ -109,7 +109,7 @@ Private membership is the lowercase hex of PBKDF2-HMAC-SHA256(password, `overlay
 
 Both devices must explicitly approve the other's ID in `DirectPeers` before direct offers or connections. Empty approvals permit relay only. Revocation closes affected direct flows and negotiations.
 
-After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The signed transcript is UTF-8 `overlay-relay/auth/v4:`, followed by the 32 raw nonce bytes and the UTF-8 room proof without a separator. A private room also appends one `0` byte and the UTF-8 room ID; a public room appends nothing. The client signs using ECDSA P-384 with SHA-384. It sends `{"signature":"<hex>"}` with the ASN.1 DER signature. The hub verifies the proof before issuing the reply; a valid proof of any key is accepted, and a key seen for the first time receives an address. A malformed public key can receive an unauthorized reply without a challenge.
+After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The signed transcript is UTF-8 `overlay-relay/auth/v5:` (or `overlay-relay/auth/v3:` for a v3 Hello), followed by the 32 raw nonce bytes and the UTF-8 room proof without a separator. A private room also appends one `0` byte and the UTF-8 room ID; a public room appends nothing. The client signs using ECDSA P-384 with SHA-384. It sends `{"signature":"<hex>"}` with the ASN.1 DER signature. The hub verifies the proof before issuing the reply; a valid proof of any key is accepted, and a key seen for the first time receives an address. A malformed public key can receive an unauthorized reply without a challenge.
 
 ### 7.2 Reply (hub to client)
 
@@ -153,7 +153,7 @@ Any other content on a control stream ends the control stream (see section 8.1).
 
 ### 8.1 Control stream
 
-1. Client dials through the authenticated VPN, sends `Hello{version:4, kind:"control", public_key, room}`, and completes the challenge exchange.
+1. Client dials through the authenticated VPN, sends `Hello{version:5, kind:"control", public_key, room}`, and completes the challenge exchange.
 2. Hub replies:
    - Success: `Reply{ok:true, ip, name}`. The account is now registered. The client's address is `ip`.
    - Failure: `Reply{ok:false, error:"unauthorized"}` and the stream closes.
@@ -168,7 +168,7 @@ Writes from the hub to a control stream have a `10` second write deadline. A sta
 
 Preconditions the hub enforces: the requester has an active control stream; the destination has an active control stream; the destination is not the requester; each side has fewer than `256` active flows; the destination has fewer than `4` pending requests.
 
-1. Client dials through the authenticated VPN, sends `Hello{version:4, kind:"open", public_key, room, proto, dst, port}`, and completes the challenge exchange.
+1. Client dials through the authenticated VPN and sends `Hello{version, kind:"open", public_key, room, proto, dst, port}` using its control stream's wire version.
 2. The hub validates `proto`, `dst`, `port`. Any invalid value gets `Reply{ok:false, error:"peer unavailable"}`.
 3. The hub looks up the destination. If the destination is missing, hidden, not connected, the requester itself, or a precondition fails, the reply is `peer unavailable`. This is intentionally identical for every case, so a requester cannot discover hidden accounts.
 4. The hub sends an `incoming` event to the destination's control stream with a fresh random `id` (16 random bytes, 32 hex digits) and waits up to `10` seconds for the destination to answer.
@@ -178,7 +178,7 @@ Preconditions the hub enforces: the requester has an active control stream; the 
 ### 8.3 Accept stream (destination side)
 
 1. The destination receives an `incoming` event `{id, proto, src, port}` on its control stream. `src` is the requester's overlay address. `port` is the destination port requested.
-2. The destination dials through the authenticated VPN, sends `Hello{version:4, kind:"accept", public_key, room, id}`, and completes the challenge exchange. The `id` must be the one from the event.
+2. The destination dials through the authenticated VPN and sends `Hello{version, kind:"accept", public_key, room, id}` using its control stream's wire version. The `id` must be the one from the event.
 3. The hub pairs the stream with the pending request only if the authenticated identity belongs to the destination account that was asked. Otherwise: `Reply{ok:false, error:"unauthorized"}`.
 4. The accept stream waits (up to the `10` second accept timeout measured from the incoming event). When the open side is accepted, the accept stream receives `Reply{ok:true}` and switches to relay mode.
 5. If the pending request expired or was refused, the accept stream is closed without a successful reply.
@@ -455,10 +455,13 @@ The hub logs with `tracing`. It never logs private keys, identifiers, payloads o
 - No hub-side tracking of direct links, no TURN relay (the hub relay is the fallback), no certificate authority, and no STUN server in the hub.
 - The hub does not route to the internet or to addresses outside the configured overlay range.
 - The hub has no accounting or quotas beyond the flow and pending limits in section 11.
-- No version negotiation beyond `version: 3`. A new wire version requires a new `version` value and a coordinated release.
+
 
 ## 20. Release and versioning
 
 - The hub and the Go module share one release version: the `version` field in `server/Cargo.toml`.
 - Go module tags follow the same version as `client/vX.Y.Z`, where `X.Y.Z` matches `server/Cargo.toml`.
-- The wire version is separate (`version: 3`). It changes only on incompatible wire changes.
+- If a v5 control connection closes before sending any challenge bytes, retry once on a new connection with v3.
+- Do not retry with v3 after a partial frame, a malformed challenge, an authentication failure, or a room rejection.
+- On a v3 session, use v3 for open and accept. Do not start direct signaling.
+- Use the same identity and room proof on either wire version. The hub enforces its room and relay policy for both versions.

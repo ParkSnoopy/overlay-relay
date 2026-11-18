@@ -184,14 +184,14 @@ impl Hub {
             Ok(Ok(hello)) => hello,
             _ => return,
         };
-        if hello.version != VERSION {
-            return;
-        }
-        let Ok(Some(requester)) = timeout(
-            handshake,
-            self.authenticate(&mut stream, &hello.public_key, &hello.room, &hello.room_id),
-        )
-        .await
+        let domain = match hello.version {
+            VERSION => crate::AUTH_DOMAIN,
+            // Release 0.4.x used wire v3 before release-derived numbering.
+            3 if VERSION == 5 => "overlay-relay/auth/v3:",
+            _ => return,
+        };
+        let Ok(Some(requester)) =
+            timeout(handshake, self.authenticate(&mut stream, &hello, domain)).await
         else {
             send_frame(&mut stream, &Reply::failed(ERR_UNAUTHORIZED))
                 .await
@@ -227,9 +227,12 @@ impl Hub {
         }
         match hello.kind.as_str() {
             KIND_CONTROL => {
-                control::serve(&self.shared, stream, requester, &hello.name, session).await;
+                control::serve(&self.shared, stream, requester, &hello, session).await;
             }
-            KIND_OPEN | KIND_SIGNAL => {
+            KIND_OPEN => {
+                open::serve(&self.shared, stream, requester, &hello, session).await;
+            }
+            KIND_SIGNAL if hello.version == VERSION => {
                 open::serve(&self.shared, stream, requester, &hello, session).await;
             }
             KIND_ACCEPT => {
@@ -266,10 +269,11 @@ impl Hub {
     async fn authenticate(
         &self,
         stream: &mut TcpStream,
-        public_key: &str,
-        room: &str,
-        room_id: &str,
+        hello: &Hello,
+        domain: &str,
     ) -> Option<Requester> {
+        let room = &hello.room;
+        let room_id = &hello.room_id;
         // A private room needs both its password proof and a room ID.
         if room.is_empty() != room_id.is_empty() {
             return None;
@@ -277,8 +281,8 @@ impl Hub {
         if !room.is_empty() && (!rooms::valid_room(room) || !valid_name(room_id)) {
             return None;
         }
-        let verifier = Verifier::from_public_key(public_key)?;
-        let public = hex::decode(public_key).ok()?;
+        let verifier = Verifier::from_public_key(&hello.public_key)?;
+        let public = hex::decode(&hello.public_key).ok()?;
         let mut nonce = [0_u8; 32];
         SystemRandom::new().fill(&mut nonce).ok()?;
         send_frame(
@@ -291,7 +295,7 @@ impl Hub {
         .ok()?;
         let proof: Proof = read_frame(stream).await.ok()?;
         let signature = hex::decode(proof.signature).ok()?;
-        let mut message = crate::AUTH_DOMAIN.as_bytes().to_vec();
+        let mut message = domain.as_bytes().to_vec();
         message.extend_from_slice(&nonce);
         message.extend_from_slice(room.as_bytes());
         if !room.is_empty() {

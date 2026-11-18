@@ -297,6 +297,9 @@ func ReadFrame(r io.Reader, value any) error {
 	}
 	payload := make([]byte, size)
 	if _, err := io.ReadFull(r, payload); err != nil {
+		if err == io.EOF {
+			return io.ErrUnexpectedEOF
+		}
 		return err
 	}
 	return json.Unmarshal(payload, value)
