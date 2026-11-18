@@ -18,6 +18,7 @@ mod address;
 mod assignments;
 mod config;
 mod control;
+pub mod dhcp;
 mod dns;
 mod error;
 mod frame;

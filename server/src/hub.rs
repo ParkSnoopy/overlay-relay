@@ -123,7 +123,8 @@ impl Hub {
     pub async fn new(config: Config) -> Result<Self> {
         let records =
             assignments::load(&config.data_dir.join(assignments::FILE_NAME), unix_now()).await?;
-        let state = State::load_in(&records, config.address_space);
+        let dhcp = crate::dhcp::load(&config.data_dir, config.address_space).await?;
+        let state = State::load_dhcp(&records, config.address_space, dhcp);
         info!(identities = records.len(), "overlay identities loaded");
         let hub = Self {
             shared: Arc::new(Shared {

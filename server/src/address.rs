@@ -57,6 +57,15 @@ impl std::fmt::Display for AddressSpace {
 }
 
 impl AddressSpace {
+    /// First and last usable host addresses, excluding network and broadcast.
+    #[must_use]
+    pub fn host_bounds(self) -> (Ipv4Addr, Ipv4Addr) {
+        (
+            Ipv4Addr::from(self.network + 1),
+            Ipv4Addr::from(self.network + (!0_u32 >> self.bits) - 1),
+        )
+    }
+
     /// Whether this is a host address, excluding network and broadcast.
     #[must_use]
     pub fn assignable(self, address: Ipv4Addr) -> bool {

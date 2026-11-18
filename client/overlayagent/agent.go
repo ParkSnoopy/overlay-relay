@@ -74,6 +74,9 @@ type Config struct {
 	RelayOnly []string
 	// DirectPeers is the explicit direct allowlist. Empty permits relay only.
 	DirectPeers []string
+
+	// RelayFirewall denies incoming relayed service flows. Direct links are unaffected.
+	RelayFirewall []overlay.FirewallRule
 }
 
 type timing struct {
@@ -143,7 +146,8 @@ func New(cfg Config) *Agent {
 		ready:       make(chan netip.Addr, 1),
 		inflight:    make(chan struct{}, maxIncoming),
 	}
-	a.identityErr = errors.Join(a.identityErr, a.SetRelayOnly(cfg.RelayOnly), overlay.ValidateName(cfg.Name))
+	a.cfg.RelayFirewall = append([]overlay.FirewallRule(nil), cfg.RelayFirewall...)
+	a.identityErr = errors.Join(a.identityErr, a.SetRelayOnly(cfg.RelayOnly), overlay.ValidateName(cfg.Name), overlay.ValidateFirewall(cfg.RelayFirewall))
 	if cfg.CIDR.IsValid() {
 		prefix, rangeErr := overlay.ParseCIDR(cfg.CIDR.String())
 		a.identityErr = errors.Join(a.identityErr, rangeErr)

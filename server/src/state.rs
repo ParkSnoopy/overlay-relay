@@ -13,6 +13,7 @@ use crate::{
     address::AddressSpace,
     assignments::Record,
     control::ControlHandle,
+    dhcp::Dhcp,
     protocol::{MAX_ACCOUNTS, MAX_FLOWS_PER_ACCOUNT, MAX_PENDING_PER_ACCOUNT, Offer, Peer},
     verifier::Verifier,
 };
@@ -78,7 +79,9 @@ fn display_name(verifier: &Verifier) -> String {
 /// The hub's mutable state.
 #[derive(Debug, Default)]
 pub struct State {
-    address_space: AddressSpace,
+    dhcp: Dhcp,
+    reservations: HashMap<Verifier, Ipv4Addr>,
+    reserved_ips: HashSet<Ipv4Addr>,
     accounts: HashMap<Verifier, Entry>,
     by_ip: HashMap<Ipv4Addr, Verifier>,
     controls: HashMap<Verifier, ControlHandle>,
@@ -99,12 +102,43 @@ impl State {
     /// Loads only assignments belonging to the selected range.
     #[must_use]
     pub fn load_in(records: &HashMap<Verifier, Record>, address_space: AddressSpace) -> Self {
+        Self::load_dhcp(records, address_space, Dhcp::for_space(address_space))
+    }
+
+    /// Load assignments against an already validated administrative DHCP policy.
+    #[must_use]
+    pub fn load_dhcp(
+        records: &HashMap<Verifier, Record>,
+        address_space: AddressSpace,
+        dhcp: Dhcp,
+    ) -> Self {
+        let reservations: HashMap<Verifier, Ipv4Addr> = dhcp
+            .bindings
+            .iter()
+            .filter_map(|binding| {
+                Verifier::from_public_key(&binding.public_key).map(|key| (key, binding.ip))
+            })
+            .collect();
+        let reserved_ips: HashSet<Ipv4Addr> = reservations.values().copied().collect();
         let mut state = Self {
-            address_space,
+            dhcp,
+            reservations,
+            reserved_ips,
             ..Self::default()
         };
         for (verifier, record) in records {
-            if !address_space.assignable(record.ip) || state.by_ip.contains_key(&record.ip) {
+            let eligible = state.reservations.get(verifier).map_or_else(
+                || {
+                    record.ip >= state.dhcp.start
+                        && record.ip <= state.dhcp.end
+                        && !state.reserved_ips.contains(&record.ip)
+                },
+                |reserved| *reserved == record.ip,
+            );
+            if !eligible
+                || !address_space.assignable(record.ip)
+                || state.by_ip.contains_key(&record.ip)
+            {
                 state.dirty = true;
                 continue;
             }
@@ -158,22 +192,45 @@ impl State {
     /// lowest free address; at capacity the least recently seen idle identity
     /// gives up its address. Returns `None` when no identity can be evicted.
     pub fn identify(&mut self, verifier: Verifier, now: u64) -> Option<Requester> {
+        if self.dhcp.lease_seconds != 0 {
+            let expired: Vec<Verifier> = self
+                .accounts
+                .iter()
+                .filter(|(key, entry)| {
+                    now.saturating_sub(entry.seen) >= self.dhcp.lease_seconds
+                        && !self.reservations.contains_key(key)
+                        && !self.controls.contains_key(key)
+                        && self.flow_count(key) == 0
+                })
+                .map(|(key, _)| *key)
+                .collect();
+            for key in expired {
+                self.remove_idle(key);
+            }
+        }
+        let granularity = if self.dhcp.lease_seconds == 0 {
+            SEEN_GRANULARITY
+        } else {
+            SEEN_GRANULARITY.min(self.dhcp.lease_seconds / 2)
+        };
         if let Some(entry) = self.accounts.get_mut(&verifier) {
-            if now.saturating_sub(entry.seen) >= SEEN_GRANULARITY {
+            if now.saturating_sub(entry.seen) >= granularity {
                 entry.seen = now;
                 self.dirty = true;
             }
         } else {
             if self.accounts.len() >= MAX_ACCOUNTS {
-                self.evict_idle()?;
+                self.evict_idle(now)?;
             }
-            let used: HashSet<Ipv4Addr> = self.by_ip.keys().copied().collect();
-            let ip = match self.address_space.lowest_free(&used) {
-                Ok(ip) => ip,
-                Err(_) => {
-                    self.evict_idle()?;
-                    let used: HashSet<Ipv4Addr> = self.by_ip.keys().copied().collect();
-                    self.address_space.lowest_free(&used).ok()?
+            let ip = match self.reservations.get(&verifier) {
+                Some(ip) => *ip,
+                None => {
+                    if let Some(ip) = self.lowest_dynamic() {
+                        ip
+                    } else {
+                        self.evict_idle(now)?;
+                        self.lowest_dynamic()?
+                    }
                 }
             };
             self.by_ip.insert(ip, verifier);
@@ -207,22 +264,36 @@ impl State {
 
     /// Removes the idle identity seen longest ago. Identities with a control
     /// stream or an active flow are never removed.
-    fn evict_idle(&mut self) -> Option<()> {
+    fn lowest_dynamic(&self) -> Option<Ipv4Addr> {
+        (u32::from(self.dhcp.start)..=u32::from(self.dhcp.end))
+            .map(Ipv4Addr::from)
+            .find(|ip| !self.by_ip.contains_key(ip) && !self.reserved_ips.contains(ip))
+    }
+
+    fn evict_idle(&mut self, now: u64) -> Option<()> {
         let oldest = self
             .accounts
             .iter()
-            .filter(|(verifier, _)| {
-                !self.controls.contains_key(verifier) && self.flow_count(verifier) == 0
+            .filter(|(verifier, entry)| {
+                !self.reservations.contains_key(verifier)
+                    && !self.controls.contains_key(verifier)
+                    && self.flow_count(verifier) == 0
+                    && (self.dhcp.lease_seconds == 0
+                        || now.saturating_sub(entry.seen) >= self.dhcp.lease_seconds)
             })
             .min_by_key(|(_, entry)| entry.seen)
             .map(|(verifier, _)| *verifier)?;
+        self.remove_idle(oldest);
+        Some(())
+    }
+
+    fn remove_idle(&mut self, oldest: Verifier) {
         if let Some(entry) = self.accounts.remove(&oldest) {
             self.by_ip.remove(&entry.ip);
         }
         self.pending
             .retain(|_, pending| pending.requester != oldest && pending.destination != oldest);
         self.dirty = true;
-        Some(())
     }
 
     /// The overlay address of a known identity.
@@ -379,7 +450,12 @@ impl State {
 
     /// Forgets a flow once its relay has ended.
     pub fn remove_flow(&mut self, flow: u64) {
-        self.flows.remove(&flow);
+        if let Some(entry) = self.flows.remove(&flow) {
+            let now = crate::unix_now();
+            for verifier in entry.accounts {
+                self.touch(&verifier, now);
+            }
+        }
     }
 
     /// Number of active flows that involve `verifier`.
@@ -417,6 +493,35 @@ mod tests {
         let mut digest = [0_u8; 32];
         digest[..4].copy_from_slice(&index.to_be_bytes());
         Verifier::from_digest(digest)
+    }
+
+    #[test]
+    fn dhcp_lease_exhaustion_and_expiry() {
+        let space = crate::AddressSpace::default();
+        let mut policy = crate::dhcp::Dhcp::for_space(space);
+        policy.end = Ipv4Addr::new(10, 77, 0, 2);
+        policy.lease_seconds = 60;
+        let mut state = State::load_dhcp(&HashMap::new(), space, policy);
+        assert!(state.identify(account(1), 100).is_some());
+        assert!(state.identify(account(2), 100).is_some());
+        assert_ne!(state.address_of(&account(1)), state.address_of(&account(2)));
+        assert!(state.identify(account(3), 159).is_none());
+        assert!(state.identify(account(3), 160).is_some());
+        assert!(state.identify(account(4), 160).is_some());
+        assert!(state.identify(account(5), 160).is_none());
+    }
+
+    #[test]
+    fn dhcp_active_flows_keep_expired_addresses() {
+        let space = crate::AddressSpace::default();
+        let mut policy = crate::dhcp::Dhcp::for_space(space);
+        policy.end = Ipv4Addr::new(10, 77, 0, 2);
+        policy.lease_seconds = 60;
+        let mut state = State::load_dhcp(&HashMap::new(), space, policy);
+        assert!(state.identify(account(1), 100).is_some());
+        assert!(state.identify(account(2), 100).is_some());
+        assert!(state.open_flow([account(1), account(2)]).is_some());
+        assert!(state.identify(account(3), 1000).is_none());
     }
 
     fn address(state: &State, verifier: &Verifier) -> Option<Ipv4Addr> {

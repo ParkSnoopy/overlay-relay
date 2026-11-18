@@ -34,6 +34,20 @@ The hub needs no configuration. Every variable below is optional.
 
 The hub logs to standard error through `tracing`. Set the level in code, not by environment. Stop it with `SIGTERM` or `Ctrl+C`.
 
+Clap provides `--help`, `--version`, `--data-dir`, `--allowed-host`, `--listen-address` and `--cidr`. Existing environment variables remain supported; `OVERLAY_CIDR` selects a canonical RFC 1918 `/8`–`/30` subnet. Put `--cidr` before an administrative subcommand, or set the same environment as the running hub. `--data-dir` is accepted before or after subcommands.
+
+## DHCP policy
+
+`overlay-hub dhcp show` prints the validated policy as one JSON object. Pipe a complete policy to `overlay-hub dhcp set`, then restart the hub to activate it:
+
+```json
+{"start":"10.77.0.10","end":"10.77.0.200","lease_seconds":3600,"bindings":[]}
+```
+
+The dynamic endpoints are inclusive usable addresses in the hub's actual subnet. `lease_seconds` is zero (legacy capacity-based idle reclamation) or 60–31536000; unexpired leases are not evicted under pool pressure. Active controls/flows and permanent reservations are never reclaimed. Bindings contain `public_key` (the canonical uncompressed P-384 public-key hex, not its ID digest) and `ip` (a usable reserved address, inside or outside the dynamic pool). Dynamic allocation skips every reserved address, including offline reservations. Policy changes discard conflicting saved assignments on startup.
+
+The hub validates subnet bounds, ordering, lease limits, real public points and unique keys/addresses before any write. It rejects unknown fields, malformed JSON, documents above 64 KiB and more than 256 bindings. Custom policy is atomically saved in `dhcp.json` with private permissions. Saving the full usable range with a zero lease and no bindings clears the override, so defaults follow the subnet. Before changing to a subnet that excludes the current pool or reservations, restore and apply defaults on the old subnet, then change the subnet. Corrupt or unreadable policy prevents startup rather than falling back to a permissive default. The client cannot override this policy. There are no server port bans; clients may independently filter their own incoming relayed TCP/UDP flows.
+
 ## Room relay policy
 
 Run these against the hub's `OVERLAY_DATA_DIR`:

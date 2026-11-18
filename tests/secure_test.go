@@ -114,6 +114,7 @@ func stunSuccess(transaction []byte, address netip.Addr, port uint16) []byte {
 
 // secureSide configures one agent of a secureEnv.
 type secureSide struct {
+	firewall   []overlay.FirewallRule
 	name       string
 	plain      bool // DisableEncryption
 	direct     bool // offer a direct connection
@@ -148,6 +149,7 @@ func newSecureAgent(hub string, account account, side secureSide, stun string, t
 	config := overlayagent.Config{
 		Name:              side.name,
 		Identity:          account.key,
+		RelayFirewall:     side.firewall,
 		DisableEncryption: side.plain,
 		Dial: func(ctx context.Context) (net.Conn, error) {
 			var dialer net.Dialer

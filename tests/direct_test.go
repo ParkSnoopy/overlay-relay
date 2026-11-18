@@ -89,7 +89,7 @@ func TestDirectWithPublicRelayBlocked(t *testing.T) {
 			for _, option := range options {
 				option.Methods = []string{method}
 			}
-			env := startSecureEnv(t, secureSide{transport: options[0]}, secureSide{transport: options[1]})
+			env := startSecureEnv(t, secureSide{transport: options[0]}, secureSide{transport: options[1], firewall: []overlay.FirewallRule{{Action: "deny", Protocol: "both", Start: 1, End: 65535}}})
 			command := exec.Command(env.hub.cmd.Path, "rooms", "relay", "public", "false")
 			command.Env = append(os.Environ(), "OVERLAY_DATA_DIR="+env.hub.dir)
 			if output, err := command.CombinedOutput(); err != nil {

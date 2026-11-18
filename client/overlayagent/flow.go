@@ -181,6 +181,10 @@ func (a *Agent) serveIncoming(ctx context.Context, in *overlay.Incoming, src net
 		a.answerLink(ctx, hub, src, in.PeerID, reply.Fingerprint)
 		return nil
 	}
+	if overlay.FirewallBlocked(a.cfg.RelayFirewall, in.PeerID, in.Proto, in.Port) {
+		closeConn(hub)
+		return errors.New("overlay relay firewall blocked incoming flow")
+	}
 	flow, err := a.seal(ctx, hub, &reply, false)
 	if err != nil {
 		return err
