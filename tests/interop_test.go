@@ -361,6 +361,152 @@ func TestProbeNeedsNoEnrollment(t *testing.T) {
 	}
 }
 
+func TestMixedWireDirect(t *testing.T) {
+	legacy := os.Getenv("OVERLAY_TEST_LEGACY_SOURCE")
+	if legacy == "" {
+		t.Skip("set OVERLAY_TEST_LEGACY_SOURCE to an export of 00a8fd5 (wire v4)")
+	}
+	legacyHub := filepath.Join(legacy, "server/target/debug/overlay-hub")
+	build := exec.Command("cargo", "build", "--locked", "--quiet", "--bin", "overlay-hub")
+	build.Dir = filepath.Join(legacy, "server")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build v4 hub: %v: %s", err, output)
+	}
+	previous := filepath.Join(t.TempDir(), "wire-v4.test")
+	args := []string{"test", "-c", "-o", previous}
+	for _, name := range []string{"interop_test.go", "secure_test.go", "file_transfer_test.go", "direct_test.go"} {
+		path, err := filepath.Abs(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		args = append(args, path)
+	}
+	build = exec.Command("go", args...)
+	build.Dir = filepath.Join(legacy, "client")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build v4 peer: %v: %s", err, output)
+	}
+	for _, hub := range []struct{ name, binary string }{{"v5-hub", buildHub(t)}, {"v4-hub", legacyHub}} {
+		for _, method := range []string{"webrtc", "ice"} {
+			for _, initiator := range []string{"v5", "v4"} {
+				t.Run(hub.name+"/"+method+"/"+initiator+"-initiates", func(t *testing.T) {
+					testMixedWireDirect(t, hub.binary, previous, method, initiator == "v4")
+				})
+			}
+		}
+	}
+}
+
+func interopPeerID(t *testing.T, peer account) string {
+	t.Helper()
+	public, err := overlay.PublicIdentity(peer.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := overlay.IdentityID(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func testMixedWireDirect(t *testing.T, binary, previous, method string, oldInitiates bool) {
+	t.Helper()
+	hub := startHub(t, binary)
+	deny := exec.Command(binary, "rooms", "relay", "public", "false")
+	deny.Env = append(os.Environ(), "OVERLAY_DATA_DIR="+hub.dir)
+	if output, err := deny.CombinedOutput(); err != nil {
+		t.Fatalf("block relay: %v: %s", err, output)
+	}
+	stun := startSTUN(t)
+	current, old := newAccount(t, "current"), newAccount(t, "previous")
+	identity, err := overlay.EncodeIdentity(old.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(t.TempDir(), "identity.pem")
+	if err := os.WriteFile(key, identity, 0600); err != nil {
+		t.Fatal(err)
+	}
+	env := &secureEnv{aliceStates: make(chan overlay.State, 64), aliceTap: &hubTap{}, bobSink: &fileSink{dir: t.TempDir()}}
+	options := &overlayagent.DirectOptions{STUNServers: []string{stun}, Methods: []string{method}}
+	env.alice = newSecureAgent(hub.address, current, secureSide{transport: options}, stun, env.aliceTap, env.aliceStates, startSink(t, t.TempDir()))
+	if err := env.alice.SetDirectPeers([]string{interopPeerID(t, old)}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	go func() { _ = env.alice.Run(ctx) }()
+	child := exec.CommandContext(ctx, previous, "-test.run=^TestMixedWireDirectPeer$")
+	child.Env = append(os.Environ(), "OVERLAY_TEST_DIRECT_HUB="+hub.address, "OVERLAY_TEST_DIRECT_STUN="+stun,
+		"OVERLAY_TEST_DIRECT_IDENTITY="+key, "OVERLAY_TEST_DIRECT_APPROVAL="+interopPeerID(t, current),
+		"OVERLAY_TEST_DIRECT_SINK="+env.bobSink.dir)
+	if oldInitiates {
+		child.Env = append(child.Env, "OVERLAY_TEST_DIRECT_INITIATE=1")
+	}
+	child.Stdout, child.Stderr = os.Stdout, os.Stderr
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { cancel(); _ = child.Wait() }()
+	state := waitFor(t, env.aliceStates, func(s overlay.State) bool { return s.Connected && len(s.Peers) == 1 })
+	env.bobIP = netip.MustParseAddr(state.Peers[0].IP)
+	if !oldInitiates {
+		flow, err := env.alice.Outbound(ctx, overlay.ProtoTCP, netip.AddrPortFrom(env.bobIP, 80))
+		if err == nil {
+			_ = flow.Close()
+			t.Fatal("hub allowed payload relay")
+		}
+	}
+	waitFor(t, env.aliceStates, func(s overlay.State) bool {
+		return len(s.Peers) == 1 && s.Peers[0].DirectStatus == overlay.DirectSucceeded
+	})
+	for _, proto := range []string{overlay.ProtoTCP, overlay.ProtoUDP} {
+		if peer := transferDirect(t, env, false, proto); peer.DirectMethod != method {
+			t.Fatalf("direct method = %q, want %q", peer.DirectMethod, method)
+		}
+	}
+}
+
+func TestMixedWireDirectPeer(t *testing.T) {
+	hub := os.Getenv("OVERLAY_TEST_DIRECT_HUB")
+	if hub == "" {
+		t.Skip("started by TestMixedWireDirect")
+	}
+	if overlay.Version != 4 {
+		t.Fatalf("built peer uses wire v%d, want v4", overlay.Version)
+	}
+	encoded, err := os.ReadFile(os.Getenv("OVERLAY_TEST_DIRECT_IDENTITY"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := overlay.ParseIdentity(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := make(chan overlay.State, 64)
+	stun := os.Getenv("OVERLAY_TEST_DIRECT_STUN")
+	options := &overlayagent.DirectOptions{STUNServers: []string{stun}}
+	peer := newSecureAgent(hub, account{key: key}, secureSide{transport: options}, stun, &hubTap{}, states,
+		startSink(t, os.Getenv("OVERLAY_TEST_DIRECT_SINK")))
+	if err := peer.SetDirectPeers([]string{os.Getenv("OVERLAY_TEST_DIRECT_APPROVAL")}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	go func() { _ = peer.Run(ctx) }()
+	state := waitFor(t, states, func(s overlay.State) bool { return s.Connected && len(s.Peers) == 1 })
+	if os.Getenv("OVERLAY_TEST_DIRECT_INITIATE") == "1" {
+		ip := netip.MustParseAddr(state.Peers[0].IP)
+		flow, err := peer.Outbound(ctx, overlay.ProtoTCP, netip.AddrPortFrom(ip, 80))
+		if err == nil {
+			_ = flow.Close()
+			t.Fatal("hub allowed payload relay")
+		}
+	}
+	<-ctx.Done()
+}
+
 func TestPreviousReleaseInterop(t *testing.T) {
 	legacyHub, legacyClient := os.Getenv("OVERLAY_TEST_LEGACY_HUB"), os.Getenv("OVERLAY_TEST_LEGACY_CLIENT")
 	if legacyHub == "" || legacyClient == "" {

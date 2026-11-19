@@ -230,10 +230,7 @@ impl Hub {
             KIND_CONTROL => {
                 control::serve(&self.shared, stream, requester, &hello, session).await;
             }
-            KIND_OPEN => {
-                open::serve(&self.shared, stream, requester, &hello, session).await;
-            }
-            KIND_SIGNAL if hello.version == VERSION => {
+            KIND_OPEN | KIND_SIGNAL => {
                 open::serve(&self.shared, stream, requester, &hello, session).await;
             }
             KIND_ACCEPT => {

@@ -2,7 +2,7 @@
 package overlay
 
 // ReleaseVersion is inherited from server/Cargo.toml.
-const ReleaseVersion = "0.5.2"
+const ReleaseVersion = "0.5.4"
 
 // Version is the current wire generation.
 const Version = 5

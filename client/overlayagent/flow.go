@@ -87,9 +87,6 @@ func (a *Agent) Outbound(ctx context.Context, proto string, dst netip.AddrPort) 
 func (a *Agent) openFlow(ctx context.Context, proto string, ip netip.Addr, port uint16, peerID string) (net.Conn, string, error) {
 	hello := &overlay.Hello{Version: a.wireVersion(), Kind: overlay.KindOpen, Proto: proto, Dst: ip.String(), Port: port, PeerID: peerID}
 	if port == overlay.LinkPort {
-		if hello.Version != overlay.Version {
-			return nil, "", errors.New("legacy overlay hub supports relay only")
-		}
 		hello.Kind = overlay.KindSignal
 	}
 	a.offer(hello)
@@ -171,11 +168,7 @@ func (a *Agent) serveIncoming(ctx context.Context, in *overlay.Incoming, src net
 			}
 		}()
 	}
-	version := a.wireVersion()
-	if version != overlay.Version && (in.Signal || in.Port == overlay.LinkPort) {
-		return errors.New("legacy overlay hub supports relay only")
-	}
-	hello := &overlay.Hello{Version: version, Kind: overlay.KindAccept, ID: in.ID}
+	hello := &overlay.Hello{Version: a.wireVersion(), Kind: overlay.KindAccept, ID: in.ID}
 	a.offer(hello)
 	hub, err := a.cfg.Dial(ctx)
 	if err != nil {

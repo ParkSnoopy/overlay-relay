@@ -43,9 +43,8 @@ go get github.com/ParkSnoopy/overlay-relay/client@latest
 ```
 
 Update the hub and clients separately if needed.  
-The 0.5.x implementation prefers wire v5 and supports discovery, registration, and relayed traffic with 0.4.8 (wire v4).  
-Both peers need v5 for direct connections on the new hub.  
-Mixed-version traffic needs relay to be allowed by the hub.  
+The 0.5.x implementation prefers wire v5 and interoperates with 0.4.8 (wire v4).  
+Approved v4 and v5 peers in the same room can connect directly via WebRTC or ICE/QUIC, even when the hub blocks payload relay.  
 
 `server/Cargo.toml` is the release-version source.  
 Run `python3 scripts/bump_version.py --sync` after changing it; `--check` verifies generated server/client metadata without writing.  

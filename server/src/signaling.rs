@@ -34,6 +34,8 @@ fn method(name: &str) -> bool {
     matches!(name, "webrtc" | "ice")
 }
 
+const LIBP2P_ADVERTISEMENT_WIRE: u32 = 4;
+
 impl Message {
     fn valid_data(&self) -> bool {
         let Some(data) = self.d.as_ref().and_then(serde_json::Value::as_object) else {
@@ -74,12 +76,16 @@ impl Message {
         }
     }
 
-    fn valid(&self) -> bool {
+    fn valid(&self, wire: u32) -> bool {
         match self.t.as_str() {
             "hello" => {
-                !self.m.is_empty()
-                    && self.m.len() <= 2
-                    && self.m.iter().all(|name| method(name))
+                let legacy = wire == LIBP2P_ADVERTISEMENT_WIRE;
+                self.m.iter().any(|name| method(name))
+                    && self.m.len() <= if legacy { 3 } else { 2 }
+                    && self
+                        .m
+                        .iter()
+                        .all(|name| method(name) || (legacy && name == "libp2p"))
                     && self.s.is_empty()
                     && self.d.is_none()
                     && self.e.is_empty()
@@ -105,12 +111,13 @@ impl Message {
 async fn forward(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
+    wire: u32,
 ) -> Result<()> {
     let mut bytes = 0;
     let mut offered = Vec::new();
     for index in 0..32 {
-        let message: Message = read_frame(reader).await?;
-        if !message.valid()
+        let mut message: Message = read_frame(reader).await?;
+        if !message.valid(wire)
             || (index == 0 && !matches!(message.t.as_str(), "hello" | "fail"))
             || (index == 0 && message.e == "method failed")
             || (index > 0 && message.t == "hello")
@@ -127,6 +134,9 @@ async fn forward(
         if bytes > 64 * 1024 {
             return Err(Error::Config("direct signaling budget exceeded"));
         }
+        if message.t == "hello" && wire == LIBP2P_ADVERTISEMENT_WIRE {
+            message.m.retain(|name| method(name));
+        }
         send_frame(writer, &message).await?;
         if matches!(message.t.as_str(), "done" | "end")
             || (message.t == "fail" && message.e != "method failed")
@@ -139,15 +149,21 @@ async fn forward(
 
 /// Exchanges only validated JSON messages, for at most 90 seconds and 64 `KiB`
 /// per direction. Flow/account limits are enforced by the ordinary open path.
-pub async fn exchange(mut left: TcpStream, mut right: TcpStream, cancel: CancellationToken) {
+pub async fn exchange(
+    mut left: TcpStream,
+    mut right: TcpStream,
+    left_wire: u32,
+    right_wire: u32,
+    cancel: CancellationToken,
+) {
     let (mut lr, mut lw) = left.split();
     let (mut rr, mut rw) = right.split();
     select! {
         () = cancel.cancelled() => {},
         _ = timeout(Duration::from_secs(90), async {
             select! {
-                result = forward(&mut lr, &mut rw) => result,
-                result = forward(&mut rr, &mut lw) => result,
+                result = forward(&mut lr, &mut rw, left_wire) => result,
+                result = forward(&mut rr, &mut lw, right_wire) => result,
             }
         }) => {},
     }

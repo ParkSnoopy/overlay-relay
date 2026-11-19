@@ -88,7 +88,7 @@ All field names are lowercase JSON keys.
 
 | Field | Type | Used by | Meaning |
 |---|---|---|---|
-| `version` | integer | all | Use `5` by default. The hub also supports `4` for 0.4.8 compatibility without direct signaling. It closes the stream silently for other versions. |
+| `version` | integer | all | Use `5` by default. The hub also supports `4` for 0.4.8 compatibility. It closes the stream silently for other versions. |
 | `room` | string | all | Private room password proof, empty for public membership. Derive it locally from the room ID and password. Never log it. |
 | `room_id` | string | all | Private room ID, empty for public membership. Required with `room`. A known ID admits only the proof its first requester used. |
 | `kind` | string | all | `"control"`, `"open"`, `"signal"` or `"accept"`. Anything else gets reply `invalid request`. |
@@ -222,7 +222,7 @@ The reference agent builds a direct link to a peer when `Config.Direct` is set a
 A link is one authenticated, encrypted, multiplexed path to one peer. Every flow is one stream on it. A flow that opens while no link exists uses the relay from its first byte, so traffic never waits for traversal. Flows that open after the link is up use it. Flows already open stay on the relay.
 
 1. The first outbound flow to a peer starts a negotiation in the background, unless direct is denied for that device or failed less than five minutes ago. The requester opens `kind:"signal"`, TCP port `65535` (`overlay.LinkPort`), with its certificate fingerprint and no endpoint. The destination answers only `incoming.signal`; no local service sees it. The signaling frames are not sealed as payload TLS: the hub validates message types and method-specific fields, rejects unknown fields, limits each direction to 32 frames and 64 KiB, permits each method once, and closes the exchange after 90 seconds. Signaling remains available with relay disabled; ordinary `open` never bypasses relay policy by choosing the reserved port.
-2. Each message is one length-prefixed JSON frame. `hello` lists supported methods in preference order. The requester tries the shared methods in its own order: `webrtc` then `ice` by default.
+2. Each message is one length-prefixed JSON frame. `hello` lists supported methods in preference order. The requester tries the shared methods in its own order: `webrtc` then `ice` by default. The v5 hub strips `libp2p` from v4 advertisements and does not accept libp2p offers.
 3. The requester sends `offer`. The destination sends `answer` after gathering candidates (at most 3 s) or sends `fail` with `method failed` without closing negotiation. After an answer, `sync` starts a connection attempt bounded by `DirectOptions.Timeout` (default 10 s). The requester sends `done` on success, or `next` on failure and tries the next method. It sends `end` when no methods remain.
 4. `webrtc`: a Pion WebRTC peer connection with one detached data channel. The offer and answer are SDP with all candidates, gathered through the STUN servers of `DirectOptions.STUNServers`. DTLS secures the channel and a yamux session multiplexes the flows. SDP authenticity relies on the authenticated VPN and trusted hub, as does the certificate-fingerprint exchange.
 5. `ice`: a bare Pion ICE agent. The offer and answer carry the ICE credentials and candidates. Over the nominated pair, QUIC with ALPN `overlay-relay/direct-1` runs between the two flow certificates, pinned as in section 8.6. The requester is the QUIC client.
