@@ -23,6 +23,7 @@ mod dns;
 mod error;
 mod frame;
 mod hub;
+mod names;
 mod open;
 mod protocol;
 mod rooms;
@@ -59,6 +60,8 @@ pub use protocol::{
     MAX_FLOWS_PER_ACCOUNT,
     MAX_FRAME,
     MAX_PENDING_PER_ACCOUNT,
+    NameAnswer,
+    NameQuery,
     PORT,
     PROTO_TCP,
     PROTO_UDP,

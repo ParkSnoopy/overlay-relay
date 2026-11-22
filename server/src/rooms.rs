@@ -150,12 +150,16 @@ async fn save<T: Serialize + Sync>(directory: &Path, rooms: &BTreeMap<String, T>
 /// # Errors
 /// Returns an error when the room file cannot be read or parsed.
 pub async fn admit(directory: &Path, id: &str, proof: &str) -> Result<Admission> {
-    let room_key = key(id);
+    admit_key(directory, &key(id), proof).await
+}
+
+/// Rechecks a private room proof against the room's stable key.
+pub async fn admit_key(directory: &Path, room_key: &str, proof: &str) -> Result<Admission> {
     let rooms = load(directory).await?;
     let room = rooms
-        .get(&room_key)
+        .get(room_key)
         .cloned()
-        .map(|value| decode_room(&room_key, value))
+        .map(|value| decode_room(room_key, value))
         .transpose()?;
     Ok(match room {
         None => Admission::Unknown,

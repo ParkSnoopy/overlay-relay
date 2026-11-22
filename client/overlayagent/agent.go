@@ -68,12 +68,14 @@ type Config struct {
 	// does not support encryption fails.
 	DisableEncryption bool
 	// Direct lets flows bypass the hub when both peers enable it. Nil (the
-	// default) keeps every flow on the relay.
+	// default) disables direct transport.
 	Direct *DirectOptions
 	// RelayOnly lists device IDs that must never use direct transport.
 	RelayOnly []string
-	// DirectPeers is the explicit direct allowlist. Empty permits relay only.
+	// DirectPeers permits direct connections with relay fallback.
 	DirectPeers []string
+	// DirectOnly permits direct connections but forbids payload relay.
+	DirectOnly []string
 
 	// RelayFirewall denies incoming relayed service flows. Direct links are unaffected.
 	RelayFirewall []overlay.FirewallRule
@@ -109,13 +111,13 @@ type Agent struct {
 	connected      bool
 	reason         string
 	peers          []overlay.Peer
-	peerSet        map[netip.Addr]struct{}
+	peerSet        map[netip.Addr]string
 	ready          chan netip.Addr
 	readyOnce      sync.Once
 	started        bool
 	directRetries  map[netip.Addr]directRetry
-	relayOnly      map[string]bool
-	directPeers    map[string]bool
+	policy         peerPolicy
+	pendingRelay   map[*relayAdmission]struct{}
 	active         map[*peerFlow]struct{}
 	observations   map[netip.Addr]peerObservation
 	activityStates map[netip.Addr]overlay.PeerActivity
@@ -134,6 +136,7 @@ type Agent struct {
 	direct      atomic.Pointer[directState]
 	publicRoom  atomic.Bool
 	hubWire     atomic.Uint32
+	names       *nameQueries // protected by mu; bound to one control stream
 }
 
 // New builds an idle agent using its enrolled identity.
@@ -144,18 +147,16 @@ func New(cfg Config) *Agent {
 		publicKey:   publicKey,
 		identityErr: identityErr,
 		timing:      defaultTiming,
-		peerSet:     map[netip.Addr]struct{}{},
 		ready:       make(chan netip.Addr, 1),
 		inflight:    make(chan struct{}, maxIncoming),
 	}
 	a.cfg.RelayFirewall = append([]overlay.FirewallRule(nil), cfg.RelayFirewall...)
-	a.identityErr = errors.Join(a.identityErr, a.SetRelayOnly(cfg.RelayOnly), overlay.ValidateName(cfg.Name), overlay.ValidateFirewall(cfg.RelayFirewall))
+	a.identityErr = errors.Join(a.identityErr, a.SetPeerPolicy(cfg.RelayOnly, cfg.DirectPeers, cfg.DirectOnly), overlay.ValidateName(cfg.Name), overlay.ValidateFirewall(cfg.RelayFirewall))
 	if cfg.CIDR.IsValid() {
 		prefix, rangeErr := overlay.ParseCIDR(cfg.CIDR.String())
 		a.identityErr = errors.Join(a.identityErr, rangeErr)
 		a.rng.Store(&prefix)
 	}
-	a.identityErr = errors.Join(a.identityErr, a.SetDirectPeers(cfg.DirectPeers))
 	if cfg.Room != "" && (!overlay.ValidPeerID(cfg.Room) || cfg.RoomID == "" || overlay.ValidateName(cfg.RoomID) != nil) || cfg.Room == "" && cfg.RoomID != "" {
 		a.identityErr = errors.Join(a.identityErr, errors.New("invalid overlay room"))
 	}
@@ -272,18 +273,22 @@ func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
 		return false, "overlay hub changed its address range"
 	}
 	a.hubWire.Store(uint32(version))
-	a.registered(ip, reply.Name, reply.RoomName)
 
 	sctx, cancel := context.WithCancel(ctx)
+	var names *nameQueries
+	if reply.NameLookup == 1 {
+		names = newNameQueries(sctx)
+	}
+	a.registered(ip, reply.Name, reply.RoomName, names)
 	stopClose := context.AfterFunc(sctx, func() { closeConn(conn) })
 	var pinger sync.WaitGroup
 	pinger.Add(1)
 	go func() {
 		defer pinger.Done()
 		defer cancel()
-		a.ping(sctx, conn)
+		a.writeRequests(sctx, conn, names)
 	}()
-	a.readEvents(sctx, conn)
+	a.readEvents(sctx, conn, names)
 	cancel()
 	stopClose()
 	closeConn(conn)
@@ -417,19 +422,27 @@ func roomRejected(reason string) bool {
 	return reason == "room does not exist" || reason == "room password is incorrect"
 }
 
-func (a *Agent) ping(ctx context.Context, conn net.Conn) {
+func (a *Agent) writeRequests(ctx context.Context, conn net.Conn, names *nameQueries) {
 	ticker := time.NewTicker(a.timing.ping)
 	defer ticker.Stop()
+	var queries <-chan overlay.NameQuery
+	if names != nil {
+		queries = names.outbound
+	}
 	for {
+		var request overlay.ControlRequest
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			request.Ping = true
+		case query := <-queries:
+			request.Resolve = &query
 		}
 		if err := conn.SetWriteDeadline(time.Now().Add(a.timing.handshake)); err != nil {
 			return
 		}
-		if err := overlay.WriteFrame(conn, overlay.Ping{Ping: true}); err != nil {
+		if err := overlay.WriteFrame(conn, request); err != nil {
 			return
 		}
 	}
@@ -437,7 +450,7 @@ func (a *Agent) ping(ctx context.Context, conn net.Conn) {
 
 // readEvents consumes hub events until the stream fails. A silent hub is
 // detected by the liveness deadline: pings are answered with a Pong.
-func (a *Agent) readEvents(ctx context.Context, conn net.Conn) {
+func (a *Agent) readEvents(ctx context.Context, conn net.Conn, names *nameQueries) {
 	for {
 		if err := conn.SetReadDeadline(time.Now().Add(a.timing.liveness)); err != nil {
 			return
@@ -451,6 +464,8 @@ func (a *Agent) readEvents(ctx context.Context, conn net.Conn) {
 			a.setPeers(*event.Peers)
 		case event.Incoming != nil:
 			a.accept(ctx, event.Incoming)
+		case event.Resolved != nil && names != nil:
+			names.respond(*event.Resolved)
 		}
 	}
 }
@@ -477,9 +492,10 @@ func (a *Agent) pinRange(prefix netip.Prefix) bool {
 	return a.Range() == prefix
 }
 
-func (a *Agent) registered(ip netip.Addr, name, roomName string) {
+func (a *Agent) registered(ip netip.Addr, name, roomName string, names *nameQueries) {
 	a.mu.Lock()
 	a.ip, a.name, a.roomName, a.connected = ip, name, roomName, true
+	a.names = names
 	if !a.publicRoom.Load() {
 		a.reason = ""
 	}
@@ -496,16 +512,18 @@ func (a *Agent) disconnected(reason string) {
 	a.mu.Lock()
 	a.sessionEpoch++
 	a.connected, a.reason = false, reason
-	a.peers, a.peerSet = nil, map[netip.Addr]struct{}{}
+	a.names = nil
+	a.peers, a.peerSet = nil, nil
 	a.observations, a.directRetries = nil, nil
+	closed := a.revokeTransportsLocked(func(netip.Addr, string) bool { return false })
 	a.mu.Unlock()
-	a.closeLinks(nil)
+	closed.close()
 	a.emit()
 }
 
 func (a *Agent) setPeers(peers []overlay.Peer) {
 	kept := make([]overlay.Peer, 0, len(peers))
-	set := make(map[netip.Addr]struct{}, len(peers))
+	set := make(map[netip.Addr]string, len(peers))
 	for _, peer := range peers {
 		ip, err := netip.ParseAddr(peer.IP)
 		if err != nil || !overlay.AssignableIn(a.Range(), ip) {
@@ -514,10 +532,11 @@ func (a *Agent) setPeers(peers []overlay.Peer) {
 		if _, duplicate := set[ip]; duplicate || len(kept) == maxPeers {
 			continue
 		}
-		set[ip] = struct{}{}
+		set[ip] = peer.ID
 		kept = append(kept, peer)
 	}
 	a.mu.Lock()
+	previous := a.peerSet
 	a.peers, a.peerSet = kept, set
 	for ip, observation := range a.observations {
 		if _, exists := set[ip]; !exists || a.peerIDLocked(ip) != observation.id {
@@ -529,13 +548,17 @@ func (a *Agent) setPeers(peers []overlay.Peer) {
 			delete(a.directRetries, ip)
 		}
 	}
+	closed := a.revokeTransportsLocked(func(ip netip.Addr, id string) bool {
+		if current, listed := set[ip]; listed {
+			return current == id
+		}
+		// A valid incoming request can arrive before its first peer snapshot.
+		// Once advertised, removing the address revokes its transports.
+		_, wasListed := previous[ip]
+		return !wasListed
+	})
 	a.mu.Unlock()
-	ids := make(map[netip.Addr]string, len(kept))
-	for _, peer := range kept {
-		ip, _ := netip.ParseAddr(peer.IP)
-		ids[ip] = peer.ID
-	}
-	a.closeLinks(func(ip netip.Addr, id string) bool { return ids[ip] == id })
+	closed.close()
 	a.emit()
 }
 
@@ -571,7 +594,7 @@ func (a *Agent) emit() {
 				peer.DirectStatus, peer.LastPath = observation.status, observation.path
 				if observation.failed {
 					peer.Reachability = overlay.ReachabilityUnavailable
-				} else if observation.path != "" {
+				} else if observation.path != "" && !a.policy.directOnly[peer.ID] {
 					peer.Reachability = overlay.ReachabilityRelay
 				}
 				peer.Activity = a.peerActivityLocked(ip, time.Now())
@@ -587,7 +610,7 @@ func (a *Agent) emit() {
 			}
 		}
 		for flow := range a.active {
-			if flow.epoch == a.sessionEpoch && flow.peerID == peer.ID && flow.ip.String() == peer.IP {
+			if !flow.revoked.Load() && flow.epoch == a.sessionEpoch && flow.peerID == peer.ID && flow.ip.String() == peer.IP {
 				if flow.direct {
 					peer.DirectFlows++
 					if peer.DirectAllowed {

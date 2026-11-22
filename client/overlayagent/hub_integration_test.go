@@ -53,13 +53,14 @@ func TestServerAssignedRangeWithRustHub(t *testing.T) {
 	defer stopEcho()
 	calls := make(chan localCall, 4)
 	var agents []*testAgent
+	names := [2]string{"DUMMY Desk", "DUMMY Laptop"}
 	for index := range 2 {
 		key, err := overlay.GenerateIdentity()
 		if err != nil {
 			t.Fatal(err)
 		}
 		a := &testAgent{key: key}
-		cfg := Config{Identity: key, Name: "DUMMY", Dial: func(ctx context.Context) (net.Conn, error) {
+		cfg := Config{Identity: key, Name: names[index], Dial: func(ctx context.Context) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "tcp", address)
 		}, DialLocal: echoLocal(tcp, udp, calls)}
 		if index == 0 {
@@ -97,8 +98,13 @@ func TestServerAssignedRangeWithRustHub(t *testing.T) {
 	}
 	a, b := agents[0], agents[1]
 	a.waitState(t, "second peer", hasPeer(b.IP()))
+	b.waitState(t, "first peer", hasPeer(a.IP()))
+	resolved, err := a.LookupName(ctx, "dummy-laptop")
+	if err != nil || resolved != b.IP() {
+		t.Fatalf("hub returned %v for dummy-laptop, want %v: %v", resolved, b.IP(), err)
+	}
 	for _, proto := range []string{overlay.ProtoTCP, overlay.ProtoUDP} {
-		conn, err := a.Outbound(ctx, proto, netip.AddrPortFrom(b.IP(), 7000))
+		conn, err := a.Outbound(ctx, proto, netip.AddrPortFrom(resolved, 7000))
 		if err != nil {
 			t.Fatal(proto, err)
 		}

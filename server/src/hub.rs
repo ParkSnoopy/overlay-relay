@@ -29,6 +29,7 @@ use crate::{
     dns::admitted,
     error::Result,
     frame::{read_frame, send_frame},
+    names::Namespace,
     open,
     protocol::{
         Challenge,
@@ -58,6 +59,7 @@ pub struct Shared {
     pub config: Config,
     /// Identities, controls, pending requests and flows.
     pub state: Mutex<State>,
+    pub(crate) names: Mutex<Namespace>,
     /// Serializes writes of the persisted identities.
     pub store: Mutex<()>,
     /// Notifies active relay streams after room policy files change.
@@ -125,11 +127,13 @@ impl Hub {
             assignments::load(&config.data_dir.join(assignments::FILE_NAME), unix_now()).await?;
         let dhcp = crate::dhcp::load(&config.data_dir, config.address_space).await?;
         let state = State::load_dhcp(&records, config.address_space, dhcp);
+        let names = Namespace::load(&config.data_dir).await;
         info!(identities = records.len(), "overlay identities loaded");
         let hub = Self {
             shared: Arc::new(Shared {
                 config,
                 state: Mutex::new(state),
+                names: Mutex::new(names),
                 store: Mutex::new(()),
                 policy_changes: watch::channel(()).0,
             }),

@@ -61,11 +61,15 @@ func (a *Agent) replyWait(d *directState) time.Duration {
 // negotiate brings up a link to ip as the initiator. It tries the methods both
 // sides support, in this side's order, over one relayed stream.
 func (a *Agent) negotiate(ctx context.Context, d *directState, ip netip.Addr, peerID string) (link, error) {
-	conn, fingerprint, err := a.openFlow(ctx, overlay.ProtoTCP, ip, overlay.LinkPort, peerID)
+	helloFrame := &overlay.Hello{Version: a.wireVersion(), Kind: overlay.KindSignal, Proto: overlay.ProtoTCP, Dst: ip.String(), Port: overlay.LinkPort, PeerID: peerID}
+	conn, reply, err := a.dialHubStream(ctx, helloFrame, nil)
 	if err != nil {
 		return nil, errNoLink
 	}
 	defer closeConn(conn)
+	if !reply.Secure || reply.Fingerprint == "" {
+		return nil, errNoLink
+	}
 	stop := context.AfterFunc(ctx, func() { closeConn(conn) })
 	defer stop()
 	if err := writeLinkMessage(conn, &linkMessage{Type: msgHello, Methods: d.names()}); err != nil {
@@ -79,7 +83,7 @@ func (a *Agent) negotiate(ctx context.Context, d *directState, ip netip.Addr, pe
 	if len(shared) == 0 {
 		return nil, errNoMethod
 	}
-	peer := &linkPeer{id: peerID, fingerprint: fingerprint, initiator: true}
+	peer := &linkPeer{id: peerID, fingerprint: reply.Fingerprint, initiator: true}
 	for _, name := range shared {
 		l, err := a.attempt(ctx, d, conn, peer, d.method(name))
 		if err == nil {
@@ -195,16 +199,14 @@ func (r *responder) await(ctx context.Context) (link, error) {
 func (a *Agent) answerLink(ctx context.Context, conn net.Conn, ip netip.Addr, peerID, fingerprint string) {
 	defer closeConn(conn)
 	d := a.direct.Load()
-	a.mu.Lock()
-	denied := d == nil || a.relayOnlyLocked(peerID) || a.peerIDLocked(ip) != peerID
-	a.mu.Unlock()
-	if denied {
-		return
-	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	attempt := &linkAttempt{peerID: peerID, cancel: cancel}
+	attempt := &linkAttempt{peerID: peerID, cancel: cancel, done: make(chan struct{})}
 	a.mu.Lock()
+	if d == nil || ctx.Err() != nil || !a.connected || a.relayOnlyLocked(peerID) || a.peerIDLocked(ip) != peerID {
+		a.mu.Unlock()
+		return
+	}
 	if existing := a.linking[ip]; existing != nil {
 		if existing.initiator && a.identity.fingerprint < fingerprint {
 			// Both sides started at once: the lower certificate fingerprint keeps the initiator role.
@@ -219,6 +221,7 @@ func (a *Agent) answerLink(ctx context.Context, conn net.Conn, ip netip.Addr, pe
 	}
 	a.linking[ip] = attempt
 	a.mu.Unlock()
+	defer close(attempt.done)
 	defer func() {
 		a.mu.Lock()
 		if a.linking[ip] == attempt {

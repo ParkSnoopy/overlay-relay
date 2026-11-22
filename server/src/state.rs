@@ -72,12 +72,17 @@ struct Entry {
 
 impl Entry {
     fn wire_name(&self, verifier: &Verifier) -> String {
-        if self.name.is_empty() {
-            let id = verifier.to_hex();
-            format!("peer-{}", id.get(..8).unwrap_or(&id))
-        } else {
-            self.name.clone()
-        }
+        advertised_name(&self.name, verifier)
+    }
+}
+
+/// Returns the device's default display name when none is advertised.
+pub fn advertised_name(name: &str, verifier: &Verifier) -> String {
+    if name.is_empty() {
+        let id = verifier.to_hex();
+        format!("peer-{}", id.get(..8).unwrap_or(&id))
+    } else {
+        name.to_owned()
     }
 }
 
@@ -300,6 +305,24 @@ impl State {
     #[must_use]
     pub fn address_of(&self, verifier: &Verifier) -> Option<Ipv4Addr> {
         self.accounts.get(verifier).map(|entry| entry.ip)
+    }
+
+    pub(crate) fn lookup_name(
+        &self,
+        requester: &Requester,
+        generation: u64,
+        owner: &Verifier,
+    ) -> Option<Ipv4Addr> {
+        let from = self.controls.get(&requester.verifier)?;
+        let to = self.controls.get(owner)?;
+        let ip = self.address_of(owner)?;
+        (from.generation == generation
+            && !from.close.is_cancelled()
+            && from.room == requester.room
+            && to.room == from.room
+            && !to.close.is_cancelled()
+            && self.by_ip.get(&ip) == Some(owner))
+        .then_some(ip)
     }
 
     /// Updates the authenticated device's advertised display name.

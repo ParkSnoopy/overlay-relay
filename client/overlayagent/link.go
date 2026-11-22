@@ -91,11 +91,34 @@ func (c *streamConn) RemoteAddr() net.Addr { return c.remote }
 func (a *Agent) linkFor(ip netip.Addr, peerID string) *peerLink {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.linkForLocked(ip, peerID)
+}
+
+func (a *Agent) linkForLocked(ip netip.Addr, peerID string) *peerLink {
 	pl := a.links[ip]
 	if pl == nil || pl.peerID != peerID || a.relayOnlyLocked(peerID) {
 		return nil
 	}
-	return pl
+	select {
+	case <-pl.done():
+		return nil
+	default:
+		return pl
+	}
+}
+
+func (a *Agent) trackDirect(conn net.Conn, pl *peerLink) (net.Conn, error) {
+	a.mu.Lock()
+	if !a.connected || a.peerIDLocked(pl.ip) != pl.peerID || a.linkForLocked(pl.ip, pl.peerID) != pl {
+		a.mu.Unlock()
+		closeConn(conn)
+		return nil, errDirectFailed
+	}
+	flow := &peerFlow{Conn: conn, ip: pl.ip, peerID: pl.peerID, direct: true}
+	a.trackFlowLocked(flow)
+	a.mu.Unlock()
+	a.emit()
+	return flow, nil
 }
 
 // openLinkFlow opens one flow on a link. Like a relayed flow, it returns
@@ -216,7 +239,7 @@ func (a *Agent) serveLinkFlow(ctx context.Context, pl *peerLink, stream net.Conn
 		closeConn(stream)
 		return errors.New("overlay link flow has no port")
 	}
-	flow, err := a.trackFlow(stream, pl.ip, pl.peerID, true)
+	flow, err := a.trackDirect(stream, pl)
 	if err != nil {
 		return err
 	}
@@ -234,38 +257,12 @@ func (a *Agent) serveLinkFlow(ctx context.Context, pl *peerLink, stream net.Conn
 	return spliceTCP(ctx, flow, local)
 }
 
-// closeLinks ends every link and negotiation whose peer keep rejects.
-// A nil keep ends all of them.
-func (a *Agent) closeLinks(keep func(ip netip.Addr, peerID string) bool) {
-	a.mu.Lock()
-	var closing []*peerLink
-	for ip, pl := range a.links {
-		if keep == nil || !keep(ip, pl.peerID) {
-			closing = append(closing, pl)
-			delete(a.links, ip)
-		}
-	}
-	var canceling []*linkAttempt
-	for ip, attempt := range a.linking {
-		if keep == nil || !keep(ip, attempt.peerID) {
-			canceling = append(canceling, attempt)
-		}
-	}
-	a.mu.Unlock()
-	for _, pl := range closing {
-		pl.close()
-		a.recordDirect(pl.ip, pl.peerID, overlay.DirectCanceled)
-	}
-	for _, attempt := range canceling {
-		attempt.cancel()
-	}
-}
-
 // linkAttempt is one negotiation in progress, as initiator or responder.
 type linkAttempt struct {
 	peerID    string
 	initiator bool
 	cancel    context.CancelFunc
+	done      chan struct{}
 }
 
 var directRetryDelays = [...]time.Duration{10 * time.Second, 30 * time.Second, time.Minute, 10 * time.Minute}
@@ -291,23 +288,52 @@ func (a *Agent) backOffDirectLocked(ip netip.Addr, peerID string, now time.Time)
 	a.directRetries[ip] = retry
 }
 
-// maybeLink starts a link negotiation to ip in the background when direct
-// connections are on and neither a link nor a recent failure exists. Flows
-// keep using the relay meanwhile.
-func (a *Agent) maybeLink(ip netip.Addr, peerID string) {
+// waitLink joins direct setup on demand without opening a payload relay.
+func (a *Agent) waitLink(ctx context.Context, ip netip.Addr, peerID string) (*peerLink, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		pl, done := a.maybeLink(ip, peerID)
+		if pl != nil {
+			return pl, nil
+		}
+		if done == nil {
+			return nil, errDirectRequired
+		}
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// maybeLink returns a live link or starts/joins one background negotiation.
+func (a *Agent) maybeLink(ip netip.Addr, peerID string) (ready *peerLink, pending <-chan struct{}) {
 	d := a.direct.Load()
-	if d == nil || !overlay.ValidPeerID(peerID) {
-		return
+	if d == nil {
+		return nil, nil
 	}
 	a.mu.Lock()
-	retry := a.directRetries[ip]
-	if a.runCtx == nil || a.runCtx.Err() != nil || !a.connected || a.links[ip] != nil || a.linking[ip] != nil ||
-		a.peerIDLocked(ip) != peerID || a.relayOnlyLocked(peerID) || (retry.peerID == peerID && time.Now().Before(retry.until)) {
+	if a.runCtx == nil || a.runCtx.Err() != nil || !a.connected || a.peerIDLocked(ip) != peerID || a.relayOnlyLocked(peerID) {
 		a.mu.Unlock()
-		return
+		return nil, nil
+	}
+	if pl := a.linkForLocked(ip, peerID); pl != nil {
+		a.mu.Unlock()
+		return pl, nil
+	}
+	if attempt := a.linking[ip]; attempt != nil {
+		a.mu.Unlock()
+		return nil, attempt.done
+	}
+	if retry := a.directRetries[ip]; retry.peerID == peerID && time.Now().Before(retry.until) {
+		a.mu.Unlock()
+		return nil, nil
 	}
 	ctx, cancel := context.WithCancel(a.runCtx)
-	attempt := &linkAttempt{peerID: peerID, initiator: true, cancel: cancel}
+	attempt := &linkAttempt{peerID: peerID, initiator: true, cancel: cancel, done: make(chan struct{})}
 	if a.linking == nil {
 		a.linking = map[netip.Addr]*linkAttempt{}
 	}
@@ -317,6 +343,7 @@ func (a *Agent) maybeLink(ip netip.Addr, peerID string) {
 	a.recordDirect(ip, peerID, overlay.DirectConnecting)
 	go func() {
 		defer a.flows.Done()
+		defer close(attempt.done)
 		defer cancel()
 		l, err := a.negotiate(ctx, d, ip, peerID)
 		if err == nil {
@@ -343,4 +370,5 @@ func (a *Agent) maybeLink(ip netip.Addr, peerID string) {
 			a.recordDirect(ip, peerID, overlay.DirectFailed)
 		}
 	}()
+	return nil, attempt.done
 }

@@ -13,7 +13,7 @@ The hub enrolls nobody: each client generates its own P-384 key pair, and a clie
 
 - `OVERLAY_ALLOWED_HOST` is an optional comma-separated list of engine container names. Without it the hub admits every loopback, private or link-local source.
 - `OVERLAY_CIDR` selects a canonical IPv4 `/8` through `/30` subnet wholly within RFC 1918 private space (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), default `10.77.0.0/16`. Clients must configure the same range. Public ranges and supernets crossing private block boundaries are rejected. The administrator owns routing conflicts.
-- `/var/lib/overlay-relay` is the writable state directory for `ips.json` and `rooms.json`.
+- `/var/lib/overlay-relay` holds `ips.json`, `rooms.json`, `dhcp.json`, and `names.json`.
 
 ## Admission
 
@@ -30,13 +30,39 @@ Peers are written atomically with mode `0600` to `ips.json` keyed by verifier, t
 The default display name of a peer is `peer-` and the first 8 hex digits of its verifier.
 A control Hello may supply `name`, applied only after proof of possession of that peer's key.
 The hub validates a maximum of 128 Unicode characters with no control characters or surrounding whitespace, updates only that authenticated peer and publishes fresh peer snapshots.
-Names are transient and are not written to `ips.json`; an empty or absent name restores the default on registration without changing the address.
+`ips.json` retains the last advertised display name for DHCP. An empty or absent name restores the default without changing the address.
 The table holds at most 4096 peers, bounded also by the subnet's usable addresses.
 When either limit is exhausted, a new key reclaims the oldest peer with no control stream or flow; if every peer is in use it receives `unauthorized`.
 
+## Room-local DNS
+
+- The hub normalizes advertised names to lowercase DNS labels (for example,
+  `Desk PC` becomes `desk-pc.snoo`, and `Bücher` becomes `xn--bcher-kva.snoo`).
+  Whitespace and punctuation act as separators. Unicode labels use IDNA.
+- The first authenticated registration for a label in a room binds that label
+  to the device's full verifier. Renaming can add a label but never releases
+  an existing binding. Address reclamation does not remove name bindings.
+- Every verifier also has a separate `id-<base32>.snoo` name. Encode the 32 bytes
+  of the hex verifier as lowercase RFC 4648 base32 without padding. This form
+  is reserved and cannot be claimed by a display name. Use it when the
+  normalized label is invalid, has another owner, or cannot be added at capacity.
+- The hub answers only with the current IPv4 of an online owner in the
+  requester's admitted room. No address is returned for a missing or offline
+  owner. Private room proofs are rechecked, including after a password change.
+  Room relay policy does not control DNS.
+- `names.json` stores room keys, labels, and verifiers without room proofs or
+  IPs. The hub atomically saves and syncs new bindings before serving them.
+  Preserve this file across upgrades, downgrades and backups. The hub retains
+  up to 16,384 explicit names and never evicts a binding. Corrupt or unwritable
+  storage disables DNS without breaking overlay flows. Repair it and restart
+  the hub before resuming DNS.
+- Old `ips.json` records lack the room and ownership history required to seed
+  the new store. Durable names start with the first registration on a capable
+  hub. Clients with roster-based DNS need an upgrade to get the guarantee.
+
 ## Protocol
 
-Wire version 4 requires coordinated client/hub updates. Existing identity keys and room proofs remain valid. An optional `room_id` and `room` password proof confine discovery, opens and accepts to matching members. Both empty select public membership; a private room needs both. Clients derive the proof from the room ID and password, so the hub never learns the password. The hub exposes no room directory to peers and never logs proofs. A room ID is unique, and the hub keys a room by the SHA-256 hex of its ID. A private room exists only when the operator creates it, and the hub never creates one from a request. An unknown ID is refused with `room does not exist`. `overlay-hub rooms create <id> <name> <proof> [true|false]` writes the room and its relay policy to `rooms.json`; `rooms list` prints rooms and public relay policy, `rooms relay <public|key> <true|false>` changes only relay permission, and `rooms remove <key>` deletes a private room. Omitted relay flags preserve legacy permission. Disabling relay rejects new payload flows and revokes existing relay streams after a policy-file change; discovery and bounded `signal` exchanges remain available. A known ID with another password proof is refused with `room password is incorrect`. The hub reads `rooms.json` on every private-room connection, so no restart is needed. A joined device receives the room's display name as `room_name` in the hub's reply. The authenticated VPN remains mandatory.
+Wire v4 and v5 retain existing identity keys and room proofs. An optional `room_id` and `room` password proof confine discovery, opens and accepts to matching members. Both empty select public membership; a private room needs both. Clients derive the proof from the room ID and password, so the hub never learns the password. The hub exposes no room directory to peers and never logs proofs. A room ID is unique, and the hub keys a room by the SHA-256 hex of its ID. A private room exists only when the operator creates it, and the hub never creates one from a request. An unknown ID is refused with `room does not exist`. `overlay-hub rooms create <id> <name> <proof> [true|false]` writes the room and its relay policy to `rooms.json`; `rooms list` prints rooms and public relay policy, `rooms relay <public|key> <true|false>` changes only relay permission, and `rooms remove <key>` deletes a private room. Omitted relay flags preserve legacy permission. Disabling relay rejects new payload flows and revokes existing relay streams after a policy-file change; discovery and bounded `signal` exchanges remain available. A known ID with another password proof is refused with `room password is incorrect`. The hub reads `rooms.json` on every private-room connection, so no restart is needed. A joined device receives the room's display name as `room_name` in the hub's reply. The authenticated VPN remains mandatory.
 
 Unreadable/corrupt room storage or an invalid selected record returns `rooms are unavailable`, never an unknown-room refusal.
 Healthy rooms remain usable alongside malformed records, which listing retains as repairable placeholders.
@@ -49,7 +75,13 @@ The hub validates the public key, issues a fresh challenge, verifies its signatu
 - `control` registers the peer as broadcasting and replies with its address and name.
   A new control stream for the same peer replaces and closes the old one.
   The hub pushes a full `Peers` snapshot of the other broadcasting accounts to every control stream whenever the broadcasting set changes, and answers `Ping` with `Pong`.
-  A control stream without a ping for 90 seconds is closed.
+  A control stream without a request for 90 seconds is closed.
+  A reply with `name_lookup: 1` enables `{"resolve":{"id":1,"label":"desk-pc"}}`
+  requests on that stream. The hub returns `{"resolved":{"id":1,"ip":"10.77.0.5"}}`.
+  It omits `ip` for a negative answer and sets `unavailable: true` for an authority
+  failure. The request ID must be a nonzero 32-bit unsigned integer. The room
+  always comes from authentication, never from the query. Legacy clients retain
+  the original ping and roster exchange. Wire v4 and v5 remain supported.
 - `open` requires that the requester has a control stream and that the destination address belongs to another broadcasting account.
   The hub then pushes an `Incoming` event with a random 128-bit identifier to the destination and waits up to 10 seconds for its `accept` stream.
   Both streams then receive `ok` and are spliced: TCP with half-close, and UDP as raw datagram records, which preserves framing.

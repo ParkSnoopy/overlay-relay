@@ -44,6 +44,17 @@ func (r *Router) Owns(address netip.Addr) bool {
 	return prefix.Contains(address.Unmap())
 }
 
+// SetPeerPolicy atomically replaces all transport policies on the running agent.
+func (r *Router) SetPeerPolicy(relayOnly, directPeers, directOnly []string) error {
+	r.mu.RLock()
+	agent := r.agent
+	r.mu.RUnlock()
+	if agent == nil {
+		return errInactive
+	}
+	return agent.SetPeerPolicy(relayOnly, directPeers, directOnly)
+}
+
 // SetDirectPeers replaces the running agent's explicit direct approvals.
 func (r *Router) SetDirectPeers(ids []string) error {
 	r.mu.RLock()
@@ -56,6 +67,18 @@ func (r *Router) SetDirectPeers(ids []string) error {
 }
 
 var errInactive = errors.New("overlay network is not active")
+
+// LookupName resolves one .snoo label through the registered hub control stream.
+// A zero address with no error means there is no live owner in the current room.
+func (r *Router) LookupName(ctx context.Context, label string) (netip.Addr, error) {
+	r.mu.RLock()
+	agent := r.agent
+	r.mu.RUnlock()
+	if agent == nil {
+		return netip.Addr{}, errInactive
+	}
+	return agent.LookupName(ctx, label)
+}
 
 // SetRelayOnly updates direct policy on the running agent.
 func (r *Router) SetRelayOnly(ids []string) error {

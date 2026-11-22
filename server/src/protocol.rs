@@ -154,6 +154,9 @@ pub struct Reply {
     /// Control only: the display name of the private room, empty in the public room.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub room_name: String,
+    /// Control only: the negotiated room-local name query format, currently 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_lookup: Option<u8>,
     /// Open and accept only: both sides offered a fingerprint, so the flow is
     /// end-to-end encrypted.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -276,6 +279,37 @@ pub enum Event {
     Incoming(Incoming),
     /// Answer to a ping.
     Pong(bool),
+    /// Answer to a room-local name query.
+    Resolved(NameAnswer),
+}
+
+/// A room-local name lookup request sent on a registered control stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NameQuery {
+    /// Nonzero request identifier, local to the control stream.
+    pub id: u32,
+    /// One lowercase ASCII DNS label, without the `.snoo` suffix.
+    pub label: String,
+}
+
+/// Hub-authoritative answer for a room-local name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NameAnswer {
+    /// The request identifier echoed by the hub.
+    pub id: u32,
+    /// The owner's current address, absent if unbound or offline in this room.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip: Option<std::net::Ipv4Addr>,
+    /// The authority could not serve the request, rather than a negative answer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unavailable: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ControlRequest {
+    #[serde(default)]
+    pub(crate) ping: bool,
+    pub(crate) resolve: Option<NameQuery>,
 }
 
 /// What one side offers for a flow beyond the plain relay: encryption (a

@@ -117,6 +117,9 @@ type Reply struct {
 	// RoomName is the display name of the private room, empty in the public room.
 	RoomName string `json:"room_name,omitempty"`
 
+	// NameLookup is the supported room-local query format. Zero means absent.
+	NameLookup uint8 `json:"name_lookup,omitempty"`
+
 	// Secure reports that both sides offered a fingerprint, so the flow is
 	// end-to-end encrypted. Fingerprint is then the other side's.
 	Secure      bool   `json:"secure,omitempty"`
@@ -241,9 +244,29 @@ type Incoming struct {
 // Event is any frame the hub pushes on a control stream after the Reply.
 // Exactly one field is set.
 type Event struct {
-	Peers    *[]Peer   `json:"peers,omitempty"`
-	Incoming *Incoming `json:"incoming,omitempty"`
-	Pong     bool      `json:"pong,omitempty"`
+	Peers    *[]Peer     `json:"peers,omitempty"`
+	Incoming *Incoming   `json:"incoming,omitempty"`
+	Pong     bool        `json:"pong,omitempty"`
+	Resolved *NameAnswer `json:"resolved,omitempty"`
+}
+
+// ControlRequest carries either a keep-alive or a negotiated name lookup.
+type ControlRequest struct {
+	Ping    bool       `json:"ping,omitempty"`
+	Resolve *NameQuery `json:"resolve,omitempty"`
+}
+
+// NameQuery asks the hub for a single lowercase ASCII DNS label in this room.
+type NameQuery struct {
+	ID    uint32 `json:"id"`
+	Label string `json:"label"`
+}
+
+// NameAnswer carries the owner's live address, or no address for a negative result.
+type NameAnswer struct {
+	ID          uint32 `json:"id"`
+	IP          string `json:"ip,omitempty"`
+	Unavailable bool   `json:"unavailable,omitempty"`
 }
 
 // Ping is sent by the agent on a control stream to keep NAT state alive.

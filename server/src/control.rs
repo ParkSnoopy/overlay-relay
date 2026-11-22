@@ -1,10 +1,10 @@
-//! Control streams: registration, peer snapshots, incoming requests and keep-alive.
+//! Control streams: registration, peer snapshots, incoming flows, DNS and keep-alive.
 //!
 //! A control stream is served by two halves that run together: a writer that
 //! sends queued events and the freshest snapshot, and a reader that answers
-//! pings. Either half ending cancels the other.
+//! pings and name queries. Either half ending cancels the other.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use tokio::{
     net::{
@@ -21,8 +21,19 @@ use tracing::debug;
 use crate::{
     frame::{read_frame, send_frame},
     hub::{Shared, persist, unix_now},
-    protocol::{ERR_INVALID_REQUEST, Event, Hello, Ping, Reply, valid_name},
-    state::Requester,
+    names,
+    protocol::{
+        ControlRequest,
+        ERR_INVALID_REQUEST,
+        Event,
+        Hello,
+        NameAnswer,
+        NameQuery,
+        Reply,
+        valid_name,
+    },
+    rooms::{self, Admission},
+    state::{Requester, advertised_name},
     verifier::Verifier,
 };
 
@@ -59,6 +70,17 @@ pub async fn serve(
             .ok();
         return;
     }
+    let advertised = advertised_name(&hello.name, &requester.verifier);
+    shared
+        .names
+        .lock()
+        .await
+        .reserve(
+            names::room_key(&requester.room),
+            &advertised,
+            requester.verifier,
+        )
+        .await;
     let (reader, mut writer) = stream.into_split();
     let (outbound, events) = mpsc::channel(EVENT_QUEUE);
     let close = session.child_token();
@@ -68,7 +90,11 @@ pub async fn serve(
         let Some(name) = state.set_name(&requester.verifier, &hello.name) else {
             return;
         };
+        let Some(ip) = state.address_of(&requester.verifier) else {
+            return;
+        };
         requester.name = name;
+        requester.ip = ip;
         let generation = state.next_serial();
         let handle = ControlHandle {
             room: requester.room.clone(),
@@ -89,6 +115,7 @@ pub async fn serve(
     let mut reply = Reply::registered(&requester.ip.to_string(), &requester.name);
     reply.cidr = shared.config.address_space.to_string();
     reply.room_name.clone_from(&requester.room_name);
+    reply.name_lookup = Some(1);
     if send_frame(&mut writer, &reply).await.is_err() {
         close.cancel();
         shared
@@ -101,7 +128,6 @@ pub async fn serve(
     debug!("overlay control registered");
     persist(shared).await;
     shared.state.lock().await.notify_all();
-    let idle = shared.config.control_idle;
     tokio::join!(
         write_events(
             shared,
@@ -111,7 +137,14 @@ pub async fn serve(
             dirty,
             close.clone()
         ),
-        read_pings(reader, outbound, idle, close.clone()),
+        read_requests(
+            shared,
+            &requester,
+            generation,
+            reader,
+            outbound,
+            close.clone()
+        ),
     );
     {
         let mut state = shared.state.lock().await;
@@ -149,28 +182,76 @@ async fn write_events(
     }
 }
 
-async fn read_pings(
+async fn read_requests(
+    shared: &Shared,
+    requester: &Requester,
+    generation: u64,
     mut reader: OwnedReadHalf,
     outbound: mpsc::Sender<Event>,
-    idle: Duration,
     close: CancellationToken,
 ) {
     loop {
         let frame = select! {
             biased;
             () = close.cancelled() => return,
-            received = timeout(idle, read_frame::<_, Ping>(&mut reader)) => received,
+            received = timeout(shared.config.control_idle, read_frame::<_, ControlRequest>(&mut reader)) => received,
         };
-        if !matches!(frame, Ok(Ok(Ping { ping: true }))) {
-            close.cancel();
-            return;
-        }
-        if matches!(
-            outbound.try_send(Event::Pong(true)),
-            Err(mpsc::error::TrySendError::Full(_))
-        ) {
-            close.cancel();
-            return;
+        let event = match frame {
+            Ok(Ok(ControlRequest {
+                ping: true,
+                resolve: None,
+            })) => Event::Pong(true),
+            Ok(Ok(ControlRequest {
+                ping: false,
+                resolve: Some(query),
+            })) if query.id != 0 => {
+                Event::Resolved(resolve_name(shared, requester, generation, query).await)
+            }
+            _ => break,
+        };
+        if outbound.try_send(event).is_err() {
+            break;
         }
     }
+    close.cancel();
+}
+
+async fn resolve_name(
+    shared: &Shared,
+    requester: &Requester,
+    generation: u64,
+    query: NameQuery,
+) -> NameAnswer {
+    let mut answer = NameAnswer {
+        id: query.id,
+        ip: None,
+        unavailable: false,
+    };
+    if let Some((room, proof)) = requester.room.split_once(':') {
+        match rooms::admit_key(&shared.config.data_dir, room, proof).await {
+            Ok(Admission::Admitted(_)) => (),
+            Ok(_) => return answer,
+            Err(_) => {
+                answer.unavailable = true;
+                return answer;
+            }
+        }
+    }
+    let owner = shared
+        .names
+        .lock()
+        .await
+        .owner(names::room_key(&requester.room), &query.label);
+    match owner {
+        Ok(Some(owner)) => {
+            answer.ip = shared
+                .state
+                .lock()
+                .await
+                .lookup_name(requester, generation, &owner);
+        }
+        Ok(None) => (),
+        Err(_) => answer.unavailable = true,
+    }
+    answer
 }

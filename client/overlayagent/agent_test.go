@@ -45,8 +45,8 @@ func TestDirectRetryBackoffResetsAfterLink(t *testing.T) {
 				return nil, errors.New("test direct signaling failure")
 			}},
 			runCtx: ctx, connected: true,
-			peers:       []overlay.Peer{{ID: id, IP: ip.String()}},
-			directPeers: map[string]bool{id: true},
+			peerSet: map[netip.Addr]string{ip: id},
+			policy:  peerPolicy{directPeers: map[string]bool{id: true}},
 		}
 		a.direct.Store(&directState{})
 		for i, delay := range []time.Duration{10 * time.Second, 30 * time.Second, time.Minute, 10 * time.Minute, 10 * time.Minute} {
@@ -683,10 +683,11 @@ func TestPeerTrafficObservations(t *testing.T) {
 				}
 				left, right := net.Pipe()
 				defer right.Close()
-				conn, err := a.trackFlow(left, ip, id, direct)
-				if err != nil {
-					t.Fatal(err)
-				}
+				conn := &peerFlow{Conn: left, ip: ip, peerID: id, direct: direct}
+				a.mu.Lock()
+				a.trackFlowLocked(conn)
+				a.mu.Unlock()
+				a.emit()
 				defer conn.Close()
 				path, reach := overlay.PathRelay, overlay.ReachabilityRelay
 				if direct {

@@ -10,13 +10,14 @@ The platform supplies `Dial` (one hub stream through the VPN session), `DialLoca
 `Run` sends `Hello{control}` with the public identity, signs the hub's challenge, and tracks the reply, peer snapshots, incoming requests and pongs.
 `Config.Name` optionally advertises this device's name during authenticated registration.
 Empty uses the identity-derived default; nonempty names have at most 128 Unicode characters, no control characters and no surrounding whitespace.
-The name is session metadata, not an identity or address change.
+The display name does not change the device's identity or address. A capable hub uses it to claim a room-local `.snoo` name and keeps prior claims across renames.
 The caller must route each hub connection through an authenticated VPN. The challenge alone does not authenticate the hub or prevent active interception.
 It pings every 30 seconds, treats 75 seconds without any frame as a dead hub, and reconnects with capped exponential backoff from 1 to 30 seconds while its context lives.
 Every change calls `OnState` with `Available`, `Broadcasting` and `Connected`; a rejected account carries the hub's short reason.
 Opt-in public fallback applies only to missing-room or incorrect-password refusals, never unavailable room storage.
 Connected fallback state retains the private-room refusal reason and explicitly identifies public membership.
 Each control reconnect retries the configured private room before considering public fallback again.
+`Agent.LookupName` and `Router.LookupName` ask the hub for one lowercase ASCII label without `.snoo`. A zero address with no error means the owner is missing or offline in the room. A disconnected or older hub returns an error. Do not answer `.snoo` from the roster, cache its addresses or forward the zone to another resolver. See [room-local DNS](server.md#room-local-dns).
 `Ready` delivers the overlay address once at the first registration and `IP` returns the latest address.
 `Run` returns after every goroutine it started has stopped.
 
