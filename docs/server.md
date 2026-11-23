@@ -2,7 +2,7 @@
 
 Base: [`server/`](../server/README.md) (Go binary `overlay-hub`).
 Client counterpart: [client](client.md).
-The snoo-box server manager owns the container lifecycle and selected address range; the hub needs no operator-maintained peer table.
+The snoo-box server manager owns the container lifecycle and selected CIDR. The hub owns peer addresses, reservations, and names.
 The [wire contract](../client/overlay/overlay.go) owns frames, datagram records, the address space and identity messages.
 
 The hub is an authenticated rendezvous and byte relay between the VPN clients of one managed server that chose to broadcast.
@@ -13,7 +13,7 @@ The hub enrolls nobody: each client generates its own P-384 key pair, and a clie
 
 - `OVERLAY_ALLOWED_HOST` is an optional comma-separated list of engine container names. Without it the hub admits every loopback, private or link-local source.
 - `OVERLAY_CIDR` selects a canonical IPv4 `/8` through `/30` subnet wholly within RFC 1918 private space (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), default `10.77.0.0/16`. Clients must configure the same range. Public ranges and supernets crossing private block boundaries are rejected. The administrator owns routing conflicts.
-- `/var/lib/overlay-relay` holds `ips.json`, `rooms.json`, `dhcp.json`, and `names.json`.
+- `/var/lib/overlay-relay` holds `ips.json`, `rooms.json`, `dhcp.json`, `peers.json`, and `names.json`.
 
 ## Admission
 
@@ -25,14 +25,24 @@ Source admission with the allowed-host list still closes any source that is not 
 
 ## Identities and addresses
 
-A peer is a public key. The first valid signature creates the peer and assigns the lowest free usable address in the selected range. Reserve the network and broadcast addresses. Changing the configured range reassigns addresses.
+A peer is a public key. Authentication assigns a reserved address or the lowest free address across the entire usable selected CIDR. The network and broadcast addresses are excluded. All permanent reservations are skipped for dynamic assignment, including reservations for offline peers. Changing the configured range can reassign dynamic addresses.
 Peers are written atomically with mode `0600` to `ips.json` keyed by verifier, together with the time they were last seen.
 The default display name of a peer is `peer-` and the first 8 hex digits of its verifier.
 A control Hello may supply `name`, applied only after proof of possession of that peer's key.
 The hub validates a maximum of 128 Unicode characters with no control characters or surrounding whitespace, updates only that authenticated peer and publishes fresh peer snapshots.
-`ips.json` retains the last advertised display name for DHCP. An empty or absent name restores the default without changing the address.
+`ips.json` retains the last client-advertised display name, even while an operator override supplies the effective name. An empty or absent advertised name restores the default when there is no override.
 The table holds at most 4096 peers, bounded also by the subnet's usable addresses.
-When either limit is exhausted, a new key reclaims the oldest peer with no control stream or flow; if every peer is in use it receives `unauthorized`.
+When either limit is exhausted, a new key can reclaim the oldest idle, unreserved assignment; a configured idle lease also protects unexpired assignments. A live control stream or flow protects its address. If no entry is reclaimable the new key receives `unauthorized`.
+
+## Peer settings and rollback
+
+- `peers list` reports `{"devices":{"<device-id>":{"name":"","name_override":"","ip":"","binding":""}}}`. These fields are always strings. `name` is the operator override or the last client name, and is empty when neither is known. `ip` is empty without an effective assignment or reservation. `binding` is empty for dynamic addressing.
+- The list includes current and offline assignments, devices with a reservation or saved peer edit, and identities recorded only in the DNS ledger after address reclamation. Room-scoped DNS labels prove ownership but do not supply a display name. A device absent from all those stores is not known to the hub.
+- `peers set` takes `device_id`, `name`, and `binding` as required strings in one JSON object, up to 4 KiB. It rejects unknown or repeated fields, unknown device IDs, names over 128 Unicode characters or with control characters or surrounding whitespace, and noncanonical or unusable IPv4 bindings. An address assigned or reserved to another peer is unavailable.
+- Stop the hub and serialize writes. Both changes are saved together in the private `peers.json` file by an atomic replacement. Restart to make them effective. Invalid or unreadable peer settings prevent startup. The CLI also refuses to return or edit a partial registry if the DNS ledger is corrupt.
+- The legacy `dhcp` commands still read and write the historical `dhcp.json` format. Legacy lease durations and unshadowed `device_id` and `public_key` reservations remain effective. The current hub does not allocate from the legacy `start` and `end` pool. A managed device's `binding`, even when empty, wins over its legacy reservation. Clear incompatible effective reservations before changing the CIDR.
+- For an operation rollback, snapshot the complete data directory while stopped. The CLI changes only `peers.json`, but restart and connections can update `ips.json` and `names.json`. Restore the snapshot, including the prior presence or absence of files, before restarting the previous configuration.
+- An older binary ignores `peers.json` and follows its own legacy DHCP policy. Its readers still accept `ips.json`, `dhcp.json`, and `names.json` without a schema migration. Keep `peers.json` for a later re-upgrade. Durable DNS ownership survives both directions.
 
 ## Room-local DNS
 
@@ -45,7 +55,8 @@ When either limit is exhausted, a new key reclaims the oldest peer with no contr
 - The first authenticated registration for a label in a room binds that label
   to the device's full verifier. Renaming can add a label but never releases
   an existing binding. Address reclamation does not remove name bindings.
-- A client may propose a canonical `domain` (e.g. `desk-pc.on.snoo`). The hub
+- Unless an operator override supplies the name, a client may propose a
+  canonical `domain` (e.g. `desk-pc.on.snoo`). The hub
   returns the assigned domain in the control reply and advertises it in the
   room roster. A second device requesting `desk-pc` gets `desk-pc-2` if free;
   already claimed suffixes are skipped. Reconnecting with the same device ID

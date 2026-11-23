@@ -2,7 +2,7 @@ package tests
 
 import (
 	"context"
-	"net/netip"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -17,7 +17,7 @@ import (
 func TestHubStorageUpgradeAndRollback(t *testing.T) {
 	reference := os.Getenv("OVERLAY_TEST_STORAGE_REFERENCE")
 	if reference == "" {
-		t.Skip("set OVERLAY_TEST_STORAGE_REFERENCE to the last Rust hub with room-local names")
+		t.Skip("set OVERLAY_TEST_STORAGE_REFERENCE to a prior hub with room-local names")
 	}
 	current, dir := buildHub(t), t.TempDir()
 	const roomID = "migration"
@@ -34,16 +34,22 @@ func TestHubStorageUpgradeAndRollback(t *testing.T) {
 		}
 	}
 	admin(reference, "", "rooms", "create", roomID, "Migration", proof, "false")
-	admin(reference, `{"start":"10.77.0.40","end":"10.77.0.42","lease_seconds":600,"bindings":[]}`, "dhcp", "set")
+	admin(reference, `{"start":"10.77.0.40","end":"10.77.0.40","lease_seconds":600,"bindings":[]}`, "dhcp", "set")
 	identity := newAccount(t, "migration owner")
+	id, _ := managementIdentity(t, identity)
 	for _, step := range []struct {
-		name, binary, advertise string
-		labels                  []string
+		name, binary, advertise, effective, ip string
+		labels                                 []string
 	}{
-		{"rust", reference, "before", []string{"before"}},
-		{"upgrade", current, "after", []string{"before", "after"}},
-		{"rollback", reference, "restored", []string{"before", "after", "restored"}},
+		{"legacy", reference, "before", "before", "10.77.0.40", []string{"before"}},
+		{"upgrade", current, "client", "after", "10.77.0.41", []string{"before", "after"}},
+		{"rollback", reference, "restored", "restored", "10.77.0.40", []string{"before", "after", "restored"}},
+		{"re-upgrade", current, "client", "after", "10.77.0.41", []string{"before", "after", "restored"}},
 	} {
+		if step.name == "upgrade" {
+			edit := fmt.Sprintf(`{"device_id":%q,"name":"after","binding":"10.77.0.41"}`, id)
+			admin(current, edit, "peers", "set")
+		}
 		if !t.Run(step.name, func(t *testing.T) {
 			hub := startHub(t, step.binary, "OVERLAY_DATA_DIR="+dir)
 			states := make(chan overlay.State, 16)
@@ -54,9 +60,12 @@ func TestHubStorageUpgradeAndRollback(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- peer.Run(ctx) }()
 			defer func() { cancel(); <-done }()
-			waitFor(t, states, func(s overlay.State) bool { return s.Connected })
+			state := waitFor(t, states, func(s overlay.State) bool { return s.Connected })
+			if state.Name != step.effective || state.IP != step.ip {
+				t.Fatalf("wrong peer state after %s: %+v", step.name, state)
+			}
 			for _, label := range step.labels {
-				if ip, err := peer.LookupName(ctx, label); err != nil || ip != netip.MustParseAddr("10.77.0.40") {
+				if ip, err := peer.LookupName(ctx, label); err != nil || ip.String() != step.ip {
 					t.Fatalf("lookup %q after %s: %s, %v", label, step.name, ip, err)
 				}
 			}

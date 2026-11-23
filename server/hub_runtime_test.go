@@ -430,15 +430,25 @@ func TestHubPendingAcceptDoesNotFollowReassignedAddress(t *testing.T) {
 	if !a.register(t, h).OK || !b.register(t, h).OK || !c.register(t, h).OK {
 		t.Fatal("registration failed")
 	}
+	// The legacy pool no longer constrains capacity. Fill the rest of the
+	// subnet with active controls so address reuse is actually necessary.
+	var live []string
+	for range 3 {
+		peer := newHubTestPeer(t, overlay.Version, "filler")
+		if !peer.register(t, h).OK {
+			t.Fatal("registration outside the old pool failed")
+		}
+		live = append(live, peer.id)
+	}
 	_ = h.open(t, a, overlay.ProtoTCP, b.ip, 80)
 	offer := hubTestIncoming(t, b)
 	hubTestOK(t, a.control.Close())
-	hubTestPeers(t, b, c.id)
+	hubTestPeers(t, b, append([]string{c.id}, live...)...)
 	if reply := other.register(t, h); !reply.OK || reply.IP != offer.Src {
 		t.Fatalf("expected source lease reuse: %+v", reply)
 	}
 	hubTestOK(t, c.control.Close())
-	hubTestPeers(t, b, other.id)
+	hubTestPeers(t, b, append([]string{other.id}, live...)...)
 	if reply := a.register(t, h); !reply.OK || reply.IP == offer.Src {
 		t.Fatalf("expected new source lease: %+v", reply)
 	}

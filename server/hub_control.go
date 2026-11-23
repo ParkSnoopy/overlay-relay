@@ -43,7 +43,11 @@ func requestedHubLabel(hello *overlay.Hello) string {
 	if hello.Domain != "" {
 		return overlay.DomainLabel(hello.Domain)
 	}
-	label := overlay.DomainLabel(overlay.DeviceDomain(hello.Name))
+	return hubDisplayLabel(hello.Name)
+}
+
+func hubDisplayLabel(name string) string {
+	label := overlay.DomainLabel(overlay.DeviceDomain(name))
 	if label == "" {
 		return "device"
 	}
@@ -60,12 +64,16 @@ func (h *hubRuntime) registerControl(ctx context.Context, id string, ip netip.Ad
 	if label == "" {
 		return nil
 	}
-	advertised := hello.Name
-	if advertised == "" {
-		advertised = "peer-" + id[:8]
-	}
 	if err := h.store.setName(id, hello.Name); err != nil {
 		return nil
+	}
+	name := hello.Name
+	if override := h.store.peerEdits[id].Name; override != "" {
+		name = override
+		label = hubDisplayLabel(override)
+	}
+	if name == "" {
+		name = "peer-" + id[:8]
 	}
 	var domain string
 	if canonical := h.store.reserveName(room.capability, label, id); canonical != "" {
@@ -73,7 +81,7 @@ func (h *hubRuntime) registerControl(ctx context.Context, id string, ip netip.Ad
 	}
 	ctx, stop := context.WithCancel(ctx)
 	control := &hubControl{
-		id: id, ip: ip, name: advertised, domain: domain, room: room, version: hello.Version,
+		id: id, ip: ip, name: name, domain: domain, room: room, version: hello.Version,
 		peerPages: hello.PeerPages,
 		ctx:       ctx, stop: stop, events: make(chan any, hubControlQueue), dirty: make(chan struct{}, 1),
 	}

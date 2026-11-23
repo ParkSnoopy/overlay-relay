@@ -52,10 +52,14 @@ var roomPositions = []cliPosition{
 }
 
 var hubCommands = hubCommand{description: "Serve the overlay hub, or administer its persisted configuration", children: []hubCommand{
-	{name: "dhcp", description: "Manage address allocation; restart the hub after saving changes", children: []hubCommand{
+	{name: "dhcp", description: "Manage legacy lease and binding policy; restart after saving", children: []hubCommand{
 		{name: "show", description: "Print the validated DHCP policy as JSON"},
 		{name: "editor", description: "Print editable policy and known devices, using only device identifiers"},
 		{name: "set", description: "Read and validate a complete JSON policy from standard input, then save atomically"},
+	}},
+	{name: "peers", description: "Manage known devices; stop the hub before saving and restart to apply", children: []hubCommand{
+		{name: "list", description: "Print known devices, effective names, and address bindings as JSON"},
+		{name: "set", description: "Set one device's name override and address binding from standard input as JSON"},
 	}},
 	{name: "rooms", description: "Manage rooms without restarting the hub", children: []hubCommand{
 		{name: "list", description: "Print public and private room policies as JSON"},
@@ -232,6 +236,18 @@ func runHubAdmin(options *hubCLIOptions, stdin io.Reader, stdout io.Writer) erro
 			return fmt.Errorf("overlay i/o failed: %w", err)
 		}
 		return saveDHCP(dir, space, raw)
+	case "peers list":
+		result, err := listPeers(dir, space)
+		if err != nil {
+			return err
+		}
+		return writeStoreJSON(stdout, result)
+	case "peers set":
+		raw, err := io.ReadAll(io.LimitReader(stdin, maxPeerEditBytes+1))
+		if err != nil {
+			return fmt.Errorf("overlay i/o failed: %w", err)
+		}
+		return setPeer(dir, space, raw)
 	case "rooms list":
 		listing, err := listRooms(dir)
 		if err != nil {

@@ -159,6 +159,17 @@ func TestHubDHCPReservesOfflineAddressOutsidePool(t *testing.T) {
 	id := policy.Bindings[0].verifier()
 	checkAssignment(t, s, storeTestID(1), 100, nil, "10.77.0.1")
 	checkAssignment(t, s, id, 100, nil, "10.77.0.5")
-	checkAssignment(t, s, storeTestID(2), 160, nil, "10.77.0.1")
+	checkAssignment(t, s, storeTestID(2), 101, nil, "10.77.0.2")
+	checkAssignment(t, s, storeTestID(3), 160, nil, "10.77.0.1")
 	checkAssignment(t, s, id, 160, nil, "10.77.0.5")
+}
+
+func TestHubLegacyPoolDoesNotBlockCIDRChange(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	space := netip.MustParsePrefix("172.20.0.0/30")
+	storeFixture(t, dir, dhcpFile, `{"start":"10.77.0.10","end":"10.77.0.20","lease_seconds":60,"bindings":[]}`)
+	s := testStore(t, dir, space)
+	checkAssignment(t, s, storeTestID(1), 10, nil, "172.20.0.1")
+	checkAssignment(t, s, storeTestID(2), 10, nil, "172.20.0.2")
 }

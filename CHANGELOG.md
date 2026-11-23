@@ -9,3 +9,5 @@
 - Advertise the hub-assigned domain to the owner and its peers. Number colliding names without changing device IDs or existing DNS ownership.
 - Preserve hub-owned name bindings across reconnects, restarts, and address reuse.
 - Withdraw name answers when the device is no longer online in the same room.
+- Manage known devices with `peers list` and `peers set`.
+- Allocate dynamic addresses across the full usable hub CIDR.

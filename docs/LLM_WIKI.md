@@ -57,7 +57,7 @@ Every hub stream must traverse an authenticated VPN. The challenge authenticates
 The hub keeps every key it has verified in `ips.json` in its data directory: verifier hex mapped to an object with the peer's `ip` and `seen` (Unix seconds of its last authentication or disconnect). No operator writes this file. The hub rewrites it atomically with mode `0600`.
 
 - At most `4096` peers, also bounded by subnet capacity. When either limit is exhausted, a new key takes over the address of the peer with the oldest `seen` that has no control stream and no flow. When every peer is in use, the new key is refused with `unauthorized`.
-- The default display name of a peer is `peer-` followed by the first 8 hex digits of its verifier. An authenticated control Hello may advertise its own name, up to 128 Unicode characters without control characters or surrounding whitespace. Empty or absent restores the default. `ips.json` retains the display name for DHCP; durable room-local label ownership is separate.
+- An authenticated control Hello may advertise its own name, up to 128 Unicode characters without control characters or surrounding whitespace. `ips.json` retains that name. An operator override from `peers.json` takes precedence for display and the requested DNS label. The default display name is `peer-` followed by the first 8 hex digits of the verifier. Durable name ownership is separate.
 - A file written by an older hub (verifier hex mapped to a bare address) loads, and each entry counts as seen at load time. A corrupt file stops the hub rather than renumbering peers.
 
 ## 5. Addresses
@@ -65,8 +65,8 @@ The hub keeps every key it has verified in `ips.json` in its data directory: ver
 - Overlay CIDR: canonical IPv4 `/8` through `/30` subnet wholly within RFC 1918 private space (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), default `10.77.0.0/16`. Configure `OVERLAY_CIDR` on the hub and the matching client range. Public ranges and supernets crossing private block boundaries are rejected.
 - Reserve the selected network and broadcast addresses. See `overlay.ParseCIDR` and `overlay.AssignableIn`.
 - The hub assigns each peer an address when its key first proves possession. Assignments persist in `ips.json` in the data directory (JSON object: verifier hex to `{ip, seen}`).
-- A known peer keeps its address. A new peer receives the lowest free assignable address. Changing the configured range reassigns addresses.
-- A peer loses its address only by eviction from a full table (section 4).
+- A known peer normally keeps its address. A new peer receives the lowest free assignable address in the full usable CIDR, skipping every reservation. The legacy DHCP pool endpoints are not used for allocation. See [peer settings](server.md#peer-settings-and-rollback).
+- Binding changes, a CIDR change, an expired idle lease, or capacity eviction can change a peer's address without changing identity or DNS ownership.
 - A client learns its own address from the registration reply. Do not compute it.
 
 ## 6. Transport and framing
@@ -443,7 +443,7 @@ OVERLAY_LISTEN_ADDRESS=127.0.0.1:6697 \
 | Variable | Meaning | Required |
 |---|---|---|
 | `OVERLAY_ALLOWED_HOST` | Comma-separated host names whose addresses may connect. Empty entries are dropped. | No; unset admits every private-network source |
-| `OVERLAY_DATA_DIR` | Writable directory for identities, rooms, DHCP and durable label ownership. | No; default `/var/lib/overlay-relay` |
+| `OVERLAY_DATA_DIR` | Writable directory for identities, peer settings, rooms, and durable label ownership. | No; default `/var/lib/overlay-relay` |
 | `OVERLAY_LISTEN_ADDRESS` | Bind address. Default `0.0.0.0:6697`. | No |
 | `OVERLAY_CIDR` | Canonical private IPv4 subnet (section 5). | No; default `10.77.0.0/16` |
 

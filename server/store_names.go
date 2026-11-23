@@ -49,12 +49,18 @@ type nameStore struct {
 }
 
 func loadNames(dir string) *nameStore {
-	n := &nameStore{rooms: make(map[string]map[string]string)}
-	if err := n.load(dir); err != nil {
+	n, err := readNames(dir)
+	if err != nil {
 		log.Printf("overlay DNS is disabled until its name store is repaired and the hub restarts: %v", err)
 		n.failed = true
 	}
 	return n
+}
+
+func readNames(dir string) (*nameStore, error) {
+	n := &nameStore{rooms: make(map[string]map[string]string)}
+	err := n.load(dir)
+	return n, err
 }
 
 func (n *nameStore) load(dir string) error {

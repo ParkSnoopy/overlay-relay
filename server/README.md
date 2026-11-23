@@ -35,7 +35,7 @@ Every variable below is optional.
 | Variable | Meaning | Default |
 |---|---|---|
 | `OVERLAY_ALLOWED_HOST` | Comma-separated host names. Only connections from an address one of these names currently resolves to are admitted. Empty entries are ignored. | Unset: every loopback, private or link-local source is admitted. |
-| `OVERLAY_DATA_DIR` | Directory for identities, room policy, DHCP policy, and durable name bindings. Must be writable. | `/var/lib/overlay-relay` |
+| `OVERLAY_DATA_DIR` | Writable directory for identities, peer settings, rooms, and durable name bindings. | `/var/lib/overlay-relay` |
 | `OVERLAY_LISTEN_ADDRESS` | Address to bind. | `0.0.0.0:6697` |
 | `OVERLAY_CIDR` | Canonical RFC 1918 subnet with prefix length `/8` through `/30`. | `10.77.0.0/16` |
 
@@ -46,17 +46,27 @@ Global options are `--data-dir`, `--allowed-host`, `--listen-address`, and `--ci
 Set the same data directory and CIDR as the running hub for administrative commands.
 Put `--cidr` before the subcommand; `--data-dir` is accepted before or after it.
 
-## DHCP policy
+## Peer management
 
-`overlay-hub dhcp show` prints the validated policy as one JSON object. Pipe a complete policy to `overlay-hub dhcp set`, then restart the hub to activate it:
+`overlay-hub peers list` returns a JSON object keyed by known device IDs under `devices`.
+Each entry has four strings: `name`, `name_override`, `ip`, and `binding`.
+Offline devices are included if the hub still knows their identity.
+An identity known only from the DNS ledger has an empty name and address.
 
-```json
-{"start":"10.77.0.10","end":"10.77.0.200","lease_seconds":3600,"bindings":[]}
+Stop the hub before editing and serialize administrative writes.
+Send exactly one JSON object to `overlay-hub peers set`, using an ID from `peers list`:
+
+```sh
+printf '{"device_id":"%s","name":"Office laptop","binding":"10.77.0.42"}\n' "$device_id" |
+  overlay-hub peers set
 ```
 
-The dynamic endpoints are inclusive usable addresses in the hub's actual subnet. `lease_seconds` is zero (legacy capacity-based idle reclamation) or 60–31536000; unexpired leases are not evicted under pool pressure. Active controls/flows and permanent reservations are never reclaimed. The app uses `overlay-hub dhcp editor` to obtain the policy and known device choices. New bindings use the hub's `device_id` and a usable `ip` inside or outside the dynamic pool. The hub still loads legacy `public_key` bindings and presents them to the app as device IDs. The app never requires raw key entry. Dynamic allocation skips every reserved address, including offline reservations. Policy changes discard conflicting saved assignments on startup.
+Use `"name":""` to clear the override, or `"binding":""` to use dynamic addressing.
+Restart the hub to apply the change.
+See [peer settings and rollback](../docs/server.md#peer-settings-and-rollback).
 
-The hub validates subnet bounds, ordering, lease limits, canonical device IDs or legacy public points, and unique identities and addresses before any write. A new device ID must be in the hub's assignment table or already reserved. The hub rejects unknown fields, malformed JSON, documents above 64 KiB and more than 256 bindings. Custom policy is atomically saved in `dhcp.json` with private permissions. Saving the full usable range with a zero lease and no bindings clears the override, so defaults follow the subnet. Before changing to a subnet that excludes the current pool or reservations, restore and apply defaults on the old subnet, then change the subnet. Corrupt or unreadable policy prevents startup rather than falling back to a permissive default. The client cannot override this policy. There are no server port bans; clients may independently filter their own incoming relayed TCP/UDP flows.
+`overlay-hub dhcp show`, `dhcp editor`, and `dhcp set` are retained for legacy policy files.
+The current hub uses the full usable CIDR regardless of legacy `start` and `end` fields.
 
 ## Room relay policy
 
@@ -80,15 +90,15 @@ The hub rejects new TCP/UDP relay flows when disabled and closes existing relay 
 There is no account table and no enrollment. A client generates its own P-384 key pair and keeps the private key. On every connection the hub sends a fresh challenge and the client signs it with that key.
 
 - A valid signature makes the hub treat the connection as the identity of that public key. The same key is always the same peer, and a different key is a different peer.
-- The first valid signature of a new key assigns the lowest free address in `10.77.0.0/16`. The hub remembers it in `ips.json` with the time the key was last seen, so the address survives restarts and reconnects.
-- A peer's display name is `peer-` followed by the first 8 hex digits of its key digest.
+- The first valid signature of a new key assigns the lowest free usable address in the configured CIDR, skipping all reserved addresses. The hub remembers it in `ips.json` with the time the key was last seen, so the address survives restarts and reconnects.
+- A peer's display name is the operator override or the client's advertised name. If neither is set, broadcasting uses `peer-` followed by the first 8 hex digits of its key digest.
 - A key proves only possession. Whoever can reach the hub through the VPN can join with a new key, so keep the hub reachable only through your VPN.
 - The hub keeps at most 4096 identities. When the table is full, a new key takes the address of the identity seen longest ago that has no control stream and no flow. When all 4096 are in use, new keys are refused.
 - A client that loses its private key becomes a new peer with a new address.
 
 ## Room-local names
 
-An authenticated control registration can claim a normalized device label for its room.
+An authenticated control registration can claim a normalized device label for its room using its operator-assigned name or the client's proposal.
 The hub persists the first owner's identity in `names.json`, not an IP address.
 On collision it assigns a numbered name and advertises the effective domain to the owner and room peers.
 It returns the owner's current IPv4 only while the owner and requester have live controls in the same admitted room.

@@ -67,7 +67,24 @@ func defaultDHCP(space netip.Prefix) dhcpPolicy {
 }
 
 func (p *dhcpPolicy) validate(space netip.Prefix) error {
-	if !overlay.AssignableIn(space, p.Start) || !overlay.AssignableIn(space, p.End) || p.Start.Compare(p.End) > 0 {
+	if err := p.validateLegacyShape(); err != nil {
+		return err
+	}
+	if !overlay.AssignableIn(space, p.Start) || !overlay.AssignableIn(space, p.End) {
+		return errors.New("DHCP pool must be an ordered usable range within the hub subnet")
+	}
+	for _, binding := range p.Bindings {
+		if !overlay.AssignableIn(space, binding.IP) {
+			return errors.New("DHCP bindings must have unique device identities and unique usable addresses")
+		}
+	}
+	return nil
+}
+
+// Legacy endpoints are preserved for the old CLI and rollback. They are not
+// address authority and may refer to a previously configured subnet.
+func (p *dhcpPolicy) validateLegacyShape() error {
+	if !validLegacyPool(p.Start, p.End) {
 		return errors.New("DHCP pool must be an ordered usable range within the hub subnet")
 	}
 	if p.LeaseSeconds > 31_536_000 || (p.LeaseSeconds != 0 && p.LeaseSeconds < 60) {
@@ -83,7 +100,7 @@ func (p *dhcpPolicy) validate(space netip.Prefix) error {
 		if id == "" {
 			return errors.New("DHCP binding requires one valid device identity")
 		}
-		if !overlay.AssignableIn(space, binding.IP) || ids[id] || ips[binding.IP] {
+		if !binding.IP.Is4() || !binding.IP.IsPrivate() || ids[id] || ips[binding.IP] {
 			return errors.New("DHCP bindings must have unique device identities and unique usable addresses")
 		}
 		ids[id], ips[binding.IP] = true, true
@@ -91,7 +108,22 @@ func (p *dhcpPolicy) validate(space netip.Prefix) error {
 	return nil
 }
 
-func decodeDHCP(raw []byte, space netip.Prefix) (dhcpPolicy, error) {
+func validLegacyPool(start, end netip.Addr) bool {
+	if !start.Is4() || !start.IsPrivate() || !end.Is4() || start.Compare(end) > 0 {
+		return false
+	}
+	bits := 16
+	switch start.As4()[0] {
+	case 10:
+		bits = 8
+	case 172:
+		bits = 12
+	}
+	block := netip.PrefixFrom(start, bits).Masked()
+	return overlay.AssignableIn(block, start) && overlay.AssignableIn(block, end)
+}
+
+func decodeDHCP(raw []byte) (dhcpPolicy, error) {
 	var policy dhcpPolicy
 	if len(raw) > maxDHCPBytes {
 		return policy, errors.New("DHCP policy is too large")
@@ -100,8 +132,7 @@ func decodeDHCP(raw []byte, space netip.Prefix) (dhcpPolicy, error) {
 		requiredField("lease_seconds", &policy.LeaseSeconds), requiredField("bindings", &policy.Bindings)); err != nil {
 		return policy, fmt.Errorf("overlay json is invalid: %w", err)
 	}
-	err := policy.validate(space)
-	return policy, err
+	return policy, nil
 }
 
 func loadDHCP(dir string, space netip.Prefix) (dhcpPolicy, error) {
@@ -112,7 +143,12 @@ func loadDHCP(dir string, space netip.Prefix) (dhcpPolicy, error) {
 	if raw == nil {
 		return defaultDHCP(space), nil
 	}
-	return decodeDHCP(raw, space)
+	policy, err := decodeDHCP(raw)
+	if err != nil {
+		return dhcpPolicy{}, err
+	}
+	err = policy.validateLegacyShape()
+	return policy, err
 }
 
 type dhcpDevice struct {
@@ -148,8 +184,18 @@ func editDHCP(dir string, space netip.Prefix) (dhcpEditor, error) {
 }
 
 func saveDHCP(dir string, space netip.Prefix, raw []byte) error {
-	policy, err := decodeDHCP(raw, space)
+	policy, err := decodeDHCP(raw)
 	if err != nil {
+		return err
+	}
+	if err := policy.validate(space); err != nil {
+		return err
+	}
+	edits, err := loadPeerEdits(dir)
+	if err != nil {
+		return err
+	}
+	if _, _, err := effectiveReservations(space, policy.Bindings, edits); err != nil {
 		return err
 	}
 	path := filepath.Join(dir, dhcpFile)

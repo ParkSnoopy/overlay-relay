@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	assignmentsFile = "ips.json"
-	maxAssignments  = 4096
-	seenGranularity = 3600
+	assignmentsFile    = "ips.json"
+	maxAssignmentsFile = 4 << 20
+	maxAssignments     = 4096
+	seenGranularity    = 3600
 )
 
 var (
@@ -39,7 +40,10 @@ type hubStore struct {
 	dir string
 
 	mu           sync.Mutex
-	dhcp         dhcpPolicy
+	firstIP      netip.Addr
+	lastIP       netip.Addr
+	leaseSeconds uint64
+	peerEdits    map[string]peerEdit
 	assignments  map[string]assignment
 	byIP         map[netip.Addr]string
 	reservations map[string]netip.Addr
@@ -50,26 +54,48 @@ type hubStore struct {
 }
 
 func openHubStore(dir string, space netip.Prefix) (*hubStore, error) {
-	if _, err := parseHubCIDR(space.String()); err != nil {
+	s, _, err := readHubStore(dir, space)
+	if err != nil {
 		return nil, err
+	}
+	s.names = loadNames(dir)
+	s.persistAssignments()
+	return s, nil
+}
+
+// readHubStore builds the same effective address state for startup and CLI
+// readback, without touching disk or loading the separate DNS ledger.
+func readHubStore(dir string, space netip.Prefix) (*hubStore, map[string]assignment, error) {
+	if _, err := parseHubCIDR(space.String()); err != nil {
+		return nil, nil, err
 	}
 	records, err := loadAssignments(dir, uint64(max(0, time.Now().Unix())))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	policy, err := loadDHCP(dir, space)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	edits, err := loadPeerEdits(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	reservations, reservedIPs, err := effectiveReservations(space, policy.Bindings, edits)
+	if err != nil {
+		return nil, nil, err
+	}
+	firstIP, lastIP := hostBounds(space)
 	s := &hubStore{
-		dir: dir, dhcp: policy, names: loadNames(dir),
+		dir: dir, firstIP: firstIP, lastIP: lastIP, leaseSeconds: policy.LeaseSeconds, peerEdits: edits,
 		assignments: make(map[string]assignment), byIP: make(map[netip.Addr]string),
-		reservations: make(map[string]netip.Addr), reservedIPs: make(map[netip.Addr]bool),
+		reservations: reservations, reservedIPs: reservedIPs,
 	}
-	for _, binding := range policy.Bindings {
-		s.reservations[binding.verifier()] = binding.IP
-		s.reservedIPs[binding.IP] = true
-	}
+	s.reconcileAssignments(space, records)
+	return s, records, nil
+}
+
+func (s *hubStore) reconcileAssignments(space netip.Prefix, records map[string]assignment) {
 	ids := slices.Collect(maps.Keys(records))
 	// Prefer reservations and then the most recently seen device when repairing
 	// duplicate addresses or trimming a hand-edited, over-capacity table.
@@ -93,7 +119,7 @@ func openHubStore(dir string, space netip.Prefix) (*hubStore, error) {
 		oldIP := record.IP
 		if reserved := s.reservations[id]; reserved.IsValid() {
 			record.IP = reserved
-		} else if record.IP.Compare(policy.Start) < 0 || record.IP.Compare(policy.End) > 0 || s.reservedIPs[record.IP] {
+		} else if s.reservedIPs[record.IP] {
 			s.dirty = true
 			continue
 		}
@@ -105,17 +131,15 @@ func openHubStore(dir string, space netip.Prefix) (*hubStore, error) {
 		s.assignments[id] = record
 		s.byIP[record.IP] = id
 	}
-	s.persistAssignments()
-	return s, nil
 }
 
 func loadAssignments(dir string, now uint64) (map[string]assignment, error) {
-	data, err := readStoreFile(dir, assignmentsFile, 0)
+	data, err := readStoreFile(dir, assignmentsFile, maxAssignmentsFile)
 	if err != nil {
 		return nil, err
 	}
 	var stored map[string]json.RawMessage
-	if data != nil && unmarshalStoreJSON(data, &stored) != nil {
+	if len(data) > maxAssignmentsFile || (data != nil && unmarshalStoreJSON(data, &stored) != nil) {
 		return nil, errCorruptAssignments
 	}
 	records := make(map[string]assignment)
@@ -159,7 +183,7 @@ func (s *hubStore) identify(id string, now uint64, busy func(string) bool) (neti
 	defer s.mu.Unlock()
 	defer s.persistAssignments()
 
-	lease := s.dhcp.LeaseSeconds
+	lease := s.leaseSeconds
 	idle := func(other string) bool {
 		return !s.reservations[other].IsValid() && (busy == nil || !busy(other))
 	}
@@ -216,7 +240,9 @@ func (s *hubStore) identify(id string, now uint64, busy func(string) bool) (neti
 }
 
 func (s *hubStore) lowestDynamic() netip.Addr {
-	for ip := s.dhcp.Start; ip.Compare(s.dhcp.End) <= 0; ip = ip.Next() {
+	// The first gap is at most the number of assignments and reservations
+	// away from the lower bound, even on a /8.
+	for ip := s.firstIP; ip.Compare(s.lastIP) <= 0; ip = ip.Next() {
 		if s.byIP[ip] == "" && !s.reservedIPs[ip] {
 			return ip
 		}
