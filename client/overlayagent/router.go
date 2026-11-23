@@ -68,6 +68,16 @@ func (r *Router) SetDirectPeers(ids []string) error {
 
 var errInactive = errors.New("overlay network is not active")
 
+// PeerIDByDomain reads a peer registration from the active agent, not a cached IP lease.
+func (r *Router) PeerIDByDomain(domain string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.agent == nil {
+		return "", false
+	}
+	return r.agent.PeerIDByDomain(domain)
+}
+
 // LookupName resolves one device label through the registered hub control stream.
 // A zero address with no error means there is no live owner in the current room.
 func (r *Router) LookupName(ctx context.Context, label string) (netip.Addr, error) {

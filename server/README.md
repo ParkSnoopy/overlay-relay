@@ -90,6 +90,7 @@ There is no account table and no enrollment. A client generates its own P-384 ke
 
 An authenticated control registration can claim a normalized device label for its room.
 The hub persists the first owner's identity in `names.json`, not an IP address.
+On collision it assigns a numbered name and advertises the effective domain to the owner and room peers.
 It returns the owner's current IPv4 only while the owner and requester have live controls in the same admitted room.
 Disconnect, room removal, or loss of room membership withdraws the answer without releasing the label.
 The client serves Magic DNS for `device-name.on.snoo`; the hub has no DNS listener.

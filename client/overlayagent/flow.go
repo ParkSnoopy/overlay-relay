@@ -87,20 +87,20 @@ func (a *Agent) openPeerFlow(ctx context.Context, ip netip.Addr, peerID, proto s
 	hello := &overlay.Hello{Version: a.wireVersion(), Kind: overlay.KindOpen, Proto: proto, Dst: ip.String(), Port: port, PeerID: peerID}
 	raw, reply, err := a.dialHubStream(relayCtx, hello, admission)
 	if err != nil {
-		a.logRelay("outbound", ip, peerID, proto, port, "failed", "relay setup")
+		a.logRelay("outbound", ip, proto, port, "failed", "relay setup")
 		return nil, err
 	}
 	flow, err := a.seal(relayCtx, raw, &reply, true)
 	if err != nil {
-		a.logRelay("outbound", ip, peerID, proto, port, "failed", "relay setup")
+		a.logRelay("outbound", ip, proto, port, "failed", "relay setup")
 		return nil, err
 	}
 	flow, err = a.trackRelay(relayCtx, admission, flow)
 	if err != nil {
-		a.logRelay("outbound", ip, peerID, proto, port, "failed", "peer unavailable")
+		a.logRelay("outbound", ip, proto, port, "failed", "peer unavailable")
 		return nil, err
 	}
-	a.logRelay("outbound", ip, peerID, proto, port, "opened", "")
+	a.logRelay("outbound", ip, proto, port, "opened", "")
 	return flow, nil
 }
 
@@ -136,13 +136,8 @@ func (a *Agent) dialHubStream(ctx context.Context, hello *overlay.Hello, admissi
 
 // logRelay records only validated endpoints, protocol and a fixed outcome. Never
 // print stream IDs, keys, raw remote errors, or bytes from the flow.
-func (a *Agent) logRelay(direction string, peer netip.Addr, id, proto string, port uint16, result, reason string) {
-	if overlay.ValidPeerID(id) {
-		id = id[:7]
-	} else {
-		id = "unknown"
-	}
-	line := fmt.Sprintf("Overlay relay %s: peer=%s device=%s protocol=%s port=%d result=%s", direction, peer, id, proto, port, result)
+func (a *Agent) logRelay(direction string, peer netip.Addr, proto string, port uint16, result, reason string) {
+	line := fmt.Sprintf("Overlay relay %s: peer=%s protocol=%s port=%d result=%s", direction, peer, proto, port, result)
 	if reason != "" {
 		line += " reason=" + reason
 	}
@@ -164,7 +159,7 @@ func (a *Agent) accept(ctx context.Context, in *overlay.Incoming) {
 	case a.inflight <- struct{}{}:
 	default:
 		if !in.Signal {
-			a.logRelay("incoming", src.Unmap(), in.PeerID, in.Proto, in.Port, "dropped", "concurrency limit")
+			a.logRelay("incoming", src.Unmap(), in.Proto, in.Port, "dropped", "concurrency limit")
 		}
 		return
 	}
@@ -177,7 +172,7 @@ func (a *Agent) accept(ctx context.Context, in *overlay.Incoming) {
 			if errors.Is(err, errDirectRequired) {
 				reason = "direct-only policy"
 			}
-			a.logRelay("incoming", src.Unmap(), in.PeerID, in.Proto, in.Port, "blocked", reason)
+			a.logRelay("incoming", src.Unmap(), in.Proto, in.Port, "blocked", reason)
 			return
 		}
 	}
@@ -200,7 +195,7 @@ func (a *Agent) serveIncoming(ctx context.Context, in *overlay.Incoming, src net
 	if !in.Signal {
 		defer func() {
 			if result != "allowed" {
-				a.logRelay("incoming", src, in.PeerID, in.Proto, in.Port, result, reason)
+				a.logRelay("incoming", src, in.Proto, in.Port, result, reason)
 			}
 		}()
 	}
@@ -250,7 +245,7 @@ func (a *Agent) serveIncoming(ctx context.Context, in *overlay.Incoming, src net
 		return err
 	}
 	result = "allowed"
-	a.logRelay("incoming", src, in.PeerID, in.Proto, in.Port, result, "")
+	a.logRelay("incoming", src, in.Proto, in.Port, result, "")
 	if in.Proto == overlay.ProtoUDP {
 		return spliceUDP(ctx, flow, local, a.timing.udpIdle)
 	}

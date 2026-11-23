@@ -177,8 +177,8 @@ func TestRelayFirewallOverRealHub(t *testing.T) {
 				src := <-a.Ready()
 				checkLog := func(port uint16, result, reason string) {
 					t.Helper()
-					want := fmt.Sprintf("Overlay relay incoming: peer=%s device=%s protocol=%s port=%d result=%s%s",
-						src, hex.EncodeToString(digest[:])[:7], proto, port, result, reason)
+					want := fmt.Sprintf("Overlay relay incoming: peer=%s protocol=%s port=%d result=%s%s",
+						src, proto, port, result, reason)
 					select {
 					case got := <-logged:
 						if got != want {

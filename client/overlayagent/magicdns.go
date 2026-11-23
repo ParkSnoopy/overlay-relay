@@ -6,11 +6,12 @@ import (
 	"net/netip"
 	"strings"
 
+	"github.com/ParkSnoopy/overlay-relay/client/overlay"
 	"github.com/miekg/dns"
 )
 
 // MagicDNSZone is the fully qualified suffix for room-local device names.
-const MagicDNSZone = "on.snoo."
+const MagicDNSZone = overlay.DeviceZone + "."
 
 // ProtectedDNSName reports whether a name is in Magic DNS or its retired parent
 // namespace. Callers must not forward either namespace to ordinary DNS.
@@ -47,7 +48,7 @@ func magicDNS(ctx context.Context, request *dns.Msg, lookup func(context.Context
 		}
 		response.Authoritative = true
 		labels := dns.SplitDomainName(name)
-		if len(labels) != 3 || !dns.IsSubDomain(MagicDNSZone, name) || !validNameLabel(labels[0]) {
+		if len(labels) != 3 || !dns.IsSubDomain(MagicDNSZone, name) || !overlay.ValidNameLabel(labels[0]) {
 			return response
 		}
 		ip, err := lookup(ctx, labels[0])

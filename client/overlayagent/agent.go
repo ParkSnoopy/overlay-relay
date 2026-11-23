@@ -107,11 +107,13 @@ type Agent struct {
 	mu             sync.Mutex
 	ip             netip.Addr
 	name           string
+	domain         string
 	roomName       string
 	connected      bool
 	reason         string
 	peers          []overlay.Peer
 	peerSet        map[netip.Addr]string
+	peerDomains    map[string]string // lazily indexed identities in the current peer snapshot
 	ready          chan netip.Addr
 	readyOnce      sync.Once
 	started        bool
@@ -269,6 +271,9 @@ func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
 	if err != nil || rangeErr != nil || reply.CIDR != prefix.String() || !overlay.AssignableIn(prefix, ip) {
 		return false, "overlay hub assigned an invalid address"
 	}
+	if reply.Domain != "" && overlay.DomainLabel(reply.Domain) == "" {
+		return false, "overlay hub assigned an invalid domain"
+	}
 	if !a.pinRange(prefix) {
 		return false, "overlay hub changed its address range"
 	}
@@ -279,7 +284,7 @@ func (a *Agent) session(ctx context.Context) (registered bool, reason string) {
 	if reply.NameLookup == 1 {
 		names = newNameQueries(sctx)
 	}
-	a.registered(ip, reply.Name, reply.RoomName, names)
+	a.registered(ip, reply.Name, reply.Domain, reply.RoomName, names)
 	stopClose := context.AfterFunc(sctx, func() { closeConn(conn) })
 	var pinger sync.WaitGroup
 	pinger.Add(1)
@@ -314,7 +319,8 @@ func (a *Agent) dialControl(ctx context.Context) (net.Conn, overlay.Reply, int, 
 		if err != nil {
 			return nil, overlay.Reply{}, version, err
 		}
-		reply, err := a.handshake(ctx, conn, &overlay.Hello{Version: version, Kind: overlay.KindControl, Name: a.cfg.Name})
+		reply, err := a.handshake(ctx, conn, &overlay.Hello{Version: version, Kind: overlay.KindControl,
+			Name: a.cfg.Name, Domain: overlay.DeviceDomain(a.cfg.Name), PeerPages: true})
 		if err == nil {
 			return conn, reply, version, nil
 		}
@@ -451,12 +457,36 @@ func (a *Agent) writeRequests(ctx context.Context, conn net.Conn, names *nameQue
 // readEvents consumes hub events until the stream fails. A silent hub is
 // detected by the liveness deadline: pings are answered with a Pong.
 func (a *Agent) readEvents(ctx context.Context, conn net.Conn, names *nameQueries) {
+	var pending []overlay.Peer
 	for {
 		if err := conn.SetReadDeadline(time.Now().Add(a.timing.liveness)); err != nil {
 			return
 		}
 		var event overlay.Event
 		if err := overlay.ReadFrame(conn, &event); err != nil {
+			return
+		}
+		if page := event.PeerPage; page != nil {
+			if event.Peers != nil || event.Incoming != nil || event.Resolved != nil || event.Pong ||
+				len(page.Peers) == 0 || len(pending)+len(page.Peers) > maxPeers {
+				return
+			}
+			for i := range page.Peers {
+				p := &page.Peers[i]
+				ip, err := netip.ParseAddr(p.IP)
+				if err != nil || !overlay.AssignableIn(a.Range(), ip) || !overlay.ValidPeerID(p.ID) ||
+					overlay.ValidateName(p.Name) != nil || (p.Domain != "" && overlay.DomainLabel(p.Domain) == "") {
+					return
+				}
+				pending = append(pending, overlay.Peer{ID: p.ID, IP: p.IP, Name: p.Name, Domain: p.Domain})
+			}
+			if !page.More {
+				a.setPeers(pending)
+				pending = nil
+			}
+			continue
+		}
+		if pending != nil { // interrupted snapshot; never publish partial membership
 			return
 		}
 		switch {
@@ -492,10 +522,11 @@ func (a *Agent) pinRange(prefix netip.Prefix) bool {
 	return a.Range() == prefix
 }
 
-func (a *Agent) registered(ip netip.Addr, name, roomName string, names *nameQueries) {
+func (a *Agent) registered(ip netip.Addr, name, domain, roomName string, names *nameQueries) {
 	a.mu.Lock()
 	a.ip, a.name, a.roomName, a.connected = ip, name, roomName, true
 	a.names = names
+	a.domain = domain
 	if !a.publicRoom.Load() {
 		a.reason = ""
 	}
@@ -513,6 +544,7 @@ func (a *Agent) disconnected(reason string) {
 	a.sessionEpoch++
 	a.connected, a.reason = false, reason
 	a.names = nil
+	a.domain, a.peerDomains = "", nil
 	a.peers, a.peerSet = nil, nil
 	a.observations, a.directRetries = nil, nil
 	closed := a.revokeTransportsLocked(func(netip.Addr, string) bool { return false })
@@ -533,11 +565,15 @@ func (a *Agent) setPeers(peers []overlay.Peer) {
 			continue
 		}
 		set[ip] = peer.ID
+		if overlay.DomainLabel(peer.Domain) == "" || !overlay.ValidPeerID(peer.ID) {
+			peer.Domain = ""
+		}
 		kept = append(kept, peer)
 	}
 	a.mu.Lock()
 	previous := a.peerSet
 	a.peers, a.peerSet = kept, set
+	a.peerDomains = nil
 	for ip, observation := range a.observations {
 		if _, exists := set[ip]; !exists || a.peerIDLocked(ip) != observation.id {
 			delete(a.observations, ip)
@@ -578,6 +614,7 @@ func (a *Agent) emit() {
 		PublicFallback: a.connected && a.publicRoom.Load(),
 		Reason:         a.reason,
 		Name:           a.name,
+		Domain:         a.domain,
 		RoomName:       a.roomName,
 		Peers:          append([]overlay.Peer{}, a.peers...),
 	}

@@ -15,11 +15,40 @@ const maxNameQueries = 8
 
 var errNameLookup = errors.New("overlay name authority unavailable")
 
+// PeerIDByDomain returns the stable identity behind a current, room-local device name.
+// Index a roster only if a caller needs it. A later roster or disconnect invalidates it.
+func (a *Agent) PeerIDByDomain(domain string) (string, bool) {
+	if overlay.DomainLabel(domain) == "" {
+		return "", false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.connected {
+		return "", false
+	}
+	if a.peerDomains == nil {
+		a.peerDomains = make(map[string]string, len(a.peers))
+		for i := range a.peers {
+			p := &a.peers[i]
+			if p.Domain == "" {
+				continue
+			}
+			if _, duplicate := a.peerDomains[p.Domain]; duplicate {
+				a.peerDomains[p.Domain] = "" // never choose between conflicting owners
+			} else {
+				a.peerDomains[p.Domain] = p.ID
+			}
+		}
+	}
+	id := a.peerDomains[domain]
+	return id, id != ""
+}
+
 // LookupName resolves one device label on the current authenticated control
 // stream. A zero address with no error means the hub has no live owner in this
 // room. Disconnects and hubs without lookup support fail without a fallback.
 func (a *Agent) LookupName(ctx context.Context, label string) (netip.Addr, error) {
-	if !validNameLabel(label) {
+	if !overlay.ValidNameLabel(label) {
 		return netip.Addr{}, nil
 	}
 	a.mu.Lock()
@@ -45,18 +74,6 @@ func (a *Agent) LookupName(ctx context.Context, label string) (netip.Addr, error
 		return netip.Addr{}, errNameLookup
 	}
 	return ip, nil
-}
-
-func validNameLabel(label string) bool {
-	if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-		return false
-	}
-	for _, c := range label {
-		if c != '-' && (c < 'a' || c > 'z') && (c < '0' || c > '9') {
-			return false
-		}
-	}
-	return true
 }
 
 // A control stream owns its request IDs and waiters. IDs are never reused,

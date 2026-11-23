@@ -8,10 +8,12 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
-	"unicode"
+	"unicode/utf8"
 
+	"github.com/ParkSnoopy/overlay-relay/client/overlay"
 	"golang.org/x/net/idna"
 )
 
@@ -26,7 +28,6 @@ var (
 	errCorruptNames     = errors.New("overlay name bindings are corrupt")
 	errNamesUnavailable = errors.New("overlay name bindings are unavailable")
 	nameBase32          = base32.StdEncoding.WithPadding(base32.NoPadding)
-	nameIDNA            = idna.New(idna.MapForLookup(), idna.StrictDomainName(false), idna.CheckHyphens(false), idna.BidiRule())
 )
 
 type nameBinding struct {
@@ -67,7 +68,7 @@ func (n *nameStore) load(dir string) error {
 	}
 	for _, binding := range records {
 		if (binding.Room != "" && !validStoreID(binding.Room)) || !validStoreID(binding.Device) ||
-			!validDNSLabel(binding.Label) || isAliasLabel(binding.Label) || n.rooms[binding.Room][binding.Label] != "" {
+			!overlay.ValidNameLabel(binding.Label) || isAliasLabel(binding.Label) || n.rooms[binding.Room][binding.Label] != "" {
 			return errCorruptNames
 		}
 		n.insert(binding.Room, binding.Label, binding.Device)
@@ -76,25 +77,33 @@ func (n *nameStore) load(dir string) error {
 	return nil
 }
 
-// reserveName stores the first owner of a label for the stable room key. The
-// caller supplies the display name (including the default, if unadvertised).
-func (s *hubStore) reserveName(room, name, id string) {
+// reserveName assigns a canonical label for the requested base and device in
+// the stable room. Claims are never released, so the same request also finds
+// its earlier binding after disconnect, restart, or a legacy hub rewrite.
+func (s *hubStore) reserveName(room, base, id string) string {
 	key, _, _ := strings.Cut(room, ":")
-	if !validStoreID(id) || (key != "" && !validStoreID(key)) {
-		return
-	}
-	label := normalizedDNSLabel(name)
-	if label == "" || isAliasLabel(label) {
-		return
+	if !validStoreID(id) || (key != "" && !validStoreID(key)) || !overlay.ValidNameLabel(base) || isAliasLabel(base) {
+		return ""
 	}
 
 	n := s.names
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.failed || n.count >= maxNames || n.rooms[key][label] != "" {
-		return
+	if n.failed {
+		return ""
 	}
-	n.insert(key, label, id)
+	labels := n.rooms[key]
+	label := base
+	for suffix := 2; labels[label] != "" && labels[label] != id; suffix++ {
+		label = numberedNameLabel(base, suffix)
+	}
+	if labels[label] == id {
+		return label
+	}
+	if n.count >= maxNames {
+		return ""
+	}
+
 	records := make([]nameBinding, 0, n.count+1)
 	for _, key := range slices.Sorted(maps.Keys(n.rooms)) {
 		labels := n.rooms[key]
@@ -102,14 +111,36 @@ func (s *hubStore) reserveName(room, name, id string) {
 			records = append(records, nameBinding{Room: key, Label: label, Device: labels[label]})
 		}
 	}
+	records = append(records, nameBinding{Room: key, Label: label, Device: id})
 	if err := saveStoreJSON(filepath.Join(s.dir, namesFile), ".names-", records, true); err != nil {
 		// Rename may have succeeded before directory sync failed. Don't publish
 		// either the old or new state until a restart loads it unambiguously.
 		log.Printf("overlay DNS name bindings could not be saved: %v", err)
 		n.failed = true
-		return
+		return ""
 	}
+	n.insert(key, label, id)
 	n.count++
+	return label
+}
+
+func numberedNameLabel(base string, number int) string {
+	suffix := "-" + strconv.Itoa(number)
+	if strings.HasPrefix(base, "xn--") {
+		// Append to the Unicode name before re-encoding. Appending to the
+		// A-label itself would often produce invalid Punycode.
+		if decoded, err := idna.Punycode.ToUnicode(base); err == nil {
+			for decoded != "" {
+				if label := overlay.DomainLabel(overlay.DeviceDomain(strings.TrimRight(decoded, "-") + suffix)); label != "" {
+					return label
+				}
+				_, size := utf8.DecodeLastRuneInString(decoded)
+				decoded = decoded[:len(decoded)-size]
+			}
+		}
+		base = "xn-" + base[len("xn--"):]
+	}
+	return strings.TrimRight(base[:min(len(base), 63-len(suffix))], "-") + suffix
 }
 
 func (n *nameStore) insert(room, label, id string) {
@@ -140,7 +171,7 @@ func (s *hubStore) nameOwner(room, label string) (string, error) {
 	if n.failed {
 		return "", errNamesUnavailable
 	}
-	if !validDNSLabel(label) {
+	if !overlay.ValidNameLabel(label) {
 		return "", nil
 	}
 	if isAliasLabel(label) {
@@ -164,42 +195,4 @@ func isAliasLabel(label string) bool {
 		}
 	}
 	return true
-}
-
-func validDNSLabel(label string) bool {
-	if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-		return false
-	}
-	for _, c := range label {
-		if c != '-' && (c < 'a' || c > 'z') && (c < '0' || c > '9') {
-			return false
-		}
-	}
-	return true
-}
-
-func normalizedDNSLabel(name string) string {
-	var value strings.Builder
-	separator := false
-	for _, c := range name {
-		switch {
-		case c == '-':
-		case unicode.IsSpace(c) || unicode.IsPunct(c):
-			separator = value.Len() != 0
-			continue
-		case unicode.IsLetter(c) || unicode.IsNumber(c) || unicode.IsMark(c):
-		default:
-			return ""
-		}
-		if separator && c != '-' {
-			value.WriteByte('-')
-		}
-		separator = false
-		value.WriteRune(c)
-	}
-	label, err := nameIDNA.ToASCII(strings.Trim(value.String(), "-"))
-	if err != nil || !validDNSLabel(label) {
-		return ""
-	}
-	return label
 }

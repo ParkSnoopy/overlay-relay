@@ -71,6 +71,8 @@ const (
 
 // Hello is the first frame on every stream a client opens to the hub.
 type Hello struct {
+	// PeerPages opts a control stream into paged rosters when one frame cannot fit.
+	PeerPages bool `json:"peer_pages,omitempty"`
 	// PeerID optionally binds an open request to its expected device identity.
 	PeerID    string `json:"peer_id,omitempty"`
 	Version   int    `json:"version"`
@@ -81,11 +83,12 @@ type Hello struct {
 	// RoomID names the private room, empty for the public room. A known ID
 	// only admits the password proof that its first requester used.
 	RoomID string `json:"room_id,omitempty"`
-	Name   string `json:"name,omitempty"`  // control: advertised device name
-	Proto  string `json:"proto,omitempty"` // open
-	Dst    string `json:"dst,omitempty"`   // open: destination overlay IP
-	Port   uint16 `json:"port,omitempty"`  // open: destination port
-	ID     string `json:"id,omitempty"`    // accept: Incoming.ID
+	Name   string `json:"name,omitempty"`   // control: advertised device name
+	Domain string `json:"domain,omitempty"` // control: requested canonical domain
+	Proto  string `json:"proto,omitempty"`  // open
+	Dst    string `json:"dst,omitempty"`    // open: destination overlay IP
+	Port   uint16 `json:"port,omitempty"`   // open: destination port
+	ID     string `json:"id,omitempty"`     // accept: Incoming.ID
 
 	// Fingerprint is the SHA-256 of the sender's flow certificate, as 64 hex
 	// digits. Sending it offers an end-to-end encrypted flow (open, accept).
@@ -108,11 +111,12 @@ type Proof struct {
 // Reply is the hub's answer to Hello and, on a control stream, to Ping.
 // Peer lists and incoming requests share the control stream as separate frames.
 type Reply struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
-	IP    string `json:"ip,omitempty"`   // control: this account's address
-	Name  string `json:"name,omitempty"` // control: this account's display name
-	CIDR  string `json:"cidr,omitempty"` // control: authoritative address space
+	OK     bool   `json:"ok"`
+	Error  string `json:"error,omitempty"`
+	IP     string `json:"ip,omitempty"`     // control: this account's address
+	Name   string `json:"name,omitempty"`   // control: this account's display name
+	Domain string `json:"domain,omitempty"` // control: hub-assigned domain, not the proposal
+	CIDR   string `json:"cidr,omitempty"`   // control: authoritative address space
 
 	// RoomName is the display name of the private room, empty in the public room.
 	RoomName string `json:"room_name,omitempty"`
@@ -210,9 +214,10 @@ const (
 // Peer is one other broadcasting account.
 type Peer struct {
 	// ID is the SHA-256 digest of the device's persistent public key.
-	ID   string `json:"id,omitempty"`
-	IP   string `json:"ip"`
-	Name string `json:"name"`
+	ID     string `json:"id,omitempty"`
+	IP     string `json:"ip"`
+	Name   string `json:"name"`
+	Domain string `json:"domain,omitempty"`
 	// Flow counts describe established local flows, never direct eligibility.
 	DirectFlows int `json:"directFlows"`
 	RelayFlows  int `json:"relayFlows"`
@@ -244,10 +249,17 @@ type Incoming struct {
 // Event is any frame the hub pushes on a control stream after the Reply.
 // Exactly one field is set.
 type Event struct {
+	PeerPage *PeerPage   `json:"peer_page,omitempty"`
 	Peers    *[]Peer     `json:"peers,omitempty"`
 	Incoming *Incoming   `json:"incoming,omitempty"`
 	Pong     bool        `json:"pong,omitempty"`
 	Resolved *NameAnswer `json:"resolved,omitempty"`
+}
+
+// PeerPage is one part of a full roster. Publish only after More is false.
+type PeerPage struct {
+	Peers []Peer `json:"peers"`
+	More  bool   `json:"more,omitempty"`
 }
 
 // ControlRequest carries either a keep-alive or a negotiated name lookup.
@@ -289,6 +301,7 @@ type State struct {
 	PublicFallback bool   `json:"public_fallback,omitempty"` // private-room rejection selected the public room
 	IP             string `json:"ip,omitempty"`
 	Name           string `json:"name,omitempty"`
+	Domain         string `json:"domain,omitempty"`
 	// RoomName is the hub's display name of the joined private room.
 	RoomName string `json:"room_name,omitempty"`
 	Peers    []Peer `json:"peers"`

@@ -15,21 +15,39 @@ const hubControlQueue = 16
 // Pointer identity distinguishes a registration from a later replacement.
 // Its identity, address, name, and room are immutable after publication.
 type hubControl struct {
-	id      string
-	ip      netip.Addr
-	name    string
-	room    hubRoom
-	version int
-	ctx     context.Context
-	stop    context.CancelFunc
-	events  chan any
-	dirty   chan struct{}
+	id        string
+	ip        netip.Addr
+	name      string
+	domain    string
+	room      hubRoom
+	version   int
+	peerPages bool
+	ctx       context.Context
+	stop      context.CancelFunc
+	events    chan any
+	dirty     chan struct{}
 }
 
 type hubPeer struct {
-	ID   string `json:"id"`
-	IP   string `json:"ip"`
-	Name string `json:"name"`
+	ID     string `json:"id"`
+	IP     string `json:"ip"`
+	Name   string `json:"name"`
+	Domain string `json:"domain,omitempty"`
+}
+
+type hubRoster struct {
+	Peers []hubPeer `json:"peers"`
+}
+
+func requestedHubLabel(hello *overlay.Hello) string {
+	if hello.Domain != "" {
+		return overlay.DomainLabel(hello.Domain)
+	}
+	label := overlay.DomainLabel(overlay.DeviceDomain(hello.Name))
+	if label == "" {
+		return "device"
+	}
+	return label
 }
 
 // Called with the registration lock held; publish only after the name has
@@ -38,18 +56,26 @@ func (h *hubRuntime) registerControl(ctx context.Context, id string, ip netip.Ad
 	if overlay.ValidateName(hello.Name) != nil {
 		return nil
 	}
+	label := requestedHubLabel(hello)
+	if label == "" {
+		return nil
+	}
 	advertised := hello.Name
 	if advertised == "" {
 		advertised = "peer-" + id[:8]
 	}
-	h.store.reserveName(room.capability, advertised, id)
 	if err := h.store.setName(id, hello.Name); err != nil {
 		return nil
 	}
+	var domain string
+	if canonical := h.store.reserveName(room.capability, label, id); canonical != "" {
+		domain = canonical + "." + overlay.DeviceZone
+	}
 	ctx, stop := context.WithCancel(ctx)
 	control := &hubControl{
-		id: id, ip: ip, name: advertised, room: room, version: hello.Version,
-		ctx: ctx, stop: stop, events: make(chan any, hubControlQueue), dirty: make(chan struct{}, 1),
+		id: id, ip: ip, name: advertised, domain: domain, room: room, version: hello.Version,
+		peerPages: hello.PeerPages,
+		ctx:       ctx, stop: stop, events: make(chan any, hubControlQueue), dirty: make(chan struct{}, 1),
 	}
 	h.mu.Lock()
 	if old := h.controls[id]; old != nil {
@@ -77,7 +103,7 @@ func (h *hubRuntime) serveControl(conn net.Conn, control *hubControl, display st
 	}()
 	reply := overlay.Reply{
 		OK: true, IP: control.ip.String(), CIDR: h.space.String(), Name: control.name,
-		RoomName: display, NameLookup: 1,
+		Domain: control.domain, RoomName: display, NameLookup: 1,
 	}
 	if control.ctx.Err() != nil || sendHubFrame(conn, reply) != nil {
 		return
@@ -114,7 +140,7 @@ func (h *hubRuntime) snapshot(control *hubControl) []hubPeer {
 	}
 	for _, peer := range h.controls {
 		if peer != control && peer.room.capability == control.room.capability && peer.ctx.Err() == nil {
-			peers = append(peers, hubPeer{ID: peer.id, IP: peer.ip.String(), Name: peer.name})
+			peers = append(peers, hubPeer{ID: peer.id, IP: peer.ip.String(), Name: peer.name, Domain: peer.domain})
 		}
 	}
 	// IPv4 strings do not sort in address order. Use the current address index.
@@ -133,15 +159,61 @@ func (h *hubRuntime) writeControl(conn net.Conn, control *hubControl) {
 				return
 			case event = <-control.events:
 			case <-control.dirty:
-				event = struct {
-					Peers []hubPeer `json:"peers"`
-				}{h.snapshot(control)}
+				peers := h.snapshot(control)
+				if control.ctx.Err() != nil || !writeHubRoster(conn, peers, control.peerPages) {
+					return
+				}
+				continue
 			}
 		}
 		if control.ctx.Err() != nil || sendHubFrame(conn, event) != nil {
 			return
 		}
 	}
+}
+
+func writeHubRoster(conn net.Conn, peers []hubPeer, paging bool) bool {
+	payload, err := encodeHubJSON(hubRoster{peers})
+	if err != nil {
+		return false
+	}
+	if len(payload) > overlay.UsableFrame {
+		if paging {
+			return writeHubPeerPages(conn, peers)
+		}
+		// Old clients require a full snapshot. If optional DNS metadata is
+		// what exceeded the envelope, retain the original discovery contract.
+		for i := range peers {
+			peers[i].Domain = ""
+		}
+		payload, err = encodeHubJSON(hubRoster{peers})
+	}
+	return err == nil && sendHubJSON(conn, payload) == nil
+}
+
+func writeHubPeerPages(conn net.Conn, peers []hubPeer) bool {
+	const prefix = `{"peer_page":{"peers":[`
+	const more = `],"more":true}}`
+	const last = `],"more":false}}`
+	const limit = overlay.UsableFrame - len(last)
+	page := append(make([]byte, 0, overlay.UsableFrame), prefix...)
+	for i := range peers {
+		entry, err := encodeHubJSON(peers[i])
+		if err != nil || len(prefix)+len(entry) > limit {
+			return false
+		}
+		if len(page)+1+len(entry) > limit && len(page) > len(prefix) {
+			if sendHubJSON(conn, append(page, more...)) != nil {
+				return false
+			}
+			page = page[:len(prefix)]
+		}
+		if len(page) > len(prefix) {
+			page = append(page, ',')
+		}
+		page = append(page, entry...)
+	}
+	return sendHubJSON(conn, append(page, last...)) == nil
 }
 
 func (c *hubControl) enqueue(event any) bool {

@@ -94,6 +94,8 @@ All field names are lowercase JSON keys.
 | `public_key` | string | all | Hex-encoded uncompressed P-384 public key (section 4). |
 | `name` | string | control | Optional advertised name for the authenticated device. Empty uses the identity-derived default; invalid names receive `invalid request` without replacing an existing control. |
 | `proto` | string | open | `"tcp"` or `"udp"`. |
+| `domain` | string | control | Optional normalized requested domain (`desk-pc.on.snoo`, without a final dot). Never a proof of ownership. |
+| `peer_pages` | bool | control | Accept a full peer roster across consecutive bounded `peer_page` frames. Omit for legacy behavior. |
 | `dst` | string | open | Destination overlay IPv4 text, for example `"10.77.0.2"`. |
 | `port` | integer | open | Destination port, `1..65535`. `0` or absent is refused. |
 | `id` | string | accept | The `id` from the Incoming event being answered. |
@@ -119,6 +121,7 @@ After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The
 | `ip` | string | Control only. This account's overlay address. |
 | `name` | string | Control only. The advertised display name or its identity-derived default. |
 | `name_lookup` | integer | Control only. Value `1` enables room-local label lookups. Omitted when unsupported. |
+| `domain` | string | Control only. Hub-assigned unique domain in this room. Absent if unavailable. |
 | `secure` | bool | Open and accept only. Both sides offered a fingerprint (section 8.6). |
 | `fingerprint` | string | Secure only. The other side's flow certificate fingerprint, lowercase. |
 | `direct` | bool | Open and accept only. Both sides also offered an endpoint (section 8.7). |
@@ -132,7 +135,7 @@ The hub omits empty string fields and false booleans. A client must treat a miss
 Each event is one frame with exactly one of these top-level keys:
 
 ```json
-{"peers":  [{"ip":"10.77.0.2","name":"bob"}]}
+{"peers":  [{"ip":"10.77.0.2","name":"Bob","domain":"bob-2.on.snoo"}]}
 {"incoming": {"id":"<32 hex digits>","proto":"tcp","src":"10.77.0.1","port":7000}}
 {"pong": true}
 {"resolved":{"id":1,"ip":"10.77.0.5"}}
@@ -142,6 +145,7 @@ Each event is one frame with exactly one of these top-level keys:
 - `incoming`: a request that the receiving account must answer on a new accept stream (section 8.3). It also carries the requester's `fingerprint` and `endpoint` when the requester made those offers. `signal:true` identifies bounded direct negotiation, never a local payload-service request.
 - `pong`: reply to a ping (section 8.1).
 - `resolved`: reply to a label query (section 7.5).
+- `peer_page`: for opted-in clients only, `{"peers":[...],"more":true}` continues a snapshot. A final page with `more` absent or false completes it. Pages are consecutive. Replace the old roster only after the final page; discard incomplete snapshots on disconnect. Ownership and approvals remain keyed by `id` rather than `domain`.
 
 ### 7.4 Ping (client to hub, on a control stream)
 

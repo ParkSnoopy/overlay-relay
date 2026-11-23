@@ -619,18 +619,23 @@ func TestHubRuntimeDurableRoomNamesRequireLiveOwner(t *testing.T) {
 	h := startHubSocket(t, dir, nil, nil)
 	a := newHubTestPeer(t, overlay.Version, "Desk PC")
 	b := newHubTestPeer(t, overlay.PreviousWireVersion, "desk pc")
-	if !a.register(t, h).OK || !b.register(t, h).OK {
-		t.Fatal("registration failed")
-	}
+	hubTestDomain(t, h, a, "desk-pc.on.snoo")
+	hubTestDomain(t, h, b, "desk-pc-2.on.snoo")
+	hubTestPeerDomain(t, a, b, "desk-pc-2.on.snoo")
+	hubTestPeerDomain(t, b, a, "desk-pc.on.snoo")
 	firstIP := a.ip
 	if got := hubTestResolve(t, b, 1, "desk-pc"); got != (overlay.NameAnswer{ID: 1, IP: firstIP}) {
 		t.Fatalf("first owner = %+v", got)
 	}
+	if got := hubTestResolve(t, a, 1, "desk-pc-2"); got != (overlay.NameAnswer{ID: 1, IP: b.ip}) {
+		t.Fatalf("numbered owner = %+v", got)
+	}
 	old := a.control
 	a.hello.Name = "New Name"
-	if reply := a.register(t, h); !reply.OK || reply.IP != firstIP || reply.Name != "New Name" {
+	if reply := a.register(t, h); !reply.OK || reply.IP != firstIP || reply.Name != "New Name" || reply.Domain != "new-name.on.snoo" {
 		t.Fatalf("re-registration = %+v", reply)
 	}
+	hubTestPeerDomain(t, b, a, "new-name.on.snoo")
 	hubTestPeers(t, a, b.id)
 	// The superseded control may have a queued roster frame, so drain until EOF.
 	hubTestOK(t, old.SetReadDeadline(time.Now().Add(hubTestWait)))
@@ -646,9 +651,8 @@ func TestHubRuntimeDurableRoomNamesRequireLiveOwner(t *testing.T) {
 	}
 	h.stop(t)
 	h = startHubSocket(t, dir, nil, nil)
-	if !b.register(t, h).OK || !a.register(t, h).OK {
-		t.Fatal("registration after restart failed")
-	}
+	hubTestDomain(t, h, b, "desk-pc-2.on.snoo")
+	hubTestDomain(t, h, a, "new-name.on.snoo")
 	if got := hubTestResolve(t, b, 4, "desk-pc"); got != (overlay.NameAnswer{ID: 4, IP: firstIP}) {
 		t.Fatalf("owner after restart = %+v", got)
 	}

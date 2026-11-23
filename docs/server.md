@@ -45,10 +45,14 @@ When either limit is exhausted, a new key reclaims the oldest peer with no contr
 - The first authenticated registration for a label in a room binds that label
   to the device's full verifier. Renaming can add a label but never releases
   an existing binding. Address reclamation does not remove name bindings.
+- A client may propose a canonical `domain` (e.g. `desk-pc.on.snoo`). The hub
+  returns the assigned domain in the control reply and advertises it in the
+  room roster. A second device requesting `desk-pc` gets `desk-pc-2` if free;
+  already claimed suffixes are skipped. Reconnecting with the same device ID
+  and request reuses its claim. The name does not replace the ID in policy.
 - Every verifier also has a separate `id-<base32>` label. Encode the 32 bytes
   of the hex verifier as lowercase RFC 4648 base32 without padding. This form
-  is reserved and cannot be claimed by a display name. Use it when the
-  normalized label is invalid, has another owner, or cannot be added at capacity.
+  is reserved for compatibility and is never advertised as a device domain.
 - The hub answers only with the current IPv4 of an owner with a live control
   stream in the requester's admitted room. Disconnect or a room change removes
   the live answer, not the binding. Private room proofs are rechecked so a room

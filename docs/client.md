@@ -45,6 +45,8 @@ These fields are local observations, not hub-supplied reachability guarantees.
 The application attaches [`Router.MagicDNS` or `Agent.MagicDNS`](../client/overlayagent/magicdns.go) to its client DNS path. The adapter answers `device-name.on.snoo` locally; it does not send DNS packets to the hub.
 
 - [`LookupName`](../client/overlayagent/names.go) sends one lowercase ASCII label, without `.on.snoo`, over the active authenticated control stream.
+- A client proposes the normalized domain of its display name. `State.Domain` and `Peer.Domain` contain the hub's assignment, not a local guess. Older hubs leave these fields empty.
+- `PeerIDByDomain` indexes the current roster on demand and returns the stable device ID. Each new roster or disconnect invalidates the index. Use IDs for saved choices and permissions; show names and domains to users.
 - The hub is authoritative for [durable ownership and live room membership](server.md#room-local-dns). A missing or offline owner returns a zero address with no error. A disconnected or incapable hub returns an error.
 - A successful A answer contains the live IPv4 with zero TTL. An existing name has no AAAA answer. Missing names get NXDOMAIN; lookup failures get SERVFAIL.
 - A nil DNS response permits ordinary forwarding. Do not forward protected names, including the retired `device-name.snoo` form, and do not synthesize answers from the roster, local aliases, or cached addresses.
