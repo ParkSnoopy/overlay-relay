@@ -15,7 +15,7 @@ const maxNameQueries = 8
 
 var errNameLookup = errors.New("overlay name authority unavailable")
 
-// LookupName resolves one .snoo label on the current authenticated control
+// LookupName resolves one device label on the current authenticated control
 // stream. A zero address with no error means the hub has no live owner in this
 // room. Disconnects and hubs without lookup support fail without a fallback.
 func (a *Agent) LookupName(ctx context.Context, label string) (netip.Addr, error) {
@@ -48,7 +48,7 @@ func (a *Agent) LookupName(ctx context.Context, label string) (netip.Addr, error
 }
 
 func validNameLabel(label string) bool {
-	if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+	if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
 		return false
 	}
 	for _, c := range label {

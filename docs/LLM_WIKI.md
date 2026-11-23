@@ -6,7 +6,7 @@ Where this document and the code disagree, the code in `server/` (hub) and `clie
 
 ## 1. What the system does
 
-- A **hub** (Rust binary `overlay-hub`, source in `server/`) is reachable over TCP on port `6697`.
+- A **hub** (Go binary `overlay-hub`, source in `server/`) is reachable over TCP on port `6697`.
 - Each **peer** holds one stable IPv4 address in the configured range, default `10.77.0.0/16`. A peer is a client key pair that the client generated itself; nobody enrolls it.
 - A **client** that "broadcasts" registers a **control stream** with the hub. The hub then tells it which other broadcasting peers exist (`peers`).
 - A client opens a **flow** (TCP or UDP) to a peer's overlay address and port. The hub asks the peer to accept, pairs the two streams, and relays bytes between them.
@@ -14,6 +14,7 @@ Where this document and the code disagree, the code in `server/` (hub) and `clie
 - Agents encrypt flows end to end by default (section 8.6) and may connect directly, bypassing the hub (section 8.7). The hub only forwards the offers.
 - Agents may optionally compress flow bytes (section 8.5). The hub is unaware of it.
 - Hidden peers (not broadcasting) hold an address but never register a control stream, so they are never listed and cannot be reached.
+- A client can serve Magic DNS as `device-name.on.snoo`. The hub owns durable labels and returns current addresses over the authenticated control stream, not DNS.
 
 ## 2. Glossary
 
@@ -33,18 +34,16 @@ Where this document and the code disagree, the code in `server/` (hub) and `clie
 ## 3. Repository layout
 
 ```
-server/            Rust hub crate "overlay-relay", binary "overlay-hub"
-  src/main.rs      reads environment, runs the hub
-  src/lib.rs       library API (Hub, Config, Verifier, frame helpers)
-  src/protocol.rs  wire constants and message types
-  tests/hub.rs     integration tests over real loopback sockets
-client/            Go module github.com/ParkSnoopy/overlay-relay/client
+go.mod             shared Go module github.com/ParkSnoopy/overlay-relay
+version.go         shared release and wire metadata
+server/            current Go hub, binary "overlay-hub"
+client/            public Go client packages (import paths retain /client/...)
   overlay/         wire types, frame codec, identity helpers
   overlayagent/    reference agent: registration, peers, outbound and inbound flows, probe
-tests/             Go tests that run the Rust hub and the Go agent together
-examples/          Go program: a client
+tests/             workspace module for Go hub integration and legacy interop
+examples/          workspace module containing a sample client
 docs/              this wiki, server and client notes, release gate
-Dockerfile         builds the server image
+Dockerfile         builds the non-root hub image locally
 ```
 
 ## 4. Identity: P-384 key pairs
@@ -58,13 +57,13 @@ Every hub stream must traverse an authenticated VPN. The challenge authenticates
 The hub keeps every key it has verified in `ips.json` in its data directory: verifier hex mapped to an object with the peer's `ip` and `seen` (Unix seconds of its last authentication or disconnect). No operator writes this file. The hub rewrites it atomically with mode `0600`.
 
 - At most `4096` peers, also bounded by subnet capacity. When either limit is exhausted, a new key takes over the address of the peer with the oldest `seen` that has no control stream and no flow. When every peer is in use, the new key is refused with `unauthorized`.
-- The default display name of a peer is `peer-` followed by the first 8 hex digits of its verifier. An authenticated control Hello may advertise its own name, up to 128 Unicode characters without control characters or surrounding whitespace. Empty or absent restores the default. Names are transient, never written to `ips.json`, and do not change identity or address.
+- The default display name of a peer is `peer-` followed by the first 8 hex digits of its verifier. An authenticated control Hello may advertise its own name, up to 128 Unicode characters without control characters or surrounding whitespace. Empty or absent restores the default. `ips.json` retains the display name for DHCP; durable room-local label ownership is separate.
 - A file written by an older hub (verifier hex mapped to a bare address) loads, and each entry counts as seen at load time. A corrupt file stops the hub rather than renumbering peers.
 
 ## 5. Addresses
 
 - Overlay CIDR: canonical IPv4 `/8` through `/30` subnet wholly within RFC 1918 private space (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), default `10.77.0.0/16`. Configure `OVERLAY_CIDR` on the hub and the matching client range. Public ranges and supernets crossing private block boundaries are rejected.
-- Reserve the selected network and broadcast addresses. Helpers: `overlay.ParseCIDR`, `overlay.AssignableIn` and `overlay_relay::AddressSpace`.
+- Reserve the selected network and broadcast addresses. See `overlay.ParseCIDR` and `overlay.AssignableIn`.
 - The hub assigns each peer an address when its key first proves possession. Assignments persist in `ips.json` in the data directory (JSON object: verifier hex to `{ip, seen}`).
 - A known peer keeps its address. A new peer receives the lowest free assignable address. Changing the configured range reassigns addresses.
 - A peer loses its address only by eviction from a full table (section 4).
@@ -90,7 +89,7 @@ All field names are lowercase JSON keys.
 |---|---|---|---|
 | `version` | integer | all | Use `5` by default. The hub also supports `4` for 0.4.8 compatibility. It closes the stream silently for other versions. |
 | `room` | string | all | Private room password proof, empty for public membership. Derive it locally from the room ID and password. Never log it. |
-| `room_id` | string | all | Private room ID, empty for public membership. Required with `room`. A known ID admits only the proof its first requester used. |
+| `room_id` | string | all | Private room ID, empty for public membership. Required with `room`. An operator must create the room and set its proof before clients can join. |
 | `kind` | string | all | `"control"`, `"open"`, `"signal"` or `"accept"`. Anything else gets reply `invalid request`. |
 | `public_key` | string | all | Hex-encoded uncompressed P-384 public key (section 4). |
 | `name` | string | control | Optional advertised name for the authenticated device. Empty uses the identity-derived default; invalid names receive `invalid request` without replacing an existing control. |
@@ -105,7 +104,7 @@ A malformed or inconsistent offer (bad fingerprint, bad endpoint, endpoint witho
 
 Optional fields that do not apply to a kind may be omitted. The hub ignores unrelated fields.
 
-Private membership is the lowercase hex of PBKDF2-HMAC-SHA256(password, `overlay-relay/room/v3:` + room ID, 210000 iterations, 32 bytes). Both credentials stay local. The opaque capability requires the authenticated VPN. Peer lists, opens and accepts require matching rooms. Different passwords select separate rooms without revealing their existence. All rooms share the hub's address space.
+Private membership proof is the lowercase hex of PBKDF2-HMAC-SHA256(password, `overlay-relay/room/v3:` + room ID, 210000 iterations, 32 bytes). The password stays local; the room ID and proof travel over the authenticated VPN. The hub checks the operator-configured proof. Peer lists, opens, accepts and name answers are room-scoped. All rooms share the hub's address space.
 
 Both devices must explicitly approve the other's ID in `DirectPeers` before direct offers or connections. Empty approvals permit relay only. Revocation closes affected direct flows and negotiations.
 
@@ -118,7 +117,8 @@ After a valid Hello, the hub sends `{"nonce":"<hex>"}` with 32 random bytes. The
 | `ok` | bool | `true` on success. |
 | `error` | string | Present when `ok` is `false`. One of the error values in section 9. |
 | `ip` | string | Control only. This account's overlay address. |
-| `name` | string | Control only. This peer's display name, derived from its key. |
+| `name` | string | Control only. The advertised display name or its identity-derived default. |
+| `name_lookup` | integer | Control only. Value `1` enables room-local label lookups. Omitted when unsupported. |
 | `secure` | bool | Open and accept only. Both sides offered a fingerprint (section 8.6). |
 | `fingerprint` | string | Secure only. The other side's flow certificate fingerprint, lowercase. |
 | `direct` | bool | Open and accept only. Both sides also offered an endpoint (section 8.7). |
@@ -135,11 +135,13 @@ Each event is one frame with exactly one of these top-level keys:
 {"peers":  [{"ip":"10.77.0.2","name":"bob"}]}
 {"incoming": {"id":"<32 hex digits>","proto":"tcp","src":"10.77.0.1","port":7000}}
 {"pong": true}
+{"resolved":{"id":1,"ip":"10.77.0.5"}}
 ```
 
 - `peers`: the full current list of **other** broadcasting accounts, sorted by IP ascending. It is sent once after registration and again on every change. Each change replaces the previous list; it is not a delta.
 - `incoming`: a request that the receiving account must answer on a new accept stream (section 8.3). It also carries the requester's `fingerprint` and `endpoint` when the requester made those offers. `signal:true` identifies bounded direct negotiation, never a local payload-service request.
 - `pong`: reply to a ping (section 8.1).
+- `resolved`: reply to a label query (section 7.5).
 
 ### 7.4 Ping (client to hub, on a control stream)
 
@@ -147,7 +149,17 @@ Each event is one frame with exactly one of these top-level keys:
 {"ping": true}
 ```
 
-Any other content on a control stream ends the control stream (see section 8.1).
+### 7.5 Room-local label lookup (client to hub, on a control stream)
+
+Only send lookups after receiving `name_lookup: 1`. Send one lowercase ASCII label with a nonzero unsigned 32-bit request ID:
+
+```json
+{"resolve":{"id":1,"label":"desk-pc"}}
+```
+
+The hub echoes the ID in `resolved`. It omits `ip` when there is no live owner in the requester's admitted room, and sets `unavailable: true` if it cannot query the authority. Do not supply a room or a DNS suffix in this request. Frames combining ping and resolve are invalid.
+
+See [durable name registration and live answers](server.md#room-local-dns) and [client-side Magic DNS](client.md#magic-dns). Do not cache the current address or fall back to the roster or upstream DNS.
 
 ## 8. Stream lifecycles
 
@@ -158,7 +170,7 @@ Any other content on a control stream ends the control stream (see section 8.1).
    - Success: `Reply{ok:true, ip, name}`. The account is now registered. The client's address is `ip`.
    - Failure: `Reply{ok:false, error:"unauthorized"}` and the stream closes.
 3. After the success reply, the hub sends `peers` events (initial list and on every change) and `incoming` events, and answers pings with `pong`.
-4. The client must send `{"ping":true}` at least once per `90` seconds. The hub closes the stream if it does not receive a valid ping within that window, and also closes it on any invalid frame.
+4. The client sends `{"ping":true}` for keep-alive. The hub closes the stream after `90` seconds without a valid control request or on an invalid frame.
 5. A second control stream for the same account replaces the first. The earlier stream is closed.
 6. The reference client sends a ping every `30` seconds and treats the control stream as dead after `75` seconds without any frame from the hub.
 
@@ -244,7 +256,7 @@ Exact error strings in `Reply.error`:
 
 | Value | When |
 |---|---|
-| `room does not exist` | The device proved its key, but the operator has not created its private room. Nothing is recorded; retry after the room is created. |
+| `room does not exist` | The device proved its key, but the operator has not created its private room. No room membership or name is registered. Retry after the room is created. |
 | `room password is incorrect` | The room ID is known but the password proof differs from the one stored when the operator created the room. |
 | `rooms are unavailable` | Room storage or the selected record cannot be read safely; clients must not treat this as permission for public fallback. |
 | `unauthorized` | Public key or proof is malformed or invalid, or the identity table is full of active peers. Accept answers this also when the id is unknown, expired, already used, or addressed to another account. |
@@ -279,7 +291,7 @@ After admission, the first frame must arrive within `10` seconds. Otherwise the 
 | Max pending requests per destination | `4` | hub |
 | Handshake deadline (first frame) | `10` s | hub |
 | Accept timeout | `10` s | hub |
-| Control stream idle (no ping) | `90` s | hub |
+| Control stream idle (no valid request) | `90` s | hub |
 | UDP flow idle | `120` s | hub |
 | Frame write deadline | `10` s | hub |
 | Admission DNS lookup | `2` s per name | hub |
@@ -294,7 +306,8 @@ After admission, the first frame must arrive within `10` seconds. Otherwise the 
 
 - The hub loads `ips.json` at startup. A missing file means no peers yet.
 - A peer is created, or its `seen` time refreshed, when a connection proves possession of its key. The file is rewritten when it changes.
-- A peer connecting or disconnecting sends a fresh `peers` event to every control stream.
+- The hub publishes fresh `peers` snapshots when room membership changes.
+- The hub persists room-local label ownership in `names.json`. It derives answers from live controls, never from saved IPs.
 
 ## 13. Reference client behavior (overlayagent)
 
@@ -358,7 +371,7 @@ Then: dial the hub, send the open Hello, read the reply. On `ok:true` the stream
 `overlayagent.Probe(ctx, address)` proves that a hub admits this source and parses frames without registering a peer:
 
 1. Dial the hub.
-2. Send a version 4 control Hello with a malformed public key (`00`). The hub refuses it before any challenge, so no peer is created.
+2. Send a current-wire control Hello with a malformed public key (`00`). The hub refuses it before any challenge, so no peer is created. The probe retries with the previous wire only if the first attempt gets a clean EOF.
 3. Expect `Reply{ok:false, error:"unauthorized"}`. Route the probe through the authenticated VPN.
 
 Use it as a health check. Any other reply means a misconfigured hub or an unexpected source.
@@ -373,7 +386,7 @@ These are local fields, not part of hub peer snapshots or evidence that a remote
 
 ## 14. Building a client in another language
 
-Implement, in order, and test each step against the Rust hub (section 15):
+Implement, in order, and test each step against the current Go hub (section 15):
 
 1. **Identity**: Generate and securely persist a P-384 key pair. Nothing is enrolled.
 2. **Authentication**: Sign the fresh challenge as specified in section 7.1 on each hub stream.
@@ -385,6 +398,7 @@ Implement, in order, and test each step against the Rust hub (section 15):
 8. **Inbound**: handle `incoming`, open an accept stream with the `id`, wait for `ok:true`, then pipe to the local service.
 9. **Reconnect**: exponential backoff from 1 s to 30 s. Reset after a successful registration.
 10. **Probe**: implement section 13.6 as a health check.
+11. **Magic DNS**: if serving local DNS, use capability-gated label lookups (section 7.5) and serve `device-name.on.snoo` in the client.
 
 Keep these rules in any port:
 
@@ -395,27 +409,29 @@ Keep these rules in any port:
 
 ## 15. Testing and verification
 
-Run from the repository root with the workspace file (`go.work`):
+Run from the relay repository root:
 
 ```text
-cd server && cargo test
-cd server && cargo clippy --all-targets -- -D warnings
-cd client && go test -race ./...
-cd tests && go test -race -count=1 ./...
-cd examples && go vet ./...
+(cd server && GOWORK=off go test ./...)
+go test -race ./client/...
+(cd tests && go test -race -count=1 ./...)
+(cd examples && go vet ./...)
 ```
 
-- `server/tests/hub.rs` runs the hub over real loopback TCP and UDP: admission, auth, accept, pending cap, idle timeouts, address stability and eviction.
-- `tests/` builds the hub with cargo, starts it as a process with no configuration, and connects two Go agents to it. It verifies registration without enrollment, peers, a TCP round trip, and refusal of an unknown address.
+- The [`tests/` module](../tests) builds and starts the Go hub and exercises registration, discovery, and flows. Set `OVERLAY_TEST_HUB` to use an already-built current binary.
+- `TestPreviousReleaseInterop` takes `OVERLAY_TEST_LEGACY_HUB` and `OVERLAY_TEST_LEGACY_CLIENT` from wire v4 release `0.4.8` (`00a8fd51fb93acfe31a51ea20a1d34e12fd4487d`).
+- `TestMixedWireDirect` takes `OVERLAY_TEST_LEGACY_SOURCE` pointing to an export of that revision. If `OVERLAY_TEST_LEGACY_HUB` is unset, it uses Cargo only for the historical Rust hub. It checks a native v4 WebRTC baseline and both mixed v4/v5 initiation orders with payload relay disabled.
+- `TestHubStorageUpgradeAndRollback` takes `OVERLAY_TEST_STORAGE_REFERENCE`, the last Rust hub with name lookup. It checks Rust-to-Go upgrade and rollback on the same persisted state.
+- Legacy checks skip if the required fixtures are absent. These local checks do not replace the [native release gate](RELEASE_GATE.md).
 
-To run the hub by hand:
+To build and run the current hub by hand, starting from the relay repository root:
 
 ```text
+cd server
+GOWORK=off go build -o ./overlay-hub .
 OVERLAY_DATA_DIR=./data \
 OVERLAY_LISTEN_ADDRESS=127.0.0.1:6697 \
-./server/target/release/overlay-hub
-```
-
+./overlay-hub
 ```
 
 ## 16. Hub configuration
@@ -423,17 +439,17 @@ OVERLAY_LISTEN_ADDRESS=127.0.0.1:6697 \
 | Variable | Meaning | Required |
 |---|---|---|
 | `OVERLAY_ALLOWED_HOST` | Comma-separated host names whose addresses may connect. Empty entries are dropped. | No; unset admits every private-network source |
-| `OVERLAY_DATA_DIR` | Directory for `ips.json`. Must be writable. | No; default `/var/lib/overlay-relay` |
+| `OVERLAY_DATA_DIR` | Writable directory for identities, rooms, DHCP and durable label ownership. | No; default `/var/lib/overlay-relay` |
 | `OVERLAY_LISTEN_ADDRESS` | Bind address. Default `0.0.0.0:6697`. | No |
+| `OVERLAY_CIDR` | Canonical private IPv4 subnet (section 5). | No; default `10.77.0.0/16` |
 
 Every variable is optional: the hub runs with none of them set.
 
-The hub logs with `tracing`. It never logs private keys, identifiers, payloads or peer names.
+Hub logs exclude private keys, identifiers, payloads and peer names.
 
 ## 17. Container
 
-- `Dockerfile` at the repository root builds the hub from `server/` with `cargo build --release --locked`.
-- Build image: `rust:1-slim`, target `x86_64-unknown-linux-musl`, static binary.
+- The root [Dockerfile](../Dockerfile) builds the Go hub locally with `CGO_ENABLED=0`.
 - Runtime image: `debian:13-slim`, user `65532`, entrypoint `/usr/local/bin/overlay-hub`.
 - Defaults set in the image: `OVERLAY_DATA_DIR=/var/lib/overlay-relay`, `OVERLAY_LISTEN_ADDRESS=0.0.0.0:6697`.
 - The data directory must be writable by uid `65532`.
@@ -459,9 +475,9 @@ The hub logs with `tracing`. It never logs private keys, identifiers, payloads o
 
 ## 20. Release and versioning
 
-- The hub and the Go module share one release version: the `version` field in `server/Cargo.toml`.
-- Go module tags follow the same version as `client/vX.Y.Z`, where `X.Y.Z` matches `server/Cargo.toml`.
-- If a v5 control connection closes before sending any challenge bytes, retry once on a new connection with v3.
-- Do not retry with v3 after a partial frame, a malformed challenge, an authentication failure, or a room rejection.
-- On a v3 session, use v3 for open and accept. Do not start direct signaling.
+- The hub and client share release and wire metadata from the relay root's [`version.go`](../version.go). The shared module takes root tags `vX.Y.Z`.
+- The current generation is v5 and the previous generation is v4. The release number is independent of the wire generation.
+- If a v5 control connection closes before sending any challenge bytes, retry once on a new connection with v4.
+- Do not retry with v4 after a partial frame, a malformed challenge, an authentication failure, or a room rejection.
+- Use the negotiated wire for subsequent streams. Direct signaling is available on v4 and v5 when allowed by peer policy.
 - Use the same identity and room proof on either wire version. The hub enforces its room and relay policy for both versions.

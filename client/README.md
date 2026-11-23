@@ -1,25 +1,23 @@
 # overlay-relay client (Go)
 
-Go module `github.com/ParkSnoopy/overlay-relay/client`. It contains:
+Client packages in the `github.com/ParkSnoopy/overlay-relay` Go module:
 
 - `overlay`: wire types, frame codec and identity keys.
 - `overlayagent`: a reference agent that registers with a hub, tracks peers, opens outbound flows, serves inbound flows, and probes a hub for readiness.
 
-The module has no daemon and no platform code. Your application supplies the network dialers and the local service dialer. The agent runs in your process.
+The agent runs in your process. Your application supplies the network dialers and the local service dialer.
 
 ## Install
 
+For an existing project, remove the old `/client` module requirement and any matching `replace` before adding the root module.
+
 ```text
-go get github.com/ParkSnoopy/overlay-relay/client@latest
+go get github.com/ParkSnoopy/overlay-relay@latest
 ```
 
-Use matching client and hub versions.  
-The hub rejects old direct greetings that still advertise the removed transport.  
-`overlay.ReleaseVersion`, `overlay.Version` and `overlay.AuthDomain` are generated from `server/Cargo.toml` by `python3 scripts/bump_version.py --sync`.  
-Use `--check` to detect drift without writing.  
-
-Module versions follow the server release. Tags are `client/vX.Y.Z`.
-
+Run `go mod tidy` after migrating an existing project. Do not change the package imports.
+See [versioning](../README.md#versioning) for the root module tags and supported wire generations.
+The package import paths remain `github.com/ParkSnoopy/overlay-relay/client/overlay` and `github.com/ParkSnoopy/overlay-relay/client/overlayagent`.
 Requires Go 1.26.6 or later.
 
 ## Use the agent
@@ -98,6 +96,12 @@ Notes:
 - `Config.Compression` (default `false`) DEFLATEs flow bytes in chunks. Both peers of a flow must enable it.
 - Flows are encrypted end to end by default. See [Encryption and direct connections](#encryption-and-direct-connections).
 
+## Magic DNS
+
+Attach `Router.MagicDNS` or `Agent.MagicDNS` to your client DNS path to serve `device-name.on.snoo`.
+The hub registers labels and returns current room-scoped addresses over the authenticated control stream; it does not serve DNS packets.
+See the [client DNS contract](../docs/client.md#magic-dns).
+
 ## Encryption and direct connections
 
 Every agent makes a self-signed flow certificate when it is created. It sends the certificate's SHA-256 fingerprint to the hub with each `open` or `accept`, and the hub hands the other side's fingerprint back. Each side then runs TLS 1.3 over the relayed stream and accepts only the certificate with that fingerprint, so a hub that only relays, and anyone on the network, sees nothing but ciphertext. The fingerprints themselves travel through the hub, so a hub that replaces them can intercept a flow: use a hub you trust. The private identity key never leaves the device.
@@ -168,18 +172,21 @@ If you implement your own transport, `overlay` exposes the framing directly:
 
 ## Test
 
+From the relay repository root:
+
 ```text
-go test -race ./...
+go test -race ./client/...
 ```
 
-End-to-end tests against the Rust hub live in [`../tests`](../tests).
+End-to-end tests against the current Go hub live in [`../tests`](../tests).
+See [legacy interop](../docs/LLM_WIKI.md#15-testing-and-verification) for historical Rust peers.
 
 ## Lint
 
-The module is linted with `golangci-lint` and the `gocritic` linter using [`../.golangci.yml`](../.golangci.yml):
+From the relay repository root, use `golangci-lint` with [the root config](../.golangci.yml):
 
 ```text
-golangci-lint run ./...
+golangci-lint run ./client/...
 ```
 
 ## License

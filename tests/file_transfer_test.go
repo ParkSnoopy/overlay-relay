@@ -413,7 +413,7 @@ func exchangeFiles(t *testing.T, env *transferEnv, proto string, size int, text 
 }
 
 // TestFileTransferBetweenAgents sends files both ways between two Go agents
-// through the Rust hub. The UDP case cuts a file of several megabytes into
+// through the hub. The UDP case cuts a file of several megabytes into
 // frame-sized records with a partial last chunk. The compressed case sends
 // compressible text through flow compression.
 func TestFileTransferBetweenAgents(t *testing.T) {

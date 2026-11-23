@@ -2,55 +2,52 @@
 
 Authenticated rendezvous and byte relay for overlay peers.
 
-Each peer is a client key pair it generated itself and gets a stable private IPv4 address in `10.77.0.0/16`. Peers that choose to broadcast register with a hub, see the other broadcasting peers, and open TCP or UDP flows to them. The hub pairs the two sides and relays bytes. It does not read the payload: agents encrypt every flow end to end (TLS 1.3, certificate fingerprints exchanged through the hub), so a relaying hub sees only ciphertext. Two agents can also opt in to a direct QUIC connection, and the hub then relays nothing.
+Each peer is a client-generated key pair with a hub-assigned private IPv4 address.
+Broadcasting peers in the same room can discover each other and open TCP or UDP flows.
+Agents encrypt relayed flows by default and can opt into direct connections.
+Clients can serve `device-name.on.snoo` using the hub's authenticated room-local name lookups.
 
 ## Components
 
 | Part | Language | Location | Purpose |
 |---|---|---|---|
-| Hub (`overlay-hub`) | Rust | [`server/`](server/README.md) | Admits connections, challenges client keys, relays flows. |
-| Client module | Go | [`client/`](client/README.md) | Wire types, identity keys, and a reference agent. |
-| Container image | Docker | [`Dockerfile`](Dockerfile) | Builds the hub as a non-root image. |
+| Hub (`overlay-hub`) | Go | [`server/`](server/README.md) | Admits peers, owns name bindings, relays flows. |
+| Client packages | Go | [`client/`](client/README.md) | Wire types, identity keys, and a reference agent. |
+| Container image | Docker | [`Dockerfile`](Dockerfile) | Builds a local non-root hub image. |
 
-The full developer reference, including the wire format, message schemas, timers, limits, and a checklist for writing a client in another language, is in [`docs/LLM_WIKI.md`](docs/LLM_WIKI.md).
+See the [developer reference](docs/LLM_WIKI.md) for the wire format, message schemas, timers, and limits.
 
 ## Quick start
 
 ### 1. Run the hub
 
-Build the image:
+Build and run the Go binary using the [hub guide](server/README.md#build), or build a local image from the relay repository root:
 
 ```text
-docker build -t overlay-relay:latest .
+docker build -t overlay-relay:local .
 ```
 
 Use an authenticated VPN between every client and the hub.  
 The protocol does not authenticate the hub or protect its transport against an active intermediary.  
-Connect the hub container to the VPN network before clients attempt to reach it, then start it. It needs no configuration:
+Use an existing VPN Docker network in place of `vpn-network`.
 
 ```text
-docker run -d --name overlay-relay \
+docker run -d --name overlay-relay --network vpn-network \
   -v overlay-relay-data:/var/lib/overlay-relay \
-  overlay-relay:latest
+  overlay-relay:local
 ```
 
-There is no enrollment. Each client generates its own key pair and keeps the private key. The hub challenges every connection, and a valid signature of a key is that key's peer: the same key is always the same peer with the same address. `OVERLAY_ALLOWED_HOST` can restrict which hosts may connect (see [`server/README.md`](server/README.md)).
+There is no enrollment: clients generate and keep their own keys, and the hub challenges every connection.
+Use `OVERLAY_ALLOWED_HOST` to restrict source hosts as described in the [hub guide](server/README.md#admission).
 
-### 2. Use the client module
+### 2. Use the client packages
 
 ```text
-go get github.com/ParkSnoopy/overlay-relay/client@latest
+go get github.com/ParkSnoopy/overlay-relay@latest
 ```
 
-Update the hub and clients separately if needed.  
-The 0.5.x implementation prefers wire v5 and interoperates with 0.4.8 (wire v4).  
-Approved v4 and v5 peers in the same room can connect directly via WebRTC or ICE/QUIC, even when the hub blocks payload relay.  
-
-`server/Cargo.toml` is the release-version source.  
-Run `python3 scripts/bump_version.py --sync` after changing it; `--check` verifies generated server/client metadata without writing.  
-Set `wire` in `[package.metadata.overlay-relay]` independently of the release version.  
-The generator derives the fallback as `wire - 1`; wire v1 has no fallback.  
-The script does not increment versions or publish Go module tags.  
+Update hub and clients separately within the supported [wire compatibility window](#versioning).
+Magic DNS requires client support and a hub advertising name lookup.
 
 ```go
 agent := overlayagent.New(overlayagent.Config{
@@ -70,40 +67,41 @@ ip := <-agent.Ready()
 flow, err := agent.Outbound(ctx, overlay.ProtoTCP, netip.AddrPortFrom(peerIP, 7000))
 ```
 
-See [`client/README.md`](client/README.md) for the full API.
+See the [client guide](client/README.md) for the full API.
 
 ## Examples and tests
 
 - [`examples/client`](examples/client): runs one agent, prints its state, and optionally sends one line to a peer.
-- [`tests/`](tests): builds the hub, starts it as a process, and checks registration without enrollment, peers, a TCP round trip, and refusal of an unknown address against the Go agent.
+- [`tests/`](tests): exercises the Go hub and agent together, including enrollment-free registration, discovery, and flows.
 
-Run them from the repository root:
-
-```text
-cd server && cargo test
-cd client && go test -race ./...
-cd tests && go test -race -count=1 ./...
-cd examples && go vet ./...
-```
-
-Lint:
+Run these from the relay repository root:
 
 ```text
-cd server && cargo clippy --all-targets -- -D warnings
-cd client && golangci-lint run ./...
+(cd server && GOWORK=off go test ./...)
+go test -race ./client/...
+(cd tests && go test -race -count=1 ./...)
+(cd examples && go vet ./...)
 ```
 
-Go modules are joined by the root [`go.work`](go.work). Run Go commands from a module directory so the workspace is used.
+Lint the current Go hub and client from the relay repository root:
+
+```text
+golangci-lint run ./...
+```
+
+The root [`go.mod`](go.mod) covers the hub and client packages.
+The root [`go.work`](go.work) also includes the separate `tests/` and `examples/` modules.
+Legacy Rust compatibility is a separate check against historical binaries or source; see [interop](docs/LLM_WIKI.md#15-testing-and-verification).
 
 ## Versioning
 
-The release version is the `version` field in [`server/Cargo.toml`](server/Cargo.toml).  
-Go module tags follow it as `client/vX.Y.Z`.  
-Each stream declares its wire version in `Hello.version`.  
-The hub accepts wire v5 and v4; wire v3 (0.4.7) is outside the compatibility window.  
-`TestPreviousReleaseInterop` uses hub and client binaries built from `00a8fd51fb93acfe31a51ea20a1d34e12fd4487d`.  
+The relay root's [`version.go`](version.go) defines the shared release and wire metadata for the Go hub and client.
+Release and wire generations are independent.
+Tag the root module as `vX.Y.Z`; public package imports retain `/client/overlay` and `/client/overlayagent`.
+Each stream declares its wire generation in `Hello.version`; the current hub accepts v5 and v4, not v3.
 
-Version 2 is incompatible with token-based clients. Hub 0.2 reads no peers table: any key that signs the challenge is a peer, so remove the old `peers.json` mount. An `ips.json` from an older hub still loads, and addresses of keys that were already listed stay.
+Preserve the existing [hub data directory](docs/server.md#inputs) when replacing an older hub.
+See the [changelog](CHANGELOG.md) for migration notes.
 
 ## License
 

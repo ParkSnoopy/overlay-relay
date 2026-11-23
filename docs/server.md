@@ -1,6 +1,6 @@
 # Overlay hub
 
-Base: `server/` (crate `overlay-relay`, binary `overlay-hub`).
+Base: [`server/`](../server/README.md) (Go binary `overlay-hub`).
 Client counterpart: [client](client.md).
 The snoo-box server manager owns the container lifecycle and selected address range; the hub needs no operator-maintained peer table.
 The [wire contract](../client/overlay/overlay.go) owns frames, datagram records, the address space and identity messages.
@@ -36,29 +36,33 @@ When either limit is exhausted, a new key reclaims the oldest peer with no contr
 
 ## Room-local DNS
 
-- The hub normalizes advertised names to lowercase DNS labels (for example,
-  `Desk PC` becomes `desk-pc.snoo`, and `Bücher` becomes `xn--bcher-kva.snoo`).
-  Whitespace and punctuation act as separators. Unicode labels use IDNA.
+- The hub handles name registration and lookup on the authenticated control
+  stream. It has no DNS listener. The [client DNS adapter](client.md#magic-dns)
+  serves `device-name.on.snoo` using the hub's answer.
+- The hub normalizes advertised names to lowercase labels: `Desk PC` becomes
+  `desk-pc`, and `Bücher` becomes `xn--bcher-kva`. Whitespace and punctuation
+  act as separators. Unicode labels use IDNA.
 - The first authenticated registration for a label in a room binds that label
   to the device's full verifier. Renaming can add a label but never releases
   an existing binding. Address reclamation does not remove name bindings.
-- Every verifier also has a separate `id-<base32>.snoo` name. Encode the 32 bytes
+- Every verifier also has a separate `id-<base32>` label. Encode the 32 bytes
   of the hex verifier as lowercase RFC 4648 base32 without padding. This form
   is reserved and cannot be claimed by a display name. Use it when the
   normalized label is invalid, has another owner, or cannot be added at capacity.
-- The hub answers only with the current IPv4 of an online owner in the
-  requester's admitted room. No address is returned for a missing or offline
-  owner. Private room proofs are rechecked, including after a password change.
-  Room relay policy does not control DNS.
+- The hub answers only with the current IPv4 of an owner with a live control
+  stream in the requester's admitted room. Disconnect or a room change removes
+  the live answer, not the binding. Private room proofs are rechecked so a room
+  removal or password change also stops answers under the old admission.
+  Room relay policy does not control name lookup.
 - `names.json` stores room keys, labels, and verifiers without room proofs or
   IPs. The hub atomically saves and syncs new bindings before serving them.
   Preserve this file across upgrades, downgrades and backups. The hub retains
   up to 16,384 explicit names and never evicts a binding. Corrupt or unwritable
   storage disables DNS without breaking overlay flows. Repair it and restart
   the hub before resuming DNS.
-- Old `ips.json` records lack the room and ownership history required to seed
-  the new store. Durable names start with the first registration on a capable
-  hub. Clients with roster-based DNS need an upgrade to get the guarantee.
+- Preserve existing `names.json` bindings when moving from Rust to Go. Do not
+  seed names from `ips.json`: it lacks the room and ownership history. If no
+  durable store exists, ownership starts with authenticated registration.
 
 ## Protocol
 
@@ -106,9 +110,9 @@ Hidden peers never appear in a `Peers` event, an error or a log line, and an acc
 An account has at most 256 concurrent relayed flows, and a destination has at most four pending incoming requests.
 An idle UDP flow closes after two minutes, and TCP has no idle limit.
 A control stream whose outgoing queue is full is dropped rather than blocking the hub.
-Logs contain only counts and errors at DEBUG, never private keys, identifiers, payloads or names.
+Logs exclude private keys, identifiers, payloads and peer names.
 
 ## Verification
 
-The tests use `net.Pipe` and loopback TCP with an injected resolver and no Docker.
-They cover authentication failure, admission, broadcast listing, hidden-account probing, error identity, TCP and UDP splices, control replacement, eviction and address stability across restart.
+From `server/`, use `GOWORK=off go test ./...` for the Go hub package.
+See [integration checks and legacy compatibility](LLM_WIKI.md#15-testing-and-verification) for test commands and fixture requirements.

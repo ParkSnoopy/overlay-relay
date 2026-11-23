@@ -68,9 +68,12 @@ func (r *Router) SetDirectPeers(ids []string) error {
 
 var errInactive = errors.New("overlay network is not active")
 
-// LookupName resolves one .snoo label through the registered hub control stream.
+// LookupName resolves one device label through the registered hub control stream.
 // A zero address with no error means there is no live owner in the current room.
 func (r *Router) LookupName(ctx context.Context, label string) (netip.Addr, error) {
+	if r == nil {
+		return netip.Addr{}, errInactive
+	}
 	r.mu.RLock()
 	agent := r.agent
 	r.mu.RUnlock()

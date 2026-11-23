@@ -19,100 +19,6 @@ import (
 	"github.com/ParkSnoopy/overlay-relay/client/overlayagent"
 )
 
-func TestVersionSynchronization(t *testing.T) {
-	if output, err := exec.Command("python3", "../scripts/bump_version.py", "--check").CombinedOutput(); err != nil {
-		t.Fatalf("checked-in version metadata: %v: %s", err, output)
-	}
-	script, err := os.ReadFile("../scripts/bump_version.py")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range []struct{ release, protocol, previous string }{
-		{"0.3.0", "1", "0"},
-		{"0.5.3", "5", "4"},
-		{"0.6.0", "6", "5"},
-		{"1.0.0-rc.1", "6", "5"},
-	} {
-		t.Run(test.release, func(t *testing.T) {
-			root := t.TempDir()
-			for _, directory := range []string{"scripts", "server/src", "client/overlay"} {
-				if err := os.MkdirAll(filepath.Join(root, directory), 0700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			path := filepath.Join(root, "scripts/bump_version.py")
-			if err := os.WriteFile(path, script, 0600); err != nil {
-				t.Fatal(err)
-			}
-			manifest := filepath.Join(root, "server/Cargo.toml")
-			header := "[package]\nversion = \"" + test.release + "\"\n[package.metadata.overlay-relay]\n"
-			if err := os.WriteFile(manifest, []byte(header+"wire = "+test.protocol+"\n"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if err := exec.Command("python3", path, "--check").Run(); err == nil {
-				t.Fatal("missing generated versions accepted")
-			}
-			for _, mode := range []string{"--sync", "--check", "--sync", "--check"} {
-				if output, err := exec.Command("python3", path, mode).CombinedOutput(); err != nil {
-					t.Fatalf("%s: %v: %s", mode, err, output)
-				}
-			}
-			client := filepath.Join(root, "client/overlay/version.go")
-			data, err := os.ReadFile(client)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(string(data), `ReleaseVersion = "`+test.release+`"`) ||
-				!strings.Contains(string(data), "const Version = "+test.protocol+"\n") ||
-				!strings.Contains(string(data), "const PreviousWireVersion = "+test.previous+"\n") ||
-				!strings.Contains(string(data), `const PreviousAuthDomain = "overlay-relay/auth/v`+test.previous+`:"`) {
-				t.Fatalf("incorrect generated version: %s", data)
-			}
-			if err := os.WriteFile(client, []byte("DUMMY drift"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if err := exec.Command("python3", path, "--check").Run(); err == nil {
-				t.Fatal("drift accepted")
-			}
-			if after, err := os.ReadFile(client); err != nil || string(after) != "DUMMY drift" {
-				t.Fatal("check changed the client version")
-			}
-			if output, err := exec.Command("python3", path, "--sync").CombinedOutput(); err != nil {
-				t.Fatalf("repair: %v: %s", err, output)
-			}
-			server := filepath.Join(root, "server/src/version.rs")
-			hubData, err := os.ReadFile(server)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(string(hubData), "const VERSION: u32 = "+test.protocol+";") ||
-				!strings.Contains(string(hubData), "const PREVIOUS_WIRE_VERSION: u32 = "+test.previous+";") ||
-				!strings.Contains(string(hubData), `const PREVIOUS_AUTH_DOMAIN: &str = "overlay-relay/auth/v`+test.previous+`:";`) {
-				t.Fatalf("incorrect generated hub version: %s", hubData)
-			}
-			for _, rejected := range []string{"0", "2147483648", "true"} {
-				if err := os.WriteFile(manifest, []byte(header+"wire = "+rejected+"\n"), 0600); err != nil {
-					t.Fatal(err)
-				}
-				for _, mode := range []string{"--check", "--sync"} {
-					if output, err := exec.Command("python3", path, mode).CombinedOutput(); err == nil || !strings.Contains(string(output), "wire must be a positive signed 32-bit integer") {
-						t.Fatalf("%s accepted invalid compatibility metadata or failed unexpectedly: %v: %s", mode, err, output)
-					}
-				}
-				for filename, want := range map[string][]byte{client: data, server: hubData} {
-					if after, err := os.ReadFile(filename); err != nil || string(after) != string(want) {
-						t.Fatalf("rejected synchronization changed %s: %v", filename, err)
-					}
-				}
-			}
-		})
-	}
-}
-
-// The Rust hub is built from the sibling server crate and run as a real process,
-// so the Go agent and the Rust relay meet over loopback TCP with the shipped wire format.
-const serverManifest = "../server/Cargo.toml"
-
 type hubProcess struct {
 	address string
 	dir     string
@@ -121,14 +27,15 @@ type hubProcess struct {
 
 func buildHub(t *testing.T) string {
 	t.Helper()
-	build := exec.Command("cargo", "build", "--locked", "--quiet", "--manifest-path", serverManifest, "--bin", "overlay-hub")
+	if binary := os.Getenv("OVERLAY_TEST_HUB"); binary != "" {
+		return binary
+	}
+	binary := filepath.Join(t.TempDir(), "overlay-hub")
+	build := exec.Command("go", "build", "-mod=readonly", "-o", binary, ".")
+	build.Dir = "../server"
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		t.Fatalf("build overlay-hub: %v", err)
-	}
-	binary, err := filepath.Abs("../server/target/debug/overlay-hub")
-	if err != nil {
-		t.Fatal(err)
 	}
 	return binary
 }
@@ -231,7 +138,7 @@ func waitFor(t *testing.T, states <-chan overlay.State, done func(overlay.State)
 	}
 }
 
-func TestGoAgentAndRustHubPrivateRoomTCP(t *testing.T) {
+func TestAgentAndHubPrivateRoomTCP(t *testing.T) {
 	binary := buildHub(t)
 	alice := newAccount(t, "alice")
 	bob := newAccount(t, "bob")
@@ -366,11 +273,14 @@ func TestMixedWireDirect(t *testing.T) {
 	if legacy == "" {
 		t.Skip("set OVERLAY_TEST_LEGACY_SOURCE to an export of 00a8fd5 (wire v4)")
 	}
-	legacyHub := filepath.Join(legacy, "server/target/debug/overlay-hub")
-	build := exec.Command("cargo", "build", "--locked", "--quiet", "--bin", "overlay-hub")
-	build.Dir = filepath.Join(legacy, "server")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build v4 hub: %v: %s", err, output)
+	legacyHub := os.Getenv("OVERLAY_TEST_LEGACY_HUB")
+	if legacyHub == "" {
+		legacyHub = filepath.Join(legacy, "server", "target", "debug", "overlay-hub")
+		build := exec.Command("cargo", "build", "--locked", "--quiet", "--bin", "overlay-hub")
+		build.Dir = filepath.Join(legacy, "server")
+		if output, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build v4 hub: %v: %s", err, output)
+		}
 	}
 	previous := filepath.Join(t.TempDir(), "wire-v4.test")
 	args := []string{"test", "-c", "-o", previous}
@@ -381,11 +291,18 @@ func TestMixedWireDirect(t *testing.T) {
 		}
 		args = append(args, path)
 	}
-	build = exec.Command("go", args...)
+	build := exec.Command("go", args...)
 	build.Dir = filepath.Join(legacy, "client")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build v4 peer: %v: %s", err, output)
 	}
+	t.Run("v4-baseline", func(t *testing.T) {
+		baseline := exec.Command(previous, "-test.v", "-test.run=^TestNativeV4DirectBaseline$")
+		baseline.Env = append(os.Environ(), "OVERLAY_V4_BASELINE_HUB="+legacyHub)
+		if output, err := baseline.CombinedOutput(); err != nil {
+			t.Fatalf("native v4 WebRTC baseline: %v: %s", err, output)
+		}
+	})
 	for _, hub := range []struct{ name, binary string }{{"v5-hub", buildHub(t)}, {"v4-hub", legacyHub}} {
 		for _, method := range []string{"webrtc", "ice"} {
 			for _, initiator := range []string{"v5", "v4"} {
@@ -395,6 +312,21 @@ func TestMixedWireDirect(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestNativeV4DirectBaseline(t *testing.T) {
+	hub := os.Getenv("OVERLAY_V4_BASELINE_HUB")
+	if hub == "" {
+		t.Skip("started by TestMixedWireDirect using the native v4 client")
+	}
+	if overlay.Version != 4 {
+		t.Fatalf("baseline uses wire v%d, want v4", overlay.Version)
+	}
+	previous, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testMixedWireDirect(t, hub, previous, "webrtc", false)
 }
 
 func interopPeerID(t *testing.T, peer account) string {
@@ -425,7 +357,7 @@ func testMixedWireDirect(t *testing.T, binary, previous, method string, oldIniti
 		t.Fatal(err)
 	}
 	key := filepath.Join(t.TempDir(), "identity.pem")
-	if err := os.WriteFile(key, identity, 0600); err != nil {
+	if err := os.WriteFile(key, identity, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	env := &secureEnv{aliceStates: make(chan overlay.State, 64), aliceTap: &hubTap{}, bobSink: &fileSink{dir: t.TempDir()}}

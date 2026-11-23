@@ -10,14 +10,14 @@ The platform supplies `Dial` (one hub stream through the VPN session), `DialLoca
 `Run` sends `Hello{control}` with the public identity, signs the hub's challenge, and tracks the reply, peer snapshots, incoming requests and pongs.
 `Config.Name` optionally advertises this device's name during authenticated registration.
 Empty uses the identity-derived default; nonempty names have at most 128 Unicode characters, no control characters and no surrounding whitespace.
-The display name does not change the device's identity or address. A capable hub uses it to claim a room-local `.snoo` name and keeps prior claims across renames.
+The display name does not change the device's identity or address. A capable hub uses it to claim a room-local label and keeps prior claims across renames.
 The caller must route each hub connection through an authenticated VPN. The challenge alone does not authenticate the hub or prevent active interception.
 It pings every 30 seconds, treats 75 seconds without any frame as a dead hub, and reconnects with capped exponential backoff from 1 to 30 seconds while its context lives.
 Every change calls `OnState` with `Available`, `Broadcasting` and `Connected`; a rejected account carries the hub's short reason.
 Opt-in public fallback applies only to missing-room or incorrect-password refusals, never unavailable room storage.
 Connected fallback state retains the private-room refusal reason and explicitly identifies public membership.
 Each control reconnect retries the configured private room before considering public fallback again.
-`Agent.LookupName` and `Router.LookupName` ask the hub for one lowercase ASCII label without `.snoo`. A zero address with no error means the owner is missing or offline in the room. A disconnected or older hub returns an error. Do not answer `.snoo` from the roster, cache its addresses or forward the zone to another resolver. See [room-local DNS](server.md#room-local-dns).
+
 `Ready` delivers the overlay address once at the first registration and `IP` returns the latest address.
 `Run` returns after every goroutine it started has stopped.
 
@@ -40,9 +40,18 @@ These fields are local observations, not hub-supplied reachability guarantees.
 `DirectMethod` reports `webrtc` or `ice` only for a live approved link belonging to the current peer identity. It clears when no such link exists; hub-supplied method claims are ignored.
 `BytesPerSecond` measures combined send/receive flow bytes per peer over elapsed one-second-or-longer sampling intervals, using the existing activity timer. Idle intervals publish zero; peer/session replacement clears counters. Only byte counts are retained, and hub-supplied rates are ignored.
 
+## Magic DNS
+
+The application attaches [`Router.MagicDNS` or `Agent.MagicDNS`](../client/overlayagent/magicdns.go) to its client DNS path. The adapter answers `device-name.on.snoo` locally; it does not send DNS packets to the hub.
+
+- [`LookupName`](../client/overlayagent/names.go) sends one lowercase ASCII label, without `.on.snoo`, over the active authenticated control stream.
+- The hub is authoritative for [durable ownership and live room membership](server.md#room-local-dns). A missing or offline owner returns a zero address with no error. A disconnected or incapable hub returns an error.
+- A successful A answer contains the live IPv4 with zero TTL. An existing name has no AAAA answer. Missing names get NXDOMAIN; lookup failures get SERVFAIL.
+- A nil DNS response permits ordinary forwarding. Do not forward protected names, including the retired `device-name.snoo` form, and do not synthesize answers from the roster, local aliases, or cached addresses.
+
 ## Checks
 
-- Run `go test -race ./...` from `client/`; the agent tests use an in-process hub speaking the wire contract and covers registration, peers, TCP and UDP flows, refusals, concurrency bounds, reconnects, backoff, cancellation and goroutine leaks.
-- Run `go test -race -count=1 ./...` from `tests/` for the Go agent against the Rust hub; it builds `server/` with cargo.
+- Run `go test -race ./client/...` from the relay root for the wire and agent packages.
+- Run `go test -race -count=1 ./...` from `tests/` for the agent with the Go hub. See [legacy interop requirements](LLM_WIKI.md#15-testing-and-verification) for checks that need historical Rust builds.
 - The direct-transfer tests use Pion `vnet` for independent full-cone, address-restricted and port-restricted NATs, symmetric peer-port changes in both directions, packet loss and untraversable dual-symmetric NATs. They exercise WebRTC and ICE alone, ICE fallback after WebRTC fails, and encrypted relay fallback. They verify TCP/UDP file digests and hub byte budgets. The simulator requires neither container runtime nor host network/firewall changes.
 - Integration with the real hub and routed traffic on each platform is a separate acceptance step.

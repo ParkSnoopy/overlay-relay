@@ -1,8 +1,10 @@
 # overlay-hub
 
-`overlay-hub` is the relay server for overlay-relay. It accepts connections from admitted hosts, identifies each client by the public key it proves, and relays TCP and UDP flows between broadcasting clients. Install it and run it: nothing needs configuring.
+`overlay-hub` is the Go relay server for overlay-relay.
+It authenticates device keys, assigns IPv4 addresses, owns room-local name bindings, and relays TCP and UDP between broadcasting clients.
 
-Every client connection must use an authenticated VPN. The hub itself accepts TCP and does not authenticate or protect that transport against an active intermediary.
+Every client connection must use an authenticated VPN.
+The hub itself accepts TCP and does not authenticate or protect that transport against an active intermediary.
 
 - Listens on TCP `6697` by default.
 - Assigns each identity a stable address in `10.77.0.0/16` and remembers it in `ips.json`.
@@ -11,30 +13,38 @@ Every client connection must use an authenticated VPN. The hub itself accepts TC
 
 ## Build
 
+Requires Go as specified by the relay root's [`go.mod`](../go.mod).
+From the relay repository root:
+
 ```text
 cd server
-cargo build --release --locked --bin overlay-hub
+GOWORK=off go build -o ./overlay-hub .
 ```
-
-The binary is `target/release/overlay-hub`. The crate needs Rust with edition 2024 support.
 
 ## Run
 
+From `server/`, use a writable data directory and bind to an interface reachable only through your authenticated VPN.
+For a local loopback run:
+
 ```text
-./target/release/overlay-hub
+OVERLAY_DATA_DIR=./data OVERLAY_LISTEN_ADDRESS=127.0.0.1:6697 ./overlay-hub
 ```
 
-The hub needs no configuration. Every variable below is optional.
+Every variable below is optional.
 
 | Variable | Meaning | Default |
 |---|---|---|
 | `OVERLAY_ALLOWED_HOST` | Comma-separated host names. Only connections from an address one of these names currently resolves to are admitted. Empty entries are ignored. | Unset: every loopback, private or link-local source is admitted. |
-| `OVERLAY_DATA_DIR` | Directory where `ips.json` is written. Must be writable. | `/var/lib/overlay-relay` |
+| `OVERLAY_DATA_DIR` | Directory for identities, room policy, DHCP policy, and durable name bindings. Must be writable. | `/var/lib/overlay-relay` |
 | `OVERLAY_LISTEN_ADDRESS` | Address to bind. | `0.0.0.0:6697` |
+| `OVERLAY_CIDR` | Canonical RFC 1918 subnet with prefix length `/8` through `/30`. | `10.77.0.0/16` |
 
-The hub logs to standard error through `tracing`. Set the level in code, not by environment. Stop it with `SIGTERM` or `Ctrl+C`.
+Stop the hub with `SIGTERM` or `Ctrl+C`.
 
-Clap provides `--help`, `--version`, `--data-dir`, `--allowed-host`, `--listen-address` and `--cidr`. Existing environment variables remain supported; `OVERLAY_CIDR` selects a canonical RFC 1918 `/8`–`/30` subnet. Put `--cidr` before an administrative subcommand, or set the same environment as the running hub. `--data-dir` is accepted before or after subcommands.
+Use `--help` for the CLI and `--version` for the shared release and wire generation.
+Global options are `--data-dir`, `--allowed-host`, `--listen-address`, and `--cidr`.
+Set the same data directory and CIDR as the running hub for administrative commands.
+Put `--cidr` before the subcommand; `--data-dir` is accepted before or after it.
 
 ## DHCP policy
 
@@ -58,6 +68,7 @@ overlay-hub rooms relay public false
 overlay-hub rooms create <id> <name> <password-proof> false
 overlay-hub rooms relay <room-key> true
 overlay-hub rooms replace --confirm <id> <name> <password-proof> false
+overlay-hub rooms remove <room-key>
 ```
 
 `rooms list` returns `public_relay` and each private room's `relay` flag. Room keys are SHA-256 hashes of IDs. Omitted policy defaults to enabled for new or legacy rooms; replacement without a policy preserves the existing setting. Toggling policy leaves the room's credentials unchanged.
@@ -75,14 +86,19 @@ There is no account table and no enrollment. A client generates its own P-384 ke
 - The hub keeps at most 4096 identities. When the table is full, a new key takes the address of the identity seen longest ago that has no control stream and no flow. When all 4096 are in use, new keys are refused.
 - A client that loses its private key becomes a new peer with a new address.
 
+## Room-local names
+
+An authenticated control registration can claim a normalized device label for its room.
+The hub persists the first owner's identity in `names.json`, not an IP address.
+It returns the owner's current IPv4 only while the owner and requester have live controls in the same admitted room.
+Disconnect, room removal, or loss of room membership withdraws the answer without releasing the label.
+The client serves Magic DNS for `device-name.on.snoo`; the hub has no DNS listener.
+See the [name and lookup contract](../docs/server.md#room-local-dns).
+
 ## Container
 
-The repository root has a `Dockerfile` that builds this crate as a static musl binary on `rust:1-slim` and runs it on `debian:13-slim` as a non-root user:
-
-```text
-docker build -t overlay-relay:latest ..
-docker run -d -v overlay-relay-data:/var/lib/overlay-relay overlay-relay:latest
-```
+Build the local image from the relay root using the [quick start](../README.md#1-run-the-hub).
+The [Dockerfile](../Dockerfile) builds the Go hub and runs it as a non-root user.
 
 - The image sets `OVERLAY_DATA_DIR=/var/lib/overlay-relay` and `OVERLAY_LISTEN_ADDRESS=0.0.0.0:6697`.
 - Attach the container to the authenticated VPN network. Do not expose the hub directly to an untrusted network.
@@ -113,12 +129,13 @@ The wire format and message schemas are in [`../docs/LLM_WIKI.md`](../docs/LLM_W
 
 ## Test
 
+From `server/`:
+
 ```text
-cargo test
-cargo clippy --all-targets -- -D warnings
+GOWORK=off go test ./...
 ```
 
-`tests/hub.rs` runs the hub over real loopback TCP and UDP sockets, covering admission, authentication, accept, pending limits, idle timeouts, and address stability.
+See [integration and interop checks](../docs/LLM_WIKI.md#15-testing-and-verification) for the Go agent, Go hub, and historical Rust versions.
 
 ## License
 

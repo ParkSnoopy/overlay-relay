@@ -11,10 +11,11 @@ import (
 	"time"
 
 	"github.com/ParkSnoopy/overlay-relay/client/overlay"
+	"github.com/miekg/dns"
 )
 
-// Opt in with OVERLAY_HUB_BIN pointing at the source-built Rust hub.
-func TestServerAssignedRangeWithRustHub(t *testing.T) {
+// Opt in with OVERLAY_HUB_BIN pointing at the source-built hub.
+func TestServerAssignedRangeWithHub(t *testing.T) {
 	binary := os.Getenv("OVERLAY_HUB_BIN")
 	if binary == "" {
 		t.Skip("OVERLAY_HUB_BIN is not set")
@@ -45,7 +46,7 @@ func TestServerAssignedRangeWithRustHub(t *testing.T) {
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatal("Rust hub did not start", ctx.Err())
+			t.Fatal("hub did not start", ctx.Err())
 		case <-ticker.C:
 		}
 	}
@@ -99,10 +100,15 @@ func TestServerAssignedRangeWithRustHub(t *testing.T) {
 	a, b := agents[0], agents[1]
 	a.waitState(t, "second peer", hasPeer(b.IP()))
 	b.waitState(t, "first peer", hasPeer(a.IP()))
-	resolved, err := a.LookupName(ctx, "dummy-laptop")
-	if err != nil || resolved != b.IP() {
-		t.Fatalf("hub returned %v for dummy-laptop, want %v: %v", resolved, b.IP(), err)
+	answer := a.MagicDNS(ctx, new(dns.Msg).SetQuestion("dummy-laptop.on.snoo.", dns.TypeA))
+	if answer == nil || answer.Rcode != dns.RcodeSuccess || len(answer.Answer) != 1 {
+		t.Fatalf("missing advertised name: %v", answer)
 	}
+	record, ok := answer.Answer[0].(*dns.A)
+	if !ok || record.Hdr.Ttl != 0 || record.A.String() != b.IP().String() {
+		t.Fatalf("unexpected A record: %v (want %s, TTL 0)", answer.Answer[0], b.IP())
+	}
+	resolved := netip.MustParseAddr(record.A.String())
 	for _, proto := range []string{overlay.ProtoTCP, overlay.ProtoUDP} {
 		conn, err := a.Outbound(ctx, proto, netip.AddrPortFrom(resolved, 7000))
 		if err != nil {

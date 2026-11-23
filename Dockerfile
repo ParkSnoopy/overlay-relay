@@ -1,23 +1,20 @@
 # syntax=docker/dockerfile:1
 
 # Build the overlay-hub server image.
-#   docker build -t overlay-relay:0.1.1 .
-# The GNU binary is built on Debian 13 to match the runtime's C library.
+#   docker build -t overlay-relay:local .
 # The image runs as a non-root user and reads its
 # configuration from the environment.
 # Nothing is required at run time (see server/README.md).
 
-ARG RUST_IMAGE=docker.io/library/rust:1-slim-trixie
+ARG GO_IMAGE=docker.io/library/golang:1.26-trixie
 ARG RUNTIME_IMAGE=docker.io/library/debian:13-slim
-ARG TARGET=x86_64-unknown-linux-gnu
 
-FROM ${RUST_IMAGE} AS build
-ARG TARGET
-RUN rustup target add "$TARGET"
+FROM ${GO_IMAGE} AS build
 WORKDIR /src
+COPY go.mod go.sum version.go ./
+COPY client/ ./client/
 COPY server/ ./server/
-RUN cargo build --release --locked --target "$TARGET" --manifest-path server/Cargo.toml --bin overlay-hub \
- && install -D -m 0755 server/target/"$TARGET"/release/overlay-hub /out/overlay-hub
+RUN GOWORK=off CGO_ENABLED=0 go build -mod=readonly -trimpath -o /out/overlay-hub ./server
 
 FROM ${RUNTIME_IMAGE}
 COPY --from=build /out/overlay-hub /usr/local/bin/overlay-hub

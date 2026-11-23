@@ -1,6 +1,6 @@
 **/target/
 .git/
-client/
+server/overlay-hub
 examples/
 tests/
 docs/
