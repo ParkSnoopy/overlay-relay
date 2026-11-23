@@ -49,6 +49,7 @@ Put `--cidr` before the subcommand; `--data-dir` is accepted before or after it.
 ## Peer management
 
 `overlay-hub peers list` returns a JSON object keyed by known device IDs under `devices`.
+For the managed editor, `peers connected` instead reads the running hub's control sessions. It requires `OVERLAY_PEER_SOCKET` in a private runtime directory on both processes. `peers check-connected` accepts the proposed edit on stdin and rejects disconnected targets. Neither command falls back to stored leases.
 Each entry has four strings: `name`, `name_override`, `ip`, and `binding`.
 Offline devices are included if the hub still knows their identity.
 An identity known only from the DNS ledger has an empty name and address.

@@ -62,13 +62,23 @@ func newHubRuntime(store *hubStore, space netip.Prefix, timing hubTiming) *hubRu
 }
 
 // serveHub takes ownership of the bound listener, including on startup failure.
-func serveHub(ctx context.Context, listener net.Listener, directory string, hosts []string, space netip.Prefix) error {
+func serveHub(ctx context.Context, listener net.Listener, directory string, hosts []string, space netip.Prefix, peerSocket string) error {
 	defer func() { _ = listener.Close() }()
 	store, err := openHubStore(directory, space)
 	if err != nil {
 		return fmt.Errorf("open overlay state: %w", err)
 	}
-	return newHubRuntime(store, space, defaultHubTiming()).serve(ctx, listener, directory, hosts)
+	hub := newHubRuntime(store, space, defaultHubTiming())
+	if peerSocket != "" {
+		admin, err := privatePeerListener(peerSocket)
+		if err != nil {
+			return err
+		}
+		done := make(chan struct{})
+		go func() { defer close(done); hub.servePeerSocket(admin) }()
+		defer func() { _ = admin.Close(); <-done }()
+	}
+	return hub.serve(ctx, listener, directory, hosts)
 }
 
 func (h *hubRuntime) serve(parent context.Context, listener net.Listener, directory string, hosts []string) error {

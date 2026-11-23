@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ParkSnoopy/overlay-relay/client/overlay"
 	"github.com/ParkSnoopy/overlay-relay/client/overlayagent"
@@ -38,6 +39,7 @@ func managementIdentity(t *testing.T, peer account) (id, public string) {
 
 func TestPeerCLIAndGoHub(t *testing.T) {
 	binary, dir := buildHub(t), t.TempDir()
+
 	const cidr = "10.77.0.0/29"
 	alice, bob, never := newAccount(t, "Alice"), newAccount(t, "Bob"), newAccount(t, "Never registered")
 	aliceID, _ := managementIdentity(t, alice)
@@ -102,8 +104,15 @@ func TestPeerCLIAndGoHub(t *testing.T) {
 
 	checkHub := func(t *testing.T, advertised, name, label, ip string, aliases ...string) {
 		t.Helper()
+		// A container gets a fresh private runtime mount on every start.
+		socketDir, err := os.MkdirTemp("", "peer-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+		t.Setenv("OVERLAY_PEER_SOCKET", filepath.Join(socketDir, "p"))
 		hub := startHub(t, binary, "OVERLAY_DATA_DIR="+dir, "OVERLAY_CIDR="+cidr)
-		start := func(peer account, name string) (*overlayagent.Agent, <-chan overlay.State) {
+		start := func(peer account, name string) (*overlayagent.Agent, <-chan overlay.State, context.CancelFunc) {
 			t.Helper()
 			states := make(chan overlay.State, 16)
 			agent := newAgent(t, hub.address, peer, states, nil, func(c *overlayagent.Config) {
@@ -113,14 +122,14 @@ func TestPeerCLIAndGoHub(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- agent.Run(ctx) }()
 			t.Cleanup(func() { cancel(); <-done })
-			return agent, states
+			return agent, states, cancel
 		}
-		_, aliceStates := start(alice, advertised)
+		_, aliceStates, stopAlice := start(alice, advertised)
 		seen := waitFor(t, aliceStates, func(state overlay.State) bool { return state.Connected })
 		if seen.Name != name || seen.Domain != label+".on.snoo" || seen.IP != ip {
 			t.Fatalf("wrong owner registration: %+v", seen)
 		}
-		watcher, bobStates := start(bob, "Bob")
+		watcher, bobStates, _ := start(bob, "Bob")
 		seen = waitFor(t, bobStates, func(state overlay.State) bool { return state.Connected && len(state.Peers) == 1 })
 		if peer := seen.Peers[0]; seen.IP != "10.77.0.2" || peer.ID != aliceID || peer.Name != name || peer.Domain != label+".on.snoo" || peer.IP != ip {
 			t.Fatalf("wrong address or peer roster: %+v", seen)
@@ -129,6 +138,29 @@ func TestPeerCLIAndGoHub(t *testing.T) {
 			if address, err := watcher.LookupName(t.Context(), lookup); err != nil || address.String() != ip {
 				t.Fatalf("DNS %s = %s, %v; want %s", lookup, address, err, ip)
 			}
+		}
+		live := func() map[string]managedPeer {
+			out, err := call("", "peers", "connected")
+			var roster struct{ Devices map[string]managedPeer }
+			if err != nil || json.Unmarshal([]byte(out), &roster) != nil {
+				t.Fatalf("live roster: %s (%v)", out, err)
+			}
+			return roster.Devices
+		}
+		if peers := live(); len(peers) != 2 || peers[aliceID].Name != name || peers[aliceID].IP != ip || peers[bobID].Name != "Bob" {
+			t.Fatalf("unexpected online peers: %+v", peers)
+		}
+		edit := editJSON(aliceID, "Office Desk", "")
+		if out, err := call(edit, "peers", "check-connected"); err != nil {
+			t.Fatalf("online edit refused: %s", out)
+		}
+		stopAlice()
+		deadline := time.Now().Add(3 * time.Second)
+		for len(live()) != 1 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if out, err := call(edit, "peers", "check-connected"); err == nil || !strings.Contains(out, "no longer connected") {
+			t.Fatalf("stale edit not rejected: %s", out)
 		}
 	}
 	if !t.Run("automatic pool", func(t *testing.T) {

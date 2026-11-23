@@ -46,7 +46,7 @@ func startHubSocketIn(t *testing.T, dir string, hosts []string, space netip.Pref
 	hub := &hubTestSocket{address: listener.Addr().String(), cancel: cancel, done: make(chan error, 1)}
 	t.Cleanup(func() { hub.stop(t) })
 	if tune == nil {
-		go func() { hub.done <- serveHub(ctx, listener, dir, hosts, space) }()
+		go func() { hub.done <- serveHub(ctx, listener, dir, hosts, space, "") }()
 	} else {
 		store, err := openHubStore(dir, space)
 		if err != nil {

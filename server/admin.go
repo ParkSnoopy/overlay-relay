@@ -16,13 +16,14 @@ const (
 )
 
 type hubCLIOptions struct {
-	directory string
-	hosts     string
-	listen    string
-	space     netip.Prefix
-	command   string
-	args      []string
-	relay     *bool
+	peerSocket string
+	directory  string
+	hosts      string
+	listen     string
+	space      netip.Prefix
+	command    string
+	args       []string
+	relay      *bool
 }
 
 type hubCLIResponse struct {
@@ -59,6 +60,8 @@ var hubCommands = hubCommand{description: "Serve the overlay hub, or administer 
 	}},
 	{name: "peers", description: "Manage known devices; stop the hub before saving and restart to apply", children: []hubCommand{
 		{name: "list", description: "Print known devices, effective names, and address bindings as JSON"},
+		{name: "connected", description: "List only devices with a live authenticated control session"},
+		{name: "check-connected", description: "Check the device in a proposed JSON edit is still connected"},
 		{name: "set", description: "Set one device's name override and address binding from standard input as JSON"},
 	}},
 	{name: "rooms", description: "Manage rooms without restarting the hub", children: []hubCommand{
@@ -82,10 +85,11 @@ func cliEnv(lookup func(string) (string, bool), key, fallback string) string {
 
 func parseHubCLI(args []string, env func(string) (string, bool)) (hubCLIOptions, *hubCLIResponse) {
 	options := hubCLIOptions{
-		directory: cliEnv(env, "OVERLAY_DATA_DIR", defaultDataDir),
-		hosts:     cliEnv(env, "OVERLAY_ALLOWED_HOST", ""),
-		listen:    cliEnv(env, "OVERLAY_LISTEN_ADDRESS", defaultListen),
-		space:     overlay.CIDR,
+		peerSocket: cliEnv(env, "OVERLAY_PEER_SOCKET", ""),
+		directory:  cliEnv(env, "OVERLAY_DATA_DIR", defaultDataDir),
+		hosts:      cliEnv(env, "OVERLAY_ALLOWED_HOST", ""),
+		listen:     cliEnv(env, "OVERLAY_LISTEN_ADDRESS", defaultListen),
+		space:      overlay.CIDR,
 	}
 	command := &hubCommands
 	var path []string
@@ -236,6 +240,23 @@ func runHubAdmin(options *hubCLIOptions, stdin io.Reader, stdout io.Writer) erro
 			return fmt.Errorf("overlay i/o failed: %w", err)
 		}
 		return saveDHCP(dir, space, raw)
+	case "peers connected", "peers check-connected":
+		peers, err := queryConnectedPeers(options.peerSocket)
+		if err != nil {
+			return err
+		}
+		if options.command == "peers connected" {
+			return writeStoreJSON(stdout, peers)
+		}
+		raw, err := io.ReadAll(io.LimitReader(stdin, maxPeerEditBytes+1))
+		var edit peerEdit
+		if err != nil || len(raw) > maxPeerEditBytes || unmarshalStoreJSON(raw, &edit) != nil || edit.validate() != nil {
+			return errors.New("invalid peer edit")
+		}
+		if _, ok := peers.Devices[edit.DeviceID]; !ok {
+			return errors.New("device is no longer connected")
+		}
+		return nil
 	case "peers list":
 		result, err := listPeers(dir, space)
 		if err != nil {

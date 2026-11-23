@@ -36,6 +36,7 @@ When either limit is exhausted, a new key can reclaim the oldest idle, unreserve
 
 ## Peer settings and rollback
 
+- The managed editor uses `peers connected`, never the stored registry. A private runtime socket exposes an authenticated control-session snapshot, not saved leases or flow-only connections. `peers check-connected` verifies the target before the manager stops the hub. After restart, confirm the edited identity from persisted settings independently of its reconnect timing.
 - `peers list` reports `{"devices":{"<device-id>":{"name":"","name_override":"","ip":"","binding":""}}}`. These fields are always strings. `name` is the operator override or the last client name, and is empty when neither is known. `ip` is empty without an effective assignment or reservation. `binding` is empty for dynamic addressing.
 - The list includes current and offline assignments, devices with a reservation or saved peer edit, and identities recorded only in the DNS ledger after address reclamation. Room-scoped DNS labels prove ownership but do not supply a display name. A device absent from all those stores is not known to the hub.
 - `peers set` takes `device_id`, `name`, and `binding` as required strings in one JSON object, up to 4 KiB. It rejects unknown or repeated fields, unknown device IDs, names over 128 Unicode characters or with control characters or surrounding whitespace, and noncanonical or unusable IPv4 bindings. An address assigned or reserved to another peer is unavailable.

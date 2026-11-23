@@ -40,7 +40,7 @@ func runHubCLI(ctx context.Context, args []string, lookupEnv func(string) (strin
 		if err == nil {
 			hosts := allowedHosts(options.hosts)
 			_, _ = fmt.Fprintf(stderr, "overlay hub listening hosts=%d\n", len(hosts))
-			err = serveHub(ctx, listener, options.directory, hosts, options.space)
+			err = serveHub(ctx, listener, options.directory, hosts, options.space, options.peerSocket)
 		}
 	}
 	if err != nil {
