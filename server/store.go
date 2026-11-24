@@ -31,9 +31,10 @@ var (
 )
 
 type assignment struct {
-	IP   netip.Addr `json:"ip"`
-	Seen uint64     `json:"seen"`
-	Name string     `json:"name,omitempty"`
+	IP     netip.Addr `json:"ip"`
+	Seen   uint64     `json:"seen"`
+	Name   string     `json:"name,omitempty"`
+	legacy bool
 }
 
 type hubStore struct {
@@ -43,6 +44,8 @@ type hubStore struct {
 	firstIP      netip.Addr
 	lastIP       netip.Addr
 	leaseSeconds uint64
+	dhcp         dhcpPolicy
+	cache        map[string]cachedPeer
 	peerEdits    map[string]peerEdit
 	assignments  map[string]assignment
 	byIP         map[netip.Addr]string
@@ -54,11 +57,14 @@ type hubStore struct {
 }
 
 func openHubStore(dir string, space netip.Prefix) (*hubStore, error) {
-	s, _, err := readHubStore(dir, space)
+	s, records, err := readHubStore(dir, space)
 	if err != nil {
 		return nil, err
 	}
 	s.names = loadNames(dir)
+	if err := s.seedDetachedPeers(records, hubUnixNow()); err != nil {
+		return nil, err
+	}
 	s.persistAssignments()
 	return s, nil
 }
@@ -86,8 +92,12 @@ func readHubStore(dir string, space netip.Prefix) (*hubStore, map[string]assignm
 		return nil, nil, err
 	}
 	firstIP, lastIP := hostBounds(space)
+	cache, err := loadPeerCache(dir)
+	if err != nil {
+		return nil, nil, err
+	}
 	s := &hubStore{
-		dir: dir, firstIP: firstIP, lastIP: lastIP, leaseSeconds: policy.LeaseSeconds, peerEdits: edits,
+		dir: dir, firstIP: firstIP, lastIP: lastIP, leaseSeconds: policy.LeaseSeconds, peerEdits: edits, dhcp: policy, cache: cache,
 		assignments: make(map[string]assignment), byIP: make(map[netip.Addr]string),
 		reservations: reservations, reservedIPs: reservedIPs,
 	}
@@ -127,7 +137,7 @@ func (s *hubStore) reconcileAssignments(space netip.Prefix, records map[string]a
 			s.dirty = true
 			continue
 		}
-		s.dirty = s.dirty || oldIP != record.IP
+		s.dirty = s.dirty || oldIP != record.IP || record.legacy
 		s.assignments[id] = record
 		s.byIP[record.IP] = id
 	}
@@ -151,6 +161,7 @@ func loadAssignments(dir string, now uint64) (map[string]assignment, error) {
 				return nil, errCorruptAssignments
 			}
 			record.Seen = now
+			record.legacy = true
 		} else if err := decodeStoreObject(value, true,
 			requiredField("ip", &record.IP), requiredField("seen", &record.Seen),
 			optionalField("name", &record.Name)); err != nil {
@@ -187,11 +198,11 @@ func (s *hubStore) identify(id string, now uint64, busy func(string) bool) (neti
 	idle := func(other string) bool {
 		return !s.reservations[other].IsValid() && (busy == nil || !busy(other))
 	}
-	if lease != 0 {
-		for other, record := range s.assignments {
-			if elapsed(now, record.Seen) >= lease && idle(other) {
-				s.removeAssignment(other)
-			}
+	if err := s.expirePeersLocked(now, busy); err != nil {
+		// Don't revive an expired device whose settings could not be purged.
+		// Unrelated peers can still connect, including when DNS is unavailable.
+		if s.peerPastRetention(id, now) && (busy == nil || !busy(id)) {
+			return netip.Addr{}, err
 		}
 	}
 	if record, found := s.assignments[id]; found {
@@ -219,7 +230,7 @@ func (s *hubStore) identify(id string, now uint64, busy func(string) bool) (neti
 		}
 		var oldest string
 		for other, record := range s.assignments {
-			if idle(other) && (oldest == "" || record.Seen < s.assignments[oldest].Seen ||
+			if idle(other) && !s.peerPastRetention(other, now) && (oldest == "" || record.Seen < s.assignments[oldest].Seen ||
 				(record.Seen == s.assignments[oldest].Seen && other < oldest)) {
 				oldest = other
 			}
@@ -228,6 +239,9 @@ func (s *hubStore) identify(id string, now uint64, busy func(string) bool) (neti
 			return netip.Addr{}, errAddressExhausted
 		}
 		freed := s.assignments[oldest].IP
+		if err := s.cacheAssignment(oldest, s.assignments[oldest]); err != nil {
+			return netip.Addr{}, err
+		}
 		s.removeAssignment(oldest)
 		if !s.reservations[id].IsValid() && (!ip.IsValid() || freed.Compare(ip) < 0) {
 			ip = freed
@@ -279,6 +293,21 @@ func (s *hubStore) touch(id string, now uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if record, found := s.assignments[id]; found {
+		record.Seen = now
+		s.assignments[id] = record
+		s.dirty = true
+	}
+	s.persistAssignments()
+}
+
+func (s *hubStore) heartbeat(id string, now uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	interval := uint64(seenGranularity)
+	if s.leaseSeconds != 0 {
+		interval = min(interval, s.leaseSeconds/2)
+	}
+	if record, found := s.assignments[id]; found && elapsed(now, record.Seen) >= interval {
 		record.Seen = now
 		s.assignments[id] = record
 		s.dirty = true

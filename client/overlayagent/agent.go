@@ -49,6 +49,8 @@ type Config struct {
 	FallbackPublic bool
 	// Name is this device's advertised name. Empty uses the hub's default.
 	Name string
+	// Domain overrides the name-derived domain without changing the display name.
+	Domain string
 	// Identity is the persistent private key enrolled with the hub.
 	Identity *ecdsa.PrivateKey
 	// Dial opens one stream to the hub through an authenticated VPN session.
@@ -81,6 +83,13 @@ type Config struct {
 	RelayFirewall []overlay.FirewallRule
 	// LogRelay receives a diagnostic line per payload relay request, possibly concurrently.
 	LogRelay func(string)
+}
+
+func (a *Agent) requestedDomain() string {
+	if a.cfg.Domain != "" {
+		return a.cfg.Domain
+	}
+	return overlay.DeviceDomain(a.cfg.Name)
 }
 
 type timing struct {
@@ -320,7 +329,7 @@ func (a *Agent) dialControl(ctx context.Context) (net.Conn, overlay.Reply, int, 
 			return nil, overlay.Reply{}, version, err
 		}
 		reply, err := a.handshake(ctx, conn, &overlay.Hello{Version: version, Kind: overlay.KindControl,
-			Name: a.cfg.Name, Domain: overlay.DeviceDomain(a.cfg.Name), PeerPages: true})
+			Name: a.cfg.Name, Domain: a.requestedDomain(), DomainExplicit: a.cfg.Domain != "", PeerPages: true})
 		if err == nil {
 			return conn, reply, version, nil
 		}

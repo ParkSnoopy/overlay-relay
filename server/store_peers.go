@@ -112,10 +112,13 @@ func effectiveReservations(space netip.Prefix, legacy []dhcpBinding, edits map[s
 }
 
 type listedPeer struct {
-	Name         string `json:"name"`
-	NameOverride string `json:"name_override"`
-	IP           string `json:"ip"`
-	Binding      string `json:"binding"`
+	Name           string `json:"name"`
+	NameOverride   string `json:"name_override"`
+	IP             string `json:"ip"`
+	Binding        string `json:"binding"`
+	DomainOverride string `json:"domain_override"`
+	Domain         string `json:"domain,omitempty"`
+	Connected      bool   `json:"connected"`
 }
 
 type peerListing struct {
@@ -127,12 +130,22 @@ func listPeers(dir string, space netip.Prefix) (peerListing, error) {
 	if err != nil {
 		return peerListing{}, err
 	}
-	devices := make(map[string]listedPeer, len(known))
-	for id, name := range known {
-		devices[id] = listedPeer{Name: name}
+	return s.listKnownPeers(known), nil
+}
+
+// Call with the store locked when its runtime is active.
+func (s *hubStore) listKnownPeers(known map[string]assignment) peerListing {
+	devices := make(map[string]listedPeer, len(known)+len(s.assignments)+len(s.cache))
+	for id, record := range known {
+		devices[id] = listedPeer{Name: record.Name}
+	}
+	for id, record := range s.cache {
+		devices[id] = listedPeer{Name: record.Name, DomainOverride: record.Domain}
 	}
 	for id, record := range s.assignments {
-		devices[id] = listedPeer{IP: record.IP.String(), Name: record.Name}
+		device := devices[id]
+		device.IP, device.Name = record.IP.String(), record.Name
+		devices[id] = device
 	}
 	for id, ip := range s.reservations {
 		device := devices[id]
@@ -147,10 +160,10 @@ func listPeers(dir string, space netip.Prefix) (peerListing, error) {
 		}
 		devices[id] = device
 	}
-	return peerListing{Devices: devices}, nil
+	return peerListing{Devices: devices}
 }
 
-func readPeerAdminState(dir string, space netip.Prefix) (*hubStore, map[string]string, error) {
+func readPeerAdminState(dir string, space netip.Prefix) (*hubStore, map[string]assignment, error) {
 	s, records, err := readHubStore(dir, space)
 	if err != nil {
 		return nil, nil, err
@@ -159,45 +172,105 @@ func readPeerAdminState(dir string, space netip.Prefix) (*hubStore, map[string]s
 	if err != nil {
 		return nil, nil, err
 	}
-	known := make(map[string]string, len(records))
-	for _, room := range names.rooms {
-		for _, id := range room {
-			known[id] = ""
+	known := maps.Clone(records)
+	now := hubUnixNow()
+	add := func(id string) {
+		if _, found := known[id]; !found {
+			known[id] = assignment{Seen: now}
 		}
 	}
-	for id, record := range records {
-		known[id] = record.Name
+	for _, room := range names.rooms {
+		for _, id := range room {
+			add(id)
+		}
+	}
+	for id := range s.peerEdits {
+		add(id)
+	}
+	for _, binding := range s.dhcp.Bindings {
+		add(binding.verifier())
 	}
 	return s, known, nil
+}
+
+type peerEditRequest struct {
+	peerEdit
+	Domain *string
+}
+
+func (p *peerEditRequest) UnmarshalJSON(raw []byte) error {
+	return decodeStoreObject(raw, false, requiredField("device_id", &p.DeviceID),
+		requiredField("name", &p.Name), requiredField("binding", &p.Binding),
+		optionalField("domain", &p.Domain))
+}
+
+func (p peerEditRequest) validate() error {
+	if p.Domain != nil {
+		if err := overlay.ValidateDeviceDomain(*p.Domain); err != nil {
+			return err
+		}
+	}
+	return p.peerEdit.validate()
 }
 
 func setPeer(dir string, space netip.Prefix, raw []byte) error {
 	if len(raw) > maxPeerEditBytes {
 		return errors.New("peer settings are too large")
 	}
-	var edit peerEdit
-	if err := unmarshalStoreJSON(raw, &edit); err != nil {
+	var request peerEditRequest
+	if err := unmarshalStoreJSON(raw, &request); err != nil {
 		return fmt.Errorf("overlay json is invalid: %w", err)
 	}
-	if err := edit.validate(); err != nil {
+	if err := request.validate(); err != nil {
 		return err
 	}
 	s, known, err := readPeerAdminState(dir, space)
 	if err != nil {
 		return err
 	}
-	_, seen := known[edit.DeviceID]
-	if err := s.validatePeerEdit(space, edit, seen); err != nil {
+	edit := request.peerEdit
+	peer, cached := s.cache[edit.DeviceID]
+	record, found := known[edit.DeviceID]
+	if !found && !cached {
+		return errors.New("peer settings require a device known to this hub")
+	}
+	// DNS-only records may lack a legacy timestamp; prefer their cached clock.
+	if !cached || (record.IP.IsValid() && record.Seen >= peer.Seen) {
+		peer.Name, peer.Seen = record.Name, record.Seen
+	}
+	if s.peerExpired(hubUnixNow(), peer.Seen) {
+		return errors.New("device has expired")
+	}
+	if err := s.validatePeerEdit(space, edit, cached || found); err != nil {
 		return err
+	}
+	oldCache := s.cache
+	if request.Domain != nil && *request.Domain != peer.Domain {
+		peer.Domain = *request.Domain
+		next := maps.Clone(s.cache)
+		next[edit.DeviceID] = peer
+		if err := s.savePeerCache(next); err != nil {
+			return err
+		}
 	}
 	old, edited := s.peerEdits[edit.DeviceID]
 	if old == edit || (!edited && edit.Name == "" && edit.bindingIP() == s.reservations[edit.DeviceID]) {
 		return nil
 	}
 	s.peerEdits[edit.DeviceID] = edit
-	rows := make([]peerEdit, 0, len(s.peerEdits))
-	for _, id := range slices.Sorted(maps.Keys(s.peerEdits)) {
-		rows = append(rows, s.peerEdits[id])
+	if err := savePeerEdits(dir, s.peerEdits); err != nil {
+		if !maps.Equal(oldCache, s.cache) {
+			return errors.Join(err, s.savePeerCache(oldCache))
+		}
+		return err
+	}
+	return nil
+}
+
+func savePeerEdits(dir string, edits map[string]peerEdit) error {
+	rows := make([]peerEdit, 0, len(edits))
+	for _, id := range slices.Sorted(maps.Keys(edits)) {
+		rows = append(rows, edits[id])
 	}
 	return saveStoreJSON(filepath.Join(dir, peerEditsFile), ".peers-", rows, true)
 }

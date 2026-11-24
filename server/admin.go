@@ -60,9 +60,11 @@ var hubCommands = hubCommand{description: "Serve the overlay hub, or administer 
 	}},
 	{name: "peers", description: "Manage known devices; stop the hub before saving and restart to apply", children: []hubCommand{
 		{name: "list", description: "Print known devices, effective names, and address bindings as JSON"},
+		{name: "managed", description: "List connected and cached devices with live presence"},
+		{name: "check-managed", description: "Check the device in a proposed JSON edit has not expired"},
 		{name: "connected", description: "List only devices with a live authenticated control session"},
 		{name: "check-connected", description: "Check the device in a proposed JSON edit is still connected"},
-		{name: "set", description: "Set one device's name override and address binding from standard input as JSON"},
+		{name: "set", description: "Set one device's name, address binding, and optional domain override from JSON"},
 	}},
 	{name: "rooms", description: "Manage rooms without restarting the hub", children: []hubCommand{
 		{name: "list", description: "Print public and private room policies as JSON"},
@@ -240,21 +242,32 @@ func runHubAdmin(options *hubCLIOptions, stdin io.Reader, stdout io.Writer) erro
 			return fmt.Errorf("overlay i/o failed: %w", err)
 		}
 		return saveDHCP(dir, space, raw)
-	case "peers connected", "peers check-connected":
-		peers, err := queryConnectedPeers(options.peerSocket)
+	case "peers connected", "peers check-connected", "peers managed", "peers check-managed":
+		peers, err := queryManagedPeers(options.peerSocket)
 		if err != nil {
 			return err
 		}
 		if options.command == "peers connected" {
+			for id, peer := range peers.Devices {
+				if !peer.Connected {
+					delete(peers.Devices, id)
+				}
+			}
+		}
+		if options.command == "peers connected" || options.command == "peers managed" {
 			return writeStoreJSON(stdout, peers)
 		}
 		raw, err := io.ReadAll(io.LimitReader(stdin, maxPeerEditBytes+1))
-		var edit peerEdit
+		var edit peerEditRequest
 		if err != nil || len(raw) > maxPeerEditBytes || unmarshalStoreJSON(raw, &edit) != nil || edit.validate() != nil {
 			return errors.New("invalid peer edit")
 		}
-		if _, ok := peers.Devices[edit.DeviceID]; !ok {
+		peer, ok := peers.Devices[edit.DeviceID]
+		if options.command == "peers check-connected" && !peer.Connected {
 			return errors.New("device is no longer connected")
+		}
+		if !ok {
+			return errors.New("device is no longer known to this hub")
 		}
 		return nil
 	case "peers list":

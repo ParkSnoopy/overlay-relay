@@ -42,12 +42,12 @@ func TestHubStorageUpgradeAndRollback(t *testing.T) {
 		labels                                 []string
 	}{
 		{"legacy", reference, "before", "before", "10.77.0.40", []string{"before"}},
-		{"upgrade", current, "client", "after", "10.77.0.41", []string{"before", "after"}},
-		{"rollback", reference, "restored", "restored", "10.77.0.40", []string{"before", "after", "restored"}},
-		{"re-upgrade", current, "client", "after", "10.77.0.41", []string{"before", "after", "restored"}},
+		{"upgrade", current, "client", "after", "10.77.0.41", []string{"before", "custom"}},
+		{"rollback", reference, "restored", "restored", "10.77.0.40", []string{"before", "custom", "restored"}},
+		{"re-upgrade", current, "client", "after", "10.77.0.41", []string{"before", "custom", "restored"}},
 	} {
 		if step.name == "upgrade" {
-			edit := fmt.Sprintf(`{"device_id":%q,"name":"after","binding":"10.77.0.41"}`, id)
+			edit := fmt.Sprintf(`{"device_id":%q,"name":"after","binding":"10.77.0.41","domain":"custom.on.snoo"}`, id)
 			admin(current, edit, "peers", "set")
 		}
 		if !t.Run(step.name, func(t *testing.T) {
@@ -63,6 +63,9 @@ func TestHubStorageUpgradeAndRollback(t *testing.T) {
 			state := waitFor(t, states, func(s overlay.State) bool { return s.Connected })
 			if state.Name != step.effective || state.IP != step.ip {
 				t.Fatalf("wrong peer state after %s: %+v", step.name, state)
+			}
+			if step.binary == current && state.Domain != "custom.on.snoo" {
+				t.Fatalf("wrong domain after %s: %q", step.name, state.Domain)
 			}
 			for _, label := range step.labels {
 				if ip, err := peer.LookupName(ctx, label); err != nil || ip.String() != step.ip {

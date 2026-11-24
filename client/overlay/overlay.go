@@ -82,13 +82,14 @@ type Hello struct {
 	Room string `json:"room,omitempty"`
 	// RoomID names the private room, empty for the public room. A known ID
 	// only admits the password proof that its first requester used.
-	RoomID string `json:"room_id,omitempty"`
-	Name   string `json:"name,omitempty"`   // control: advertised device name
-	Domain string `json:"domain,omitempty"` // control: requested canonical domain
-	Proto  string `json:"proto,omitempty"`  // open
-	Dst    string `json:"dst,omitempty"`    // open: destination overlay IP
-	Port   uint16 `json:"port,omitempty"`   // open: destination port
-	ID     string `json:"id,omitempty"`     // accept: Incoming.ID
+	RoomID         string `json:"room_id,omitempty"`
+	Name           string `json:"name,omitempty"`            // control: advertised device name
+	Domain         string `json:"domain,omitempty"`          // control: requested canonical domain
+	DomainExplicit bool   `json:"domain_explicit,omitempty"` // control: requested by the device owner
+	Proto          string `json:"proto,omitempty"`           // open
+	Dst            string `json:"dst,omitempty"`             // open: destination overlay IP
+	Port           uint16 `json:"port,omitempty"`            // open: destination port
+	ID             string `json:"id,omitempty"`              // accept: Incoming.ID
 
 	// Fingerprint is the SHA-256 of the sender's flow certificate, as 64 hex
 	// digits. Sending it offers an end-to-end encrypted flow (open, accept).

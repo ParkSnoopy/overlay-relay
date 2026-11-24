@@ -18,10 +18,13 @@ import (
 )
 
 type managedPeer struct {
-	Name         string `json:"name"`
-	NameOverride string `json:"name_override"`
-	IP           string `json:"ip"`
-	Binding      string `json:"binding"`
+	Name           string `json:"name"`
+	NameOverride   string `json:"name_override"`
+	IP             string `json:"ip"`
+	Binding        string `json:"binding"`
+	DomainOverride string `json:"domain_override"`
+	Domain         string `json:"domain"`
+	Connected      bool   `json:"connected"`
 }
 
 func managementIdentity(t *testing.T, peer account) (id, public string) {
@@ -75,16 +78,20 @@ func TestPeerCLIAndGoHub(t *testing.T) {
 		var fields struct {
 			Devices map[string]map[string]json.RawMessage `json:"devices"`
 		}
-		if err := json.Unmarshal([]byte(out), &fields); err != nil || len(fields.Devices[id]) != 4 || fields.Devices[id]["name_override"] == nil {
+		if err := json.Unmarshal([]byte(out), &fields); err != nil || len(fields.Devices[id]) != 6 || fields.Devices[id]["name_override"] == nil || fields.Devices[id]["domain_override"] == nil {
 			t.Fatalf("unexpected peer JSON: %s", out)
 		}
 	}
 	editJSON := func(id, name, binding string) string {
 		return fmt.Sprintf(`{"device_id":%q,"name":%q,"binding":%q}`, id, name, binding)
 	}
-	set := func(id, name, binding string) {
+	set := func(id, name, binding string, domain ...string) {
 		t.Helper()
-		if out, err := call(editJSON(id, name, binding), "peers", "set"); err != nil || out != "" {
+		input := editJSON(id, name, binding)
+		if len(domain) != 0 {
+			input = strings.TrimSuffix(input, "}") + fmt.Sprintf(`,"domain":%q}`, domain[0])
+		}
+		if out, err := call(input, "peers", "set"); err != nil || out != "" {
 			t.Fatalf("peers set: %v %s", err, out)
 		}
 	}
@@ -102,7 +109,7 @@ func TestPeerCLIAndGoHub(t *testing.T) {
 	list(neverID, managedPeer{})
 	set(neverID, "Offline", "10.77.0.6")
 
-	checkHub := func(t *testing.T, advertised, name, label, ip string, aliases ...string) {
+	checkHub := func(t *testing.T, advertised, custom, name, label, ip string, aliases ...string) {
 		t.Helper()
 		// A container gets a fresh private runtime mount on every start.
 		socketDir, err := os.MkdirTemp("", "peer-")
@@ -112,11 +119,12 @@ func TestPeerCLIAndGoHub(t *testing.T) {
 		t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
 		t.Setenv("OVERLAY_PEER_SOCKET", filepath.Join(socketDir, "p"))
 		hub := startHub(t, binary, "OVERLAY_DATA_DIR="+dir, "OVERLAY_CIDR="+cidr)
-		start := func(peer account, name string) (*overlayagent.Agent, <-chan overlay.State, context.CancelFunc) {
+		start := func(peer account, name, domain string) (*overlayagent.Agent, <-chan overlay.State, context.CancelFunc) {
 			t.Helper()
 			states := make(chan overlay.State, 16)
 			agent := newAgent(t, hub.address, peer, states, nil, func(c *overlayagent.Config) {
 				c.CIDR, c.Name = netip.MustParsePrefix(cidr), name
+				c.Domain = domain
 			})
 			ctx, cancel := context.WithCancel(t.Context())
 			done := make(chan error, 1)
@@ -124,12 +132,12 @@ func TestPeerCLIAndGoHub(t *testing.T) {
 			t.Cleanup(func() { cancel(); <-done })
 			return agent, states, cancel
 		}
-		_, aliceStates, stopAlice := start(alice, advertised)
+		_, aliceStates, stopAlice := start(alice, advertised, custom)
 		seen := waitFor(t, aliceStates, func(state overlay.State) bool { return state.Connected })
 		if seen.Name != name || seen.Domain != label+".on.snoo" || seen.IP != ip {
 			t.Fatalf("wrong owner registration: %+v", seen)
 		}
-		watcher, bobStates, _ := start(bob, "Bob")
+		watcher, bobStates, _ := start(bob, "Bob", "")
 		seen = waitFor(t, bobStates, func(state overlay.State) bool { return state.Connected && len(state.Peers) == 1 })
 		if peer := seen.Peers[0]; seen.IP != "10.77.0.2" || peer.ID != aliceID || peer.Name != name || peer.Domain != label+".on.snoo" || peer.IP != ip {
 			t.Fatalf("wrong address or peer roster: %+v", seen)
@@ -139,16 +147,21 @@ func TestPeerCLIAndGoHub(t *testing.T) {
 				t.Fatalf("DNS %s = %s, %v; want %s", lookup, address, err, ip)
 			}
 		}
-		live := func() map[string]managedPeer {
-			out, err := call("", "peers", "connected")
-			var roster struct{ Devices map[string]managedPeer }
+		roster := func(mode string) map[string]managedPeer {
+			out, err := call("", "peers", mode)
+			var roster struct {
+				Devices map[string]managedPeer `json:"devices"`
+			}
 			if err != nil || json.Unmarshal([]byte(out), &roster) != nil {
 				t.Fatalf("live roster: %s (%v)", out, err)
 			}
 			return roster.Devices
 		}
-		if peers := live(); len(peers) != 2 || peers[aliceID].Name != name || peers[aliceID].IP != ip || peers[bobID].Name != "Bob" {
+		if peers := roster("connected"); len(peers) != 2 || !peers[aliceID].Connected || peers[aliceID].Name != name || peers[aliceID].IP != ip || peers[bobID].Name != "Bob" {
 			t.Fatalf("unexpected online peers: %+v", peers)
+		}
+		if peers := roster("managed"); peers[aliceID].Domain != label+".on.snoo" || peers[neverID].Domain != "" {
+			t.Fatalf("unexpected assigned peer domains: %+v", peers)
 		}
 		edit := editJSON(aliceID, "Office Desk", "")
 		if out, err := call(edit, "peers", "check-connected"); err != nil {
@@ -156,21 +169,34 @@ func TestPeerCLIAndGoHub(t *testing.T) {
 		}
 		stopAlice()
 		deadline := time.Now().Add(3 * time.Second)
-		for len(live()) != 1 && time.Now().Before(deadline) {
+		for len(roster("connected")) != 1 && time.Now().Before(deadline) {
 			time.Sleep(10 * time.Millisecond)
 		}
 		if out, err := call(edit, "peers", "check-connected"); err == nil || !strings.Contains(out, "no longer connected") {
 			t.Fatalf("stale edit not rejected: %s", out)
 		}
+		if peers := roster("managed"); len(peers) != 3 || peers[aliceID].Connected || peers[aliceID].Domain != "" || peers[aliceID].Name != name || !peers[bobID].Connected {
+			t.Fatalf("unexpected managed peers after disconnect: %+v", peers)
+		}
+		if out, err := call(edit, "peers", "check-managed"); err != nil {
+			t.Fatalf("cached edit refused: %s", out)
+		}
 	}
 	if !t.Run("automatic pool", func(t *testing.T) {
-		checkHub(t, "Alice", "Alice", "alice", "10.77.0.1")
+		checkHub(t, "Alice", "", "Alice", "alice", "10.77.0.1")
 	}) {
 		return
 	}
 	list(bobID, managedPeer{Name: "Bob", IP: "10.77.0.2"})
+	set(aliceID, "", "", "hub-alice.on.snoo")
+	list(aliceID, managedPeer{Name: "Alice", IP: "10.77.0.1", DomainOverride: "hub-alice.on.snoo"})
+	if !t.Run("hub domain without rename", func(t *testing.T) {
+		checkHub(t, "Alice", "", "Alice", "hub-alice", "10.77.0.1", "alice")
+	}) {
+		return
+	}
 	ips, names, dhcp := readFile("ips.json"), readFile("names.json"), readFile("dhcp.json")
-	set(aliceID, "Office Desk", "10.77.0.5")
+	set(aliceID, "Office Desk", "10.77.0.5", "")
 	list(aliceID, managedPeer{Name: "Office Desk", NameOverride: "Office Desk", IP: "10.77.0.5", Binding: "10.77.0.5"})
 	if !bytes.Equal(ips, readFile("ips.json")) || !bytes.Equal(names, readFile("names.json")) || !bytes.Equal(dhcp, readFile("dhcp.json")) {
 		t.Fatal("peer command rewrote legacy state or durable DNS ownership")
@@ -183,6 +209,8 @@ func TestPeerCLIAndGoHub(t *testing.T) {
 		`null`, `[]`, `{"device_id":"missing","name":"","binding":""}`,
 		fmt.Sprintf(`{"device_id":%q,"name":"","name":"duplicate","binding":""}`, aliceID),
 		fmt.Sprintf(`{"device_id":%q,"name":"","binding":null}`, aliceID),
+		fmt.Sprintf(`{"device_id":%q,"name":"","binding":"","domain":null}`, aliceID),
+		fmt.Sprintf(`{"device_id":%q,"name":"","binding":"","domain":"test.example"}`, aliceID),
 		fmt.Sprintf(`{"device_id":%q,"name":""}`, aliceID),
 		fmt.Sprintf(`{"device_id":%q,"name":"","binding":"","extra":1}`, aliceID),
 		editJSON(aliceID, "", "") + `{}`,
@@ -198,14 +226,42 @@ func TestPeerCLIAndGoHub(t *testing.T) {
 		}
 	}
 	if !t.Run("restart with override", func(t *testing.T) {
-		checkHub(t, "Laptop", "Office Desk", "office-desk", "10.77.0.5", "alice")
+		checkHub(t, "Laptop", "", "Office Desk", "office-desk", "10.77.0.5", "alice")
 	}) {
 		return
 	}
-	set(aliceID, "", "")
+	set(aliceID, "Office Desk", "10.77.0.5", "hub-alice.on.snoo")
+	if !t.Run("device domain takes precedence", func(t *testing.T) {
+		checkHub(t, "Laptop", "laptop.on.snoo", "Office Desk", "laptop", "10.77.0.5", "hub-alice")
+	}) {
+		return
+	}
+	set(aliceID, "", "", "")
 	list(aliceID, managedPeer{Name: "Laptop", IP: "10.77.0.5"})
 	list(bobID, managedPeer{Name: "Bob", IP: "10.77.0.2"})
 	t.Run("restart after clear", func(t *testing.T) {
-		checkHub(t, "New Laptop", "New Laptop", "new-laptop", "10.77.0.5", "alice", "office-desk")
+		checkHub(t, "New Laptop", "", "New Laptop", "new-laptop", "10.77.0.5", "alice", "office-desk")
+	})
+	set(aliceID, "Office Desk", "10.77.0.5", "office.on.snoo")
+	t.Run("expiry on startup", func(t *testing.T) {
+		old := time.Now().Add(-7 * 24 * time.Hour).Unix()
+		assignments := fmt.Sprintf(`{%q:{"ip":"10.77.0.5","seen":%d,"name":"Laptop"},%q:{"ip":"10.77.0.2","seen":%d,"name":"Bob"}}`, aliceID, old, bobID, time.Now().Unix())
+		if err := os.WriteFile(filepath.Join(dir, "ips.json"), []byte(assignments), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cache := fmt.Sprintf(`{%q:{"seen":%d,"domain":"office.on.snoo"}}`, aliceID, old)
+		if err := os.WriteFile(filepath.Join(dir, "peer-cache.json"), []byte(cache), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		startHub(t, binary, "OVERLAY_DATA_DIR="+dir, "OVERLAY_CIDR="+cidr)
+		out, err := call("", "peers", "list")
+		if err != nil || strings.Contains(out, aliceID) || !strings.Contains(out, bobID) {
+			t.Fatalf("startup expiry did not remove only the stale peer: %v %s", err, out)
+		}
+		for _, file := range []string{"ips.json", "names.json", "peer-cache.json", "peers.json"} {
+			if bytes.Contains(readFile(file), []byte(aliceID)) {
+				t.Fatalf("expired peer remains in %s", file)
+			}
+		}
 	})
 }

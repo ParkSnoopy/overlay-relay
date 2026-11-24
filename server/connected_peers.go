@@ -10,22 +10,29 @@ import (
 )
 
 // The manager mounts a private runtime directory for this read-only socket.
-// Nothing about presence is persisted or inferred from an address reservation.
-func (h *hubRuntime) connectedPeers() peerListing {
+// Presence comes only from authenticated control sessions.
+func (h *hubRuntime) managedPeers() peerListing {
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	listing := h.store.listKnownPeers(nil)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	devices := make(map[string]listedPeer, len(h.controls))
+	now := hubUnixNow()
+	for id := range listing.Devices {
+		if h.store.peerPastRetention(id, now) && !h.busyLocked(id) {
+			delete(listing.Devices, id)
+		}
+	}
 	for id, control := range h.controls {
 		if control.ctx.Err() != nil {
 			continue
 		}
-		peer := listedPeer{Name: control.name, IP: control.ip.String(), NameOverride: h.store.peerEdits[id].Name}
-		if ip := h.store.reservations[id]; ip.IsValid() {
-			peer.Binding = ip.String()
-		}
-		devices[id] = peer
+		peer := listing.Devices[id]
+		peer.Name, peer.IP, peer.Connected = control.name, control.ip.String(), true
+		peer.Domain = control.domain
+		listing.Devices[id] = peer
 	}
-	return peerListing{Devices: devices}
+	return listing
 }
 
 func (h *hubRuntime) servePeerSocket(listener net.Listener) {
@@ -35,15 +42,15 @@ func (h *hubRuntime) servePeerSocket(listener net.Listener) {
 			return
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		_ = json.NewEncoder(conn).Encode(h.connectedPeers())
+		_ = writeStoreJSON(conn, h.managedPeers())
 		_ = conn.Close()
 	}
 }
 
-func queryConnectedPeers(path string) (peerListing, error) {
+func queryManagedPeers(path string) (peerListing, error) {
 	var peers peerListing
 	if path == "" {
-		return peers, errors.New("connected peer query is not configured")
+		return peers, errors.New("managed peer query is not configured")
 	}
 	conn, err := net.DialTimeout("unix", path, 5*time.Second)
 	if err != nil {
@@ -51,7 +58,7 @@ func queryConnectedPeers(path string) (peerListing, error) {
 	}
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	err = json.NewDecoder(io.LimitReader(conn, 16<<20)).Decode(&peers)
+	err = json.NewDecoder(io.LimitReader(conn, 32<<20)).Decode(&peers)
 	if err == nil && peers.Devices == nil {
 		err = errors.New("invalid live peer listing")
 	}

@@ -13,7 +13,7 @@ The hub enrolls nobody: each client generates its own P-384 key pair, and a clie
 
 - `OVERLAY_ALLOWED_HOST` is an optional comma-separated list of engine container names. Without it the hub admits every loopback, private or link-local source.
 - `OVERLAY_CIDR` selects a canonical IPv4 `/8` through `/30` subnet wholly within RFC 1918 private space (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), default `10.77.0.0/16`. Clients must configure the same range. Public ranges and supernets crossing private block boundaries are rejected. The administrator owns routing conflicts.
-- `/var/lib/overlay-relay` holds `ips.json`, `rooms.json`, `dhcp.json`, `peers.json`, and `names.json`.
+- `/var/lib/overlay-relay` holds `ips.json`, `rooms.json`, `dhcp.json`, `peers.json`, `peer-cache.json`, and `names.json`.
 
 ## Admission
 
@@ -36,14 +36,16 @@ When either limit is exhausted, a new key can reclaim the oldest idle, unreserve
 
 ## Peer settings and rollback
 
-- The managed editor uses `peers connected`, never the stored registry. A private runtime socket exposes an authenticated control-session snapshot, not saved leases or flow-only connections. `peers check-connected` verifies the target before the manager stops the hub. After restart, confirm the edited identity from persisted settings independently of its reconnect timing.
-- `peers list` reports `{"devices":{"<device-id>":{"name":"","name_override":"","ip":"","binding":""}}}`. These fields are always strings. `name` is the operator override or the last client name, and is empty when neither is known. `ip` is empty without an effective assignment or reservation. `binding` is empty for dynamic addressing.
+- The managed editor uses `peers managed`. A private runtime socket combines the hub's device cache with live controls. Only an authenticated live control sets `connected` to true. `peers check-managed` verifies the target before the manager stops the hub. After restart, confirm the edited identity from persisted settings independently of its reconnect timing. `peers connected` and `peers check-connected` remain available for live-only callers.
+- Live peer listings include `domain` when the control has an assigned DNS name. This is independent of `domain_override`. Omit the live domain for cached or unassigned devices.
+- `peers list` reports `{"devices":{"<device-id>":{"name":"","name_override":"","ip":"","binding":"","domain_override":"","connected":false}}}`. The disk-only listing does not infer connection state. `name` is the operator override or the last client name, and is empty when neither is known. `ip` is empty without an effective assignment or reservation. `binding` is empty for dynamic addressing.
 - The list includes current and offline assignments, devices with a reservation or saved peer edit, and identities recorded only in the DNS ledger after address reclamation. Room-scoped DNS labels prove ownership but do not supply a display name. A device absent from all those stores is not known to the hub.
-- `peers set` takes `device_id`, `name`, and `binding` as required strings in one JSON object, up to 4 KiB. It rejects unknown or repeated fields, unknown device IDs, names over 128 Unicode characters or with control characters or surrounding whitespace, and noncanonical or unusable IPv4 bindings. An address assigned or reserved to another peer is unavailable.
-- Stop the hub and serialize writes. Both changes are saved together in the private `peers.json` file by an atomic replacement. Restart to make them effective. Invalid or unreadable peer settings prevent startup. The CLI also refuses to return or edit a partial registry if the DNS ledger is corrupt.
-- The legacy `dhcp` commands still read and write the historical `dhcp.json` format. Legacy lease durations and unshadowed `device_id` and `public_key` reservations remain effective. The current hub does not allocate from the legacy `start` and `end` pool. A managed device's `binding`, even when empty, wins over its legacy reservation. Clear incompatible effective reservations before changing the CIDR.
-- For an operation rollback, snapshot the complete data directory while stopped. The CLI changes only `peers.json`, but restart and connections can update `ips.json` and `names.json`. Restore the snapshot, including the prior presence or absence of files, before restarting the previous configuration.
-- An older binary ignores `peers.json` and follows its own legacy DHCP policy. Its readers still accept `ips.json`, `dhcp.json`, and `names.json` without a schema migration. Keep `peers.json` for a later re-upgrade. Durable DNS ownership survives both directions.
+- `peers set` takes `device_id`, `name`, and `binding` as required strings and `domain` as an optional string in one JSON object, up to 4 KiB. Omit `domain` to preserve the current override or send `""` to clear it. Nonempty domains must be canonical single labels in `on.snoo`. Unknown or expired devices and bindings in use by another device are rejected.
+- Stop the hub and serialize writes. Name and binding are stored in `peers.json`; detached device records and domain overrides are stored in `peer-cache.json`. Restart to apply changes. Invalid or unreadable peer settings prevent startup. The CLI refuses to list or edit a partial registry if the DNS ledger is corrupt.
+- The legacy `dhcp` commands still read and write the historical `dhcp.json` format. Unshadowed `device_id` and `public_key` reservations remain effective. The hub does not allocate from the legacy `start` and `end` pool. A managed device's `binding`, even when empty, wins over its legacy reservation. Clear incompatible effective reservations before changing the CIDR.
+- A device expires after seven days without authenticated activity unless `dhcp.json` sets a nonzero `lease_seconds`. Live controls and flows protect the device. Expiry removes its records, address, reservations, overrides, and DNS claims. A legacy device known only by a setting or DNS binding starts its retention window when first loaded if no last-seen time exists.
+- For operation rollback, snapshot the full data directory while stopped. Restore the snapshot, including the prior presence or absence of files, before restarting the previous configuration.
+- Older hubs that do not support peer or domain overrides ignore the corresponding sidecar. Keep the sidecars when rolling back so unexpired settings are available on re-upgrade. Legacy assignment, DHCP, and DNS file formats do not change. Expired records are not restored by downgrading.
 
 ## Room-local DNS
 
@@ -54,11 +56,13 @@ When either limit is exhausted, a new key can reclaim the oldest idle, unreserve
   `desk-pc`, and `Bücher` becomes `xn--bcher-kva`. Whitespace and punctuation
   act as separators. Unicode labels use IDNA.
 - The first authenticated registration for a label in a room binds that label
-  to the device's full verifier. Renaming can add a label but never releases
-  an existing binding. Address reclamation does not remove name bindings.
-- Unless an operator override supplies the name, a client may propose a
-  canonical `domain` (e.g. `desk-pc.on.snoo`). The hub
-  returns the assigned domain in the control reply and advertises it in the
+  to the device's full verifier. Renaming and address reclamation do not
+  release previous labels; expiry removes all the device's bindings.
+- A client may set a canonical `domain` (e.g. `desk-pc.on.snoo`) and mark it
+  `domain_explicit` in Hello. An explicit client choice takes precedence over
+  the hub's domain override. With neither one set, use the effective display
+  name. A legacy proposal that differs from the derived label counts as an
+  explicit choice. The hub returns the assigned domain in the reply and the
   room roster. A second device requesting `desk-pc` gets `desk-pc-2` if free;
   already claimed suffixes are skipped. Reconnecting with the same device ID
   and request reuses its claim. The name does not replace the ID in policy.
@@ -73,7 +77,7 @@ When either limit is exhausted, a new key can reclaim the oldest idle, unreserve
 - `names.json` stores room keys, labels, and verifiers without room proofs or
   IPs. The hub atomically saves and syncs new bindings before serving them.
   Preserve this file across upgrades, downgrades and backups. The hub retains
-  up to 16,384 explicit names and never evicts a binding. Corrupt or unwritable
+  up to 16,384 explicit names until their devices expire. Corrupt or unwritable
   storage disables DNS without breaking overlay flows. Repair it and restart
   the hub before resuming DNS.
 - Preserve existing `names.json` bindings when moving from Rust to Go. Do not

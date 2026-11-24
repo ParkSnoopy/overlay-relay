@@ -49,8 +49,8 @@ Put `--cidr` before the subcommand; `--data-dir` is accepted before or after it.
 ## Peer management
 
 `overlay-hub peers list` returns a JSON object keyed by known device IDs under `devices`.
-For the managed editor, `peers connected` instead reads the running hub's control sessions. It requires `OVERLAY_PEER_SOCKET` in a private runtime directory on both processes. `peers check-connected` accepts the proposed edit on stdin and rejects disconnected targets. Neither command falls back to stored leases.
-Each entry has four strings: `name`, `name_override`, `ip`, and `binding`.
+`peers managed` reads connected and cached devices from the running hub. It requires `OVERLAY_PEER_SOCKET` in a private runtime directory on both processes. `peers check-managed` accepts the proposed edit on stdin and rejects unknown or expired targets. `peers connected` and `peers check-connected` are the live-only forms.
+Each entry has `name`, `name_override`, `ip`, `binding`, `domain_override`, and a `connected` boolean.
 Offline devices are included if the hub still knows their identity.
 An identity known only from the DNS ledger has an empty name and address.
 
@@ -58,16 +58,18 @@ Stop the hub before editing and serialize administrative writes.
 Send exactly one JSON object to `overlay-hub peers set`, using an ID from `peers list`:
 
 ```sh
-printf '{"device_id":"%s","name":"Office laptop","binding":"10.77.0.42"}\n' "$device_id" |
+printf '{"device_id":"%s","name":"","binding":"10.77.0.42","domain":"office.on.snoo"}\n' "$device_id" |
   overlay-hub peers set
 ```
 
 Use `"name":""` to clear the override, or `"binding":""` to use dynamic addressing.
+Omit `domain` to leave the domain override unchanged or use `"domain":""` to clear it.
 Restart the hub to apply the change.
 See [peer settings and rollback](../docs/server.md#peer-settings-and-rollback).
 
 `overlay-hub dhcp show`, `dhcp editor`, and `dhcp set` are retained for legacy policy files.
 The current hub uses the full usable CIDR regardless of legacy `start` and `end` fields.
+Inactive devices expire after seven days by default. Set a nonzero `lease_seconds` with `dhcp set` while the hub is stopped to use a different duration. Expiry removes the device's assignments, reservations, overrides, and DNS claims.
 
 ## Room relay policy
 
@@ -99,11 +101,11 @@ There is no account table and no enrollment. A client generates its own P-384 ke
 
 ## Room-local names
 
-An authenticated control registration can claim a normalized device label for its room using its operator-assigned name or the client's proposal.
+An authenticated control registration proposes a room-local label. The device's explicit domain takes priority over a hub domain override, which takes priority over the label derived from the effective display name.
 The hub persists the first owner's identity in `names.json`, not an IP address.
 On collision it assigns a numbered name and advertises the effective domain to the owner and room peers.
 It returns the owner's current IPv4 only while the owner and requester have live controls in the same admitted room.
-Disconnect, room removal, or loss of room membership withdraws the answer without releasing the label.
+Disconnect, room removal, or loss of room membership withdraws the answer without releasing the label. Device expiry releases it.
 The client serves Magic DNS for `device-name.on.snoo`; the hub has no DNS listener.
 See the [name and lookup contract](../docs/server.md#room-local-dns).
 

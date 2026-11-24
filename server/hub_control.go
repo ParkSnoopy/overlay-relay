@@ -61,16 +61,26 @@ func (h *hubRuntime) registerControl(ctx context.Context, id string, ip netip.Ad
 		return nil
 	}
 	label := requestedHubLabel(hello)
-	if label == "" {
+	if label == "" || (hello.DomainExplicit && hello.Domain == "") {
 		return nil
 	}
 	if err := h.store.setName(id, hello.Name); err != nil {
 		return nil
 	}
 	name := hello.Name
+	// Legacy clients don't mark explicit domains. Honor a proposal that
+	// differs from the automatic label as well as an explicitly marked one.
+	custom := hello.DomainExplicit || (hello.Domain != "" && hello.Domain != overlay.DeviceDomain(name))
 	if override := h.store.peerEdits[id].Name; override != "" {
 		name = override
-		label = hubDisplayLabel(override)
+		if !custom {
+			label = hubDisplayLabel(name)
+		}
+	}
+	if !custom {
+		if override := h.store.cache[id].Domain; override != "" {
+			label = overlay.DomainLabel(override)
+		}
 	}
 	if name == "" {
 		name = "peer-" + id[:8]
@@ -100,6 +110,9 @@ func (h *hubRuntime) serveControl(conn net.Conn, control *hubControl, display st
 	defer func() {
 		control.stop()
 		stop()
+		h.registration.Lock()
+		defer h.registration.Unlock()
+		h.store.touch(control.id, hubUnixNow())
 		h.mu.Lock()
 		if h.controls[control.id] == control {
 			delete(h.controls, control.id)
@@ -107,7 +120,6 @@ func (h *hubRuntime) serveControl(conn net.Conn, control *hubControl, display st
 			h.notifyPeersLocked()
 		}
 		h.mu.Unlock()
-		h.store.touch(control.id, hubUnixNow())
 	}()
 	reply := overlay.Reply{
 		OK: true, IP: control.ip.String(), CIDR: h.space.String(), Name: control.name,
@@ -249,6 +261,7 @@ func (h *hubRuntime) readControl(conn net.Conn, control *hubControl) {
 		var event overlay.Event
 		switch {
 		case request.Ping && request.Resolve == nil:
+			h.store.heartbeat(control.id, hubUnixNow())
 			event.Pong = true
 		case !request.Ping && request.Resolve != nil && request.Resolve.ID != 0:
 			answer := h.resolveName(control, *request.Resolve)

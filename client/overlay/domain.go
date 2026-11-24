@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"errors"
 	"strings"
 	"unicode"
 
@@ -9,6 +10,14 @@ import (
 
 // DeviceZone is the room-local suffix, without the DNS root dot.
 const DeviceZone = "on.snoo"
+
+// ValidateDeviceDomain accepts a canonical room-local domain or an empty override.
+func ValidateDeviceDomain(domain string) error {
+	if domain != "" && DomainLabel(domain) == "" {
+		return errors.New("overlay domain must be a valid name ending in .on.snoo")
+	}
+	return nil
+}
 
 var deviceIDNA = idna.New(idna.MapForLookup(), idna.StrictDomainName(false), idna.CheckHyphens(false), idna.BidiRule())
 

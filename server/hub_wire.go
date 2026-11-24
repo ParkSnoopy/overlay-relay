@@ -38,6 +38,7 @@ func readHubHello(r io.Reader) (overlay.Hello, error) {
 		optionalField("version", &version), optionalField("kind", &hello.Kind), optionalField("public_key", &hello.PublicKey),
 		optionalField("room", &hello.Room), optionalField("room_id", &hello.RoomID), optionalField("name", &hello.Name),
 		optionalField("domain", &hello.Domain), optionalField("peer_pages", &hello.PeerPages),
+		optionalField("domain_explicit", &hello.DomainExplicit),
 		optionalField("peer_id", &hello.PeerID), optionalField("proto", &hello.Proto), optionalField("dst", &hello.Dst),
 		nullableField("port", &hello.Port), optionalField("id", &hello.ID),
 		optionalField("fingerprint", &hello.Fingerprint), optionalField("endpoint", &hello.Endpoint))

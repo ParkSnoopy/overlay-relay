@@ -9,6 +9,7 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net"
 	"net/netip"
 	"os"
@@ -69,6 +70,9 @@ func serveHub(ctx context.Context, listener net.Listener, directory string, host
 		return fmt.Errorf("open overlay state: %w", err)
 	}
 	hub := newHubRuntime(store, space, defaultHubTiming())
+	if err := store.expirePeers(hubUnixNow(), nil); err != nil {
+		log.Printf("overlay peer expiry failed: %v", err)
+	}
 	if peerSocket != "" {
 		admin, err := privatePeerListener(peerSocket)
 		if err != nil {
@@ -91,6 +95,7 @@ func (h *hubRuntime) serve(parent context.Context, listener net.Listener, direct
 		workers.Wait()
 	}()
 	workers.Go(func() { h.watchPolicy(ctx, filepath.Join(directory, roomsFile)) })
+	workers.Go(func() { h.watchPeerExpiry(ctx) })
 	for ctx.Err() == nil {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -102,6 +107,24 @@ func (h *hubRuntime) serve(parent context.Context, listener net.Listener, direct
 		workers.Go(func() { h.serveConnection(ctx, conn, hosts) })
 	}
 	return nil
+}
+
+func (h *hubRuntime) watchPeerExpiry(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			h.registration.Lock()
+			err := h.store.expirePeers(hubUnixNow(), h.busy)
+			h.registration.Unlock()
+			if err != nil {
+				log.Printf("overlay peer expiry failed: %v", err)
+			}
+		}
+	}
 }
 
 func hubSourceAdmitted(ctx context.Context, source net.Addr, hosts []string) bool {
@@ -268,6 +291,10 @@ func (h *hubRuntime) authenticate(conn net.Conn, hello *overlay.Hello, domain st
 func (h *hubRuntime) busy(id string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.busyLocked(id)
+}
+
+func (h *hubRuntime) busyLocked(id string) bool {
 	return h.controls[id] != nil || h.activeCount[id] != 0
 }
 

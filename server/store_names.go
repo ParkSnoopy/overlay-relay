@@ -84,8 +84,7 @@ func (n *nameStore) load(dir string) error {
 }
 
 // reserveName assigns a canonical label for the requested base and device in
-// the stable room. Claims are never released, so the same request also finds
-// its earlier binding after disconnect, restart, or a legacy hub rewrite.
+// the stable room. It retains earlier claims until the device expires.
 func (s *hubStore) reserveName(room, base, id string) string {
 	key, _, _ := strings.Cut(room, ":")
 	if !validStoreID(id) || (key != "" && !validStoreID(key)) || !overlay.ValidNameLabel(base) || isAliasLabel(base) {
@@ -156,6 +155,34 @@ func (n *nameStore) insert(room, label, id string) {
 		n.rooms[room] = labels
 	}
 	labels[label] = id
+}
+
+func (n *nameStore) removeDevices(dir string, devices map[string]bool) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.failed {
+		return errNamesUnavailable
+	}
+	rows := make([]nameBinding, 0, n.count)
+	for _, room := range slices.Sorted(maps.Keys(n.rooms)) {
+		for _, label := range slices.Sorted(maps.Keys(n.rooms[room])) {
+			if owner := n.rooms[room][label]; !devices[owner] {
+				rows = append(rows, nameBinding{Room: room, Label: label, Device: owner})
+			}
+		}
+	}
+	if len(rows) == n.count {
+		return nil
+	}
+	if err := saveStoreJSON(filepath.Join(dir, namesFile), ".names-", rows, true); err != nil {
+		return err
+	}
+	clear(n.rooms)
+	for _, row := range rows {
+		n.insert(row.Room, row.Label, row.Device)
+	}
+	n.count = len(rows)
+	return nil
 }
 
 // nameOwner rechecks private admission independently of relay permission. A
